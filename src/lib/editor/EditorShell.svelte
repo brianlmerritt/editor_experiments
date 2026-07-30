@@ -10,6 +10,7 @@
   import * as Y from 'yjs';
   import type { Suggestion } from '$lib/domain';
   import { suggestionPlugin, pushSuggestionState, currentSuggestionRange } from './suggestion-plugin';
+  import { planDocumentDeletion } from './deletion';
 
   export let branchId = 'main';
   export let suggestions: Suggestion[] = [];
@@ -151,15 +152,24 @@
     if (current !== suggestion.anchor.text) return { ok: false, reason: 'Anchored text changed' };
     yUndoPluginKey.getState(view.state)?.undoManager?.stopCapturing();
     let transaction = view.state.tr;
+    let acceptedFrom = range.from;
+    let acceptedText = text;
     if (text) transaction = transaction.replaceWith(range.from, range.to, schema.text(text));
-    else transaction = transaction.delete(range.from, range.to);
+    else {
+      const deletion = planDocumentDeletion(view.state.doc, range.from, range.to);
+      acceptedFrom = deletion.from;
+      acceptedText = deletion.insert;
+      transaction = deletion.insert
+        ? transaction.replaceWith(deletion.from, deletion.to, schema.text(deletion.insert))
+        : transaction.delete(deletion.from, deletion.to);
+    }
     transaction.setMeta('suggestionOrigin', { suggestionId: suggestion.id, source: suggestion.source });
     transaction.setMeta('addToHistory', true);
     view.dispatch(transaction);
     lastAcceptanceOrigin = { suggestionId: suggestion.id, source: suggestion.source };
     lastChangeWasAcceptance = true;
     yUndoPluginKey.getState(view.state)?.undoManager?.stopCapturing();
-    return { ok: true, from: range.from, to: range.from + text.length };
+    return { ok: true, from: acceptedFrom, to: acceptedFrom + acceptedText.length };
   }
   export function focusSuggestion(suggestion: Suggestion): void {
     if (!view) return;
@@ -217,7 +227,7 @@
   :global(.mn-cat-distance) { --category-color: var(--cat-distance); }
   :global(.mn-suggestion.is-active) { background: color-mix(in srgb, var(--category-color) 19%, transparent); text-decoration-thickness: 2px; }
   :global(.mn-suggestion.is-previewing) { color: transparent; text-decoration: none; background: color-mix(in srgb, var(--category-color) 5%, transparent); }
-  :global(.mn-preview-text) { color: var(--ink); background: color-mix(in srgb, var(--category-color) 13%, var(--paper)); border-bottom: 2px solid var(--category-color); }
+  :global(.mn-preview-text) { color: var(--ink); background: color-mix(in srgb, var(--category-color) 13%, var(--paper)); border-bottom: 2px solid var(--category-color); white-space: pre; }
   :global(.mn-variant-chip) { position: relative; top: -8px; margin: 0 2px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper-deep); color: var(--muted); font: 700 9px/1 var(--font-ui); padding: 3px 5px; cursor: pointer; }
   :global(.mn-paragraph-note) { border-left: 2px solid color-mix(in srgb, var(--category-color, var(--accent)) 55%, transparent); padding-left: 14px; margin-left: -16px !important; }
 </style>

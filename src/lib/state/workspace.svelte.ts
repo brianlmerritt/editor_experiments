@@ -1,4 +1,4 @@
-import { categories, sourceCatalog, makeId, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
@@ -144,9 +144,18 @@ export class WorkspaceState {
       if (!response.ok) throw new Error(`Suggestion request failed (${response.status})`);
       const data = await response.json() as { suggestions: Suggestion[]; errors: { source: string; message: string }[] };
       if (data.errors.length) this.notice = data.errors.map((item) => `${item.source}: ${item.message}`).join(' · ');
-      this.suggestions = [...this.suggestions.filter((suggestion) => suggestion.state !== 'stale'), ...data.suggestions];
+      const coalesced = coalesceDuplicateSuggestions([...this.suggestions, ...data.suggestions]);
+      this.suggestions = coalesced.suggestions;
+      for (const { duplicate, canonical } of coalesced.suppressed) {
+        await this.log('duplicate_suppressed', {
+          duplicateOf: canonical.id,
+          source: duplicate.source,
+          category: duplicate.category,
+          anchor: [duplicate.anchor.from, duplicate.anchor.to]
+        }, duplicate.id);
+      }
       await this.refreshLedger();
-      return data.suggestions;
+      return data.suggestions.filter((suggestion) => this.suggestions.some((item) => item.id === suggestion.id && (item.state === 'pending' || item.state === 'hidden')));
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return [];
       this.lastError = error instanceof Error ? error.message : 'Suggestion request failed';

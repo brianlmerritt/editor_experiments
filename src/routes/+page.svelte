@@ -3,7 +3,7 @@
   import EditorShell from '$lib/editor/EditorShell.svelte';
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
-  import { categories, categoryMeta, makeId, sourceCatalog, wordCount, type Branch, type Suggestion, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type Suggestion, type WritingBrief } from '$lib/domain';
   import { workspace } from '$lib/state/workspace.svelte';
 
   let editor: EditorShell;
@@ -63,10 +63,17 @@
   }
 
   function refreshLiveSuggestions(): void {
+    const seen = new Set<string>();
     liveSuggestions = workspace.mode === 'drafting' ? [] : workspace.suggestions
       .filter((suggestion) => suggestion.state === 'pending')
       .filter((suggestion) => workspace.categoryVisibility[suggestion.category])
       .filter((suggestion) => workspace.sourceStates[suggestion.source] === 'visible')
+      .filter((suggestion) => {
+        const fingerprint = suggestionFingerprint(suggestion);
+        if (seen.has(fingerprint)) return false;
+        seen.add(fingerprint);
+        return true;
+      })
       .sort((a, b) => a.order - b.order)
       .slice(0, workspace.densityCap);
     queuedCount = Math.max(0, workspace.suggestions.filter((suggestion) => suggestion.state === 'pending').length - liveSuggestions.length);

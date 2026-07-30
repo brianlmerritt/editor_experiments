@@ -134,8 +134,12 @@ export function getBranches(): Branch[] {
 
 export function reviewPairs(): JudgmentPair[] {
   const generated = database.prepare("SELECT suggestion_id, payload FROM events WHERE type IN ('suggestion_generated', 'generated_hidden') ORDER BY id DESC").all() as Pick<EventRow, 'suggestion_id' | 'payload'>[];
+  const suppressedIds = new Set((database.prepare("SELECT suggestion_id FROM events WHERE type = 'duplicate_suppressed'").all() as Pick<EventRow, 'suggestion_id'>[])
+    .map((row) => row.suggestion_id)
+    .filter((id): id is string => Boolean(id)));
   const pairs: JudgmentPair[] = [];
   for (const row of generated) {
+    if (row.suggestion_id && suppressedIds.has(row.suggestion_id)) continue;
     const suggestion = (JSON.parse(row.payload) as { suggestion?: Suggestion }).suggestion;
     if (!suggestion || !row.suggestion_id) continue;
     const candidates = suggestion.variants.length ? suggestion.variants : suggestion.payload.text ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];

@@ -58,7 +58,7 @@ export const eventTypes = [
   'expired_on_brief_change', 'human_edit_session', 'mode_switch', 'paused', 'resumed',
   'source_state_changed', 'arrived_after_off', 'brief_updated', 'prompt_updated',
   'branch_forked', 'branch_switched', 'reverted', 'source_tooltip_hovered',
-  'judgment_recorded', 'suggestions_requested', 'markdown_exported'
+  'judgment_recorded', 'suggestions_requested', 'duplicate_suppressed', 'markdown_exported'
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 
@@ -140,4 +140,64 @@ export function makeId(prefix: string): string {
 
 export function wordCount(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function normalizedSuggestionText(value: string | undefined): string {
+  return (value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+/** Stable identity for the substance of a suggestion, excluding generated IDs and telemetry. */
+export function suggestionFingerprint(suggestion: Suggestion): string {
+  const variantTexts = suggestion.variants.map((variant) => normalizedSuggestionText(variant.text)).sort();
+  return JSON.stringify([
+    suggestion.source,
+    suggestion.category,
+    suggestion.type,
+    suggestion.anchor.from,
+    suggestion.anchor.to,
+    normalizedSuggestionText(suggestion.anchor.text),
+    normalizedSuggestionText(suggestion.payload.comment),
+    normalizedSuggestionText(suggestion.payload.text),
+    variantTexts
+  ]);
+}
+
+export interface SuppressedDuplicate {
+  duplicate: Suggestion;
+  canonical: Suggestion;
+}
+
+/**
+ * Keeps one live suggestion for each fingerprint. Resolved decisions win over a
+ * repeated pending suggestion so a new pass does not nag the writer again.
+ */
+export function coalesceDuplicateSuggestions(items: Suggestion[]): { suggestions: Suggestion[]; suppressed: SuppressedDuplicate[] } {
+  const suggestions = items.map((suggestion) => ({ ...suggestion }));
+  const canonicalByFingerprint = new Map<string, number>();
+  const suppressed: SuppressedDuplicate[] = [];
+  const isLive = (state: SuggestionState) => state === 'pending' || state === 'hidden';
+  const isResolved = (state: SuggestionState) => state === 'accepted' || state === 'rejected';
+
+  for (let index = 0; index < suggestions.length; index += 1) {
+    const current = suggestions[index];
+    if (!isLive(current.state) && !isResolved(current.state)) continue;
+    const fingerprint = suggestionFingerprint(current);
+    const canonicalIndex = canonicalByFingerprint.get(fingerprint);
+    if (canonicalIndex === undefined) {
+      canonicalByFingerprint.set(fingerprint, index);
+      continue;
+    }
+
+    const canonical = suggestions[canonicalIndex];
+    if (isResolved(current.state) && isLive(canonical.state)) {
+      suggestions[canonicalIndex] = { ...canonical, state: 'superseded' };
+      suppressed.push({ duplicate: canonical, canonical: current });
+      canonicalByFingerprint.set(fingerprint, index);
+    } else if (isLive(current.state)) {
+      suggestions[index] = { ...current, state: 'superseded' };
+      suppressed.push({ duplicate: current, canonical });
+    }
+  }
+
+  return { suggestions, suppressed };
 }

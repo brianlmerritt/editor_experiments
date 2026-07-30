@@ -3,6 +3,7 @@ import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 import { ySyncPluginKey, relativePositionToAbsolutePosition } from 'y-prosemirror';
 import * as Y from 'yjs';
 import type { Suggestion } from '$lib/domain';
+import { planDocumentDeletion } from './deletion';
 
 export const suggestionPluginKey = new PluginKey<SuggestionPluginState>('margin-note-suggestions');
 export const suggestionPluginMeta = 'margin-note:update-suggestions';
@@ -42,12 +43,14 @@ function buildDecorations(state: Parameters<typeof ySyncPluginKey.getState>[0], 
     if (!range) continue;
     const active = pluginState.activeId === suggestion.id;
     const preview = pluginState.preview?.suggestionId === suggestion.id ? pluginState.preview : null;
+    const deletionPreview = preview?.text === '' ? planDocumentDeletion(state.doc, range.from, range.to) : null;
+    const renderedRange = deletionPreview ? { from: deletionPreview.from, to: deletionPreview.to } : range;
     const attrs = {
       class: `mn-suggestion mn-cat-${suggestion.category} mn-type-${suggestion.type}${active ? ' is-active' : ''}${preview ? ' is-previewing' : ''}`,
       'data-suggestion-id': suggestion.id,
       'data-category': suggestion.category
     };
-    if (range.from < range.to) decorations.push(Decoration.inline(range.from, range.to, attrs, { suggestionId: suggestion.id }));
+    if (renderedRange.from < renderedRange.to) decorations.push(Decoration.inline(renderedRange.from, renderedRange.to, attrs, { suggestionId: suggestion.id }));
     if (suggestion.type === 'annotation') {
       const $pos = state.doc.resolve(Math.min(range.from, state.doc.content.size));
       const paragraphStart = $pos.before(Math.max(1, $pos.depth));
@@ -67,10 +70,10 @@ function buildDecorations(state: Parameters<typeof ySyncPluginKey.getState>[0], 
       }, { side: 1, suggestionId: suggestion.id }));
     }
     if (preview) {
-      decorations.push(Decoration.widget(range.from, () => {
+      decorations.push(Decoration.widget(renderedRange.from, () => {
         const ghost = document.createElement('span');
         ghost.className = `mn-preview-text mn-cat-${suggestion.category}`;
-        ghost.textContent = preview.text || '⌫';
+        ghost.textContent = deletionPreview ? deletionPreview.insert : preview.text;
         return ghost;
       }, { side: -1, suggestionId: suggestion.id }));
     }
