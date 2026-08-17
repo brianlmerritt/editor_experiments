@@ -1,4 +1,4 @@
-import { Plugin, PluginKey } from 'prosemirror-state';
+import { Plugin, PluginKey, TextSelection } from 'prosemirror-state';
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 import { ySyncPluginKey, relativePositionToAbsolutePosition } from 'y-prosemirror';
 import * as Y from 'yjs';
@@ -58,17 +58,6 @@ function buildDecorations(state: Parameters<typeof ySyncPluginKey.getState>[0], 
         decorations.push(Decoration.node(paragraphStart, paragraphStart + $pos.parent.nodeSize, { class: `mn-paragraph-note mn-paragraph-${suggestion.category}` }, { suggestionId: suggestion.id }));
       }
     }
-    if (suggestion.variants.length > 1) {
-      decorations.push(Decoration.widget(range.to, () => {
-        const chip = document.createElement('button');
-        chip.type = 'button';
-        chip.className = 'mn-variant-chip';
-        chip.dataset.suggestionId = suggestion.id;
-        chip.textContent = `${suggestion.variants.length}`;
-        chip.setAttribute('aria-label', `${suggestion.variants.length} variants`);
-        return chip;
-      }, { side: 1, suggestionId: suggestion.id }));
-    }
     if (preview) {
       decorations.push(Decoration.widget(renderedRange.from, () => {
         const ghost = document.createElement('span');
@@ -108,6 +97,24 @@ export function suggestionPlugin(options: SuggestionPluginOptions): Plugin<Sugge
         })?.id;
         if (!hit) return false;
         options.onActivate(hit);
+        view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, position)));
+        view.focus();
+        return false;
+      },
+      handleDoubleClick(view: EditorView, position: number, event: MouseEvent) {
+        const hit = (event.target as HTMLElement).closest<HTMLElement>('[data-suggestion-id]')?.dataset.suggestionId;
+        if (!hit) return false;
+        const $position = view.state.doc.resolve(position);
+        const text = $position.parent.textContent;
+        let from = Math.min($position.parentOffset, Math.max(0, text.length - 1));
+        let to = from;
+        const wordCharacter = (character: string | undefined) => Boolean(character && /[\p{L}\p{N}'’_-]/u.test(character));
+        while (from > 0 && wordCharacter(text[from - 1])) from -= 1;
+        while (to < text.length && wordCharacter(text[to])) to += 1;
+        if (from === to) return false;
+        options.onActivate(hit);
+        view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, $position.start() + from, $position.start() + to)));
+        view.focus();
         return true;
       },
       handleDOMEvents: {

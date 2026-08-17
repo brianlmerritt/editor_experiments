@@ -4,6 +4,9 @@ Margin Note is a meta-first creative writing support POC. The draft is persisted
 local Yjs document, suggestions are ProseMirror decorations that never mutate it, and
 every meaningful interaction is appended to a SQLite ledger.
 
+The deliberately small façade and adaptable Codex direction are described in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Run it
 
 Requirements: Node 22+.
@@ -23,7 +26,7 @@ For a quick tour:
 3. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, `E`, and
    `X` for keyboard review.
 4. Open **Ledger** to verify the instrumentation.
-5. Visit **Judge** to record blind pairwise judgments from generated suggestions.
+5. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
 
 ## Optional providers
 

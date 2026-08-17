@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categories, categoryMeta, coalesceDuplicateSuggestions, eventTypes, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Suggestion } from './domain';
+import { categories, categoryMeta, coalesceDuplicateSuggestions, eventTypes, makeId, reconcileSuggestionAnchors, sourceCatalog, suggestionFingerprint, wordCount, type Suggestion } from './domain';
 
 function suggestion(overrides: Partial<Suggestion> = {}): Suggestion {
   return {
@@ -58,5 +58,33 @@ describe('domain contracts', () => {
     const result = coalesceDuplicateSuggestions([rejected, repeated]);
     expect(result.suggestions[1].state).toBe('superseded');
     expect(result.suppressed[0].canonical.id).toBe('sg_rejected');
+  });
+
+  it('recognizes a repeated note after preceding edits move its live anchor', () => {
+    const anchored = suggestion({ anchor: { from: 20, to: 27, text: 'noticed', start: { item: 'start' }, end: { item: 'end' } } });
+    const repeated = suggestion({ id: 'sg_shifted', anchor: { from: 8, to: 15, text: 'noticed' } });
+
+    expect(suggestionFingerprint(anchored)).not.toBe(suggestionFingerprint(repeated));
+    const rebased = reconcileSuggestionAnchors([anchored], () => ({ from: 8, to: 15, text: 'noticed' }));
+    const result = coalesceDuplicateSuggestions([...rebased.suggestions, repeated]);
+
+    expect(result.suggestions.map((item) => item.state)).toEqual(['pending', 'superseded']);
+  });
+
+  it('expires a live note as soon as a human edit changes its anchored text', () => {
+    const current = suggestion();
+    const result = reconcileSuggestionAnchors([current], () => ({ from: 4, to: 12, text: 'rewritten' }));
+
+    expect(result.suggestions[0].state).toBe('stale');
+    expect(result.expired).toEqual([current]);
+  });
+
+  it('rebases a live note without expiring it when only preceding text changed', () => {
+    const current = suggestion();
+    const result = reconcileSuggestionAnchors([current], () => ({ from: 14, to: 21, text: 'noticed' }));
+
+    expect(result.suggestions[0].state).toBe('pending');
+    expect(result.suggestions[0].anchor).toMatchObject({ from: 14, to: 21, text: 'noticed' });
+    expect(result.expired).toEqual([]);
   });
 });

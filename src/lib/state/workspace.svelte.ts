@@ -1,4 +1,5 @@
-import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, reconcileSuggestionAnchors as reconcileAnchors, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { workspaceFacade, type MarkdownExport, type WorkspaceFacade } from '$lib/workspace/facade';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
@@ -26,6 +27,9 @@ export class WorkspaceState {
   lastError = $state<string | null>(null);
   sourceClickAt = $state<Record<string, number>>({});
   private dispatches = new Map<string, AbortController>();
+  private initialized = false;
+
+  constructor(private readonly facade: WorkspaceFacade = workspaceFacade) {}
 
   get pendingCount(): number {
     return this.suggestions.filter((suggestion) => suggestion.state === 'pending' || suggestion.state === 'hidden').length;
@@ -46,25 +50,24 @@ export class WorkspaceState {
   }
 
   async initialize(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
     if (typeof localStorage !== 'undefined') {
       this.sessionId = localStorage.getItem('margin-note:session') ?? makeId('session');
       localStorage.setItem('margin-note:session', this.sessionId);
       this.branchId = localStorage.getItem('margin-note:branch') ?? 'main';
     }
     try {
-      const [settings, branches, events] = await Promise.all([
-        fetch('/api/settings').then((response) => response.json()),
-        fetch('/api/branches').then((response) => response.json()),
-        fetch('/api/events?limit=45').then((response) => response.json())
-      ]);
-      this.brief = settings.brief;
-      this.prompts = settings.prompts;
-      this.branches = branches.branches;
-      this.ledger = events.events;
-      this.costUsd = events.stats.costUsd;
+      const loaded = await this.facade.load();
+      this.brief = loaded.brief;
+      this.prompts = loaded.prompts;
+      this.branches = loaded.branches;
+      this.ledger = loaded.events;
+      this.costUsd = loaded.stats.costUsd;
       if (!this.branches.some((branch) => branch.id === this.branchId)) this.branchId = 'main';
       await this.log('session_started', { userAgent: navigator.userAgent, resumedSession: this.ledger.some((event) => event.sessionId === this.sessionId) });
     } catch (error) {
+      this.initialized = false;
       this.lastError = error instanceof Error ? error.message : 'Could not initialize workspace';
     } finally {
       this.loading = false;
@@ -74,17 +77,15 @@ export class WorkspaceState {
   async log(type: LedgerEvent['type'], payload: Record<string, unknown>, suggestionId?: string): Promise<void> {
     const event: LedgerEvent = { type, sessionId: this.sessionId, branchId: this.branchId, suggestionId, payload };
     try {
-      const response = await fetch('/api/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event) });
-      if (!response.ok) throw new Error(`Ledger write failed (${response.status})`);
-      const data = await response.json();
-      this.ledger = [data.event, ...this.ledger].slice(0, 60);
+      const saved = await this.facade.appendEvent(event);
+      this.ledger = [saved, ...this.ledger].slice(0, 60);
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : 'Ledger write failed';
     }
   }
 
   async refreshLedger(): Promise<void> {
-    const data = await fetch('/api/events?limit=45').then((response) => response.json());
+    const data = await this.facade.events();
     this.ledger = data.events;
     this.costUsd = data.stats.costUsd;
   }
@@ -140,20 +141,9 @@ export class WorkspaceState {
     await this.log('suggestions_requested', { range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
       const request: GenerationRequest = { ...input, sessionId: this.sessionId, branchId: this.branchId, brief: this.brief, sourceStates: { ...this.sourceStates }, mode: this.mode };
-      const response = await fetch('/api/suggest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), signal: controller.signal });
-      if (!response.ok) throw new Error(`Suggestion request failed (${response.status})`);
-      const data = await response.json() as { suggestions: Suggestion[]; errors: { source: string; message: string }[] };
+      const data = await this.facade.suggestions(request, controller.signal);
       if (data.errors.length) this.notice = data.errors.map((item) => `${item.source}: ${item.message}`).join(' · ');
-      const coalesced = coalesceDuplicateSuggestions([...this.suggestions, ...data.suggestions]);
-      this.suggestions = coalesced.suggestions;
-      for (const { duplicate, canonical } of coalesced.suppressed) {
-        await this.log('duplicate_suppressed', {
-          duplicateOf: canonical.id,
-          source: duplicate.source,
-          category: duplicate.category,
-          anchor: [duplicate.anchor.from, duplicate.anchor.to]
-        }, duplicate.id);
-      }
+      await this.coalesceSuggestions([...this.suggestions, ...data.suggestions]);
       await this.refreshLedger();
       return data.suggestions.filter((suggestion) => this.suggestions.some((item) => item.id === suggestion.id && (item.state === 'pending' || item.state === 'hidden')));
     } catch (error) {
@@ -169,6 +159,21 @@ export class WorkspaceState {
   activate(id: string | null): void { this.activeSuggestionId = id; }
   setPreview(suggestionId: string, text: string): void { this.preview = { suggestionId, text }; }
   clearPreview(): void { this.preview = null; }
+
+  async reconcileSuggestionAnchors(resolve: (suggestion: Suggestion) => { from: number; to: number; text: string } | null): Promise<void> {
+    const reconciled = reconcileAnchors(this.suggestions, resolve);
+    const expiredIds = new Set(reconciled.expired.map((suggestion) => suggestion.id));
+    if (this.activeSuggestionId && expiredIds.has(this.activeSuggestionId)) this.activeSuggestionId = null;
+    if (this.preview && expiredIds.has(this.preview.suggestionId)) this.preview = null;
+    await this.coalesceSuggestions(reconciled.suggestions);
+    for (const suggestion of reconciled.expired) {
+      await this.log('stale_after_edit', {
+        expected: suggestion.anchor.text,
+        source: suggestion.source,
+        category: suggestion.category
+      }, suggestion.id);
+    }
+  }
 
   async resolveSuggestion(id: string, state: 'accepted' | 'rejected' | 'stale', eventType: LedgerEvent['type'], payload: Record<string, unknown> = {}): Promise<void> {
     const suggestion = this.suggestions.find((item) => item.id === id);
@@ -197,8 +202,7 @@ export class WorkspaceState {
   async saveBrief(next: WritingBrief): Promise<void> {
     const previous = this.brief;
     this.brief = { ...next, version: previous.version + 1 };
-    const response = await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'brief', value: this.brief, sessionId: this.sessionId, branchId: this.branchId }) });
-    if (!response.ok) throw new Error('Could not save brief');
+    await this.facade.saveBrief(this.brief, this.sessionId, this.branchId);
     const stale = this.suggestions.filter((suggestion) => suggestion.state === 'pending' && suggestion.provenance.briefVersion < this.brief.version);
     this.suggestions = this.suggestions.map((suggestion) => stale.some((item) => item.id === suggestion.id) ? { ...suggestion, state: 'stale' } : suggestion);
     for (const suggestion of stale) await this.log('expired_on_brief_change', { fromVersion: previous.version, toVersion: this.brief.version }, suggestion.id);
@@ -209,14 +213,18 @@ export class WorkspaceState {
     const current = this.prompts.find((prompt) => prompt.id === next.id);
     const value = { ...next, version: (current?.version ?? 0) + 1 };
     this.prompts = this.prompts.map((prompt) => prompt.id === value.id ? value : prompt);
-    await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'prompt', value, sessionId: this.sessionId, branchId: this.branchId }) });
+    await this.facade.savePrompt(value, this.sessionId, this.branchId);
     await this.refreshLedger();
   }
 
   async addBranch(branch: Branch): Promise<void> {
-    const response = await fetch('/api/branches', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...branch, sessionId: this.sessionId }) });
-    const data = await response.json();
-    this.branches = data.branches;
+    this.branches = await this.facade.createBranch(branch, this.sessionId);
+  }
+
+  async exportMarkdown(markdown: string, title?: string): Promise<MarkdownExport> {
+    const result = await this.facade.exportMarkdown({ markdown, title, sessionId: this.sessionId, branchId: this.branchId });
+    await this.refreshLedger();
+    return result;
   }
 
   async switchBranch(id: string): Promise<void> {
@@ -226,6 +234,19 @@ export class WorkspaceState {
     localStorage.setItem('margin-note:branch', id);
     this.suggestions = [];
     await this.log('branch_switched', { from: previous, to: id });
+  }
+
+  private async coalesceSuggestions(items: Suggestion[]): Promise<void> {
+    const coalesced = coalesceDuplicateSuggestions(items);
+    this.suggestions = coalesced.suggestions;
+    for (const { duplicate, canonical } of coalesced.suppressed) {
+      await this.log('duplicate_suppressed', {
+        duplicateOf: canonical.id,
+        source: duplicate.source,
+        category: duplicate.category,
+        anchor: [duplicate.anchor.from, duplicate.anchor.to]
+      }, duplicate.id);
+    }
   }
 }
 

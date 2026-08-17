@@ -16,10 +16,13 @@
   let sentinelInstruction = '';
   let editTimer: ReturnType<typeof setTimeout> | null = null;
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let editSession = { started: 0, characters: 0, text: '' };
   let editorReady = false;
   let documentText = '';
   let cardTops: Record<string, number> = {};
+  let cardsHeight = 0;
+  let cardsElement: HTMLDivElement;
   let undoDismiss: { suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null = null;
   let liveSuggestions: Suggestion[] = [];
   let queuedCount = 0;
@@ -44,22 +47,36 @@
       window.removeEventListener('scroll', relayout);
       if (editTimer) clearTimeout(editTimer);
       if (scanTimer) clearTimeout(scanTimer);
+      if (noticeTimer) clearTimeout(noticeTimer);
     };
   });
 
   $: if (liveSuggestions.length && editorReady) void tick().then(layoutCards);
 
   function layoutCards(): void {
-    if (!editor || workspace.surface !== 'docked') return;
+    if (!editor || !cardsElement || workspace.surface !== 'docked') return;
+    const measuredHeights = new Map(
+      Array.from(cardsElement.querySelectorAll<HTMLElement>('.card-slot'))
+        .map((slot) => [slot.dataset.suggestionId ?? '', slot.offsetHeight])
+    );
     const next: Record<string, number> = {};
     let floor = 18;
     for (const suggestion of liveSuggestions) {
       const anchored = editor.getSuggestionTop?.(suggestion) ?? floor;
       const top = Math.max(floor, anchored);
       next[suggestion.id] = top;
-      floor = top + (suggestion.variants.length > 1 ? 218 : 150);
+      const measuredHeight = measuredHeights.get(suggestion.id);
+      const fallbackHeight = suggestion.variants.length ? 218 : 150;
+      floor = top + (measuredHeight || fallbackHeight) + 20;
     }
     cardTops = next;
+    cardsHeight = floor;
+  }
+
+  function observeCard(node: HTMLElement): { destroy: () => void } {
+    const observer = new ResizeObserver(() => layoutCards());
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
   }
 
   function refreshLiveSuggestions(): void {
@@ -77,6 +94,21 @@
       .sort((a, b) => a.order - b.order)
       .slice(0, workspace.densityCap);
     queuedCount = Math.max(0, workspace.suggestions.filter((suggestion) => suggestion.state === 'pending').length - liveSuggestions.length);
+  }
+
+  function showNotice(message: string): void {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    workspace.notice = message;
+    noticeTimer = setTimeout(() => {
+      if (workspace.notice === message) workspace.notice = null;
+      noticeTimer = null;
+    }, 4000);
+  }
+
+  function dismissNotice(): void {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = null;
+    workspace.notice = null;
   }
 
   async function changeMode(mode: 'drafting' | 'revising'): Promise<void> {
@@ -109,6 +141,10 @@
       editorReady = true;
       return;
     }
+    if (editor) {
+      void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
+      refreshLiveSuggestions();
+    }
     if (detail.origin) return;
     const now = Date.now();
     if (!editSession.started) editSession.started = now;
@@ -126,6 +162,7 @@
 
   async function runSentinels(): Promise<void> {
     if (!editor || !selectedPrompt || workspace.paused) return;
+    await workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
     const paragraphs = editor.getParagraphs();
     const results = await Promise.all(paragraphs.map((paragraph) => workspace.requestSuggestions({ ...paragraph, prompt: selectedPrompt }, `${workspace.branchId}:${paragraph.from}:${paragraph.to}`)));
     const incoming = results.flat();
@@ -139,7 +176,9 @@
       const relative = editor.getRelativeAnchor(suggestion.anchor.from, suggestion.anchor.to);
       workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
     }
-    if (workspace.mode === 'drafting' && valid.size) workspace.notice = `${workspace.pendingCount} notes waiting quietly`;
+    if (workspace.mode === 'drafting') showNotice(valid.size
+      ? `${valid.size} new ${valid.size === 1 ? 'note' : 'notes'} added.`
+      : 'Craft pass complete; no new notes.');
     refreshLiveSuggestions();
     await tick();
     layoutCards();
@@ -147,6 +186,7 @@
 
   async function runSelection(promptId: string): Promise<void> {
     if (!selection.text.trim()) return;
+    await workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
     const prompt = workspace.prompts.find((item) => item.id === promptId) ?? { id: promptId, name: promptId, version: 1, instruction: `Offer a ${promptId} revision.` };
     const incoming = await workspace.requestSuggestions({ text: selection.text, from: selection.from, to: selection.to, prompt }, `${workspace.branchId}:selection:${selection.from}:${selection.to}`);
     for (const suggestion of incoming) {
@@ -154,14 +194,24 @@
       workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
     }
     if (workspace.mode === 'drafting') await changeMode('revising');
-    if (incoming[0]) activate(incoming[0].id);
+    else {
+      refreshLiveSuggestions();
+      await tick();
+      layoutCards();
+    }
+    if (incoming[0]) void activateCard(incoming[0].id);
   }
 
-  function activate(id: string): void {
+  function activateFromEditor(id: string): void {
     workspace.activate(id);
-    const suggestion = workspace.suggestions.find((item) => item.id === id);
-    if (suggestion) editor?.focusSuggestion(suggestion);
     void tick().then(layoutCards);
+  }
+
+  async function activateCard(id: string): Promise<void> {
+    workspace.activate(id);
+    await tick();
+    cardsElement?.querySelector<HTMLElement>(`.card-slot[data-suggestion-id="${id}"] .card`)?.focus({ preventScroll: true });
+    layoutCards();
   }
 
   function chooseVariant(id: string, index: number): void {
@@ -173,18 +223,27 @@
     const variants = suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
     const variant = variants[index];
     if (!variant) return;
+    if (variant.text === suggestion.anchor.text) {
+      await workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', { reason: 'no_op_replacement' });
+      refreshLiveSuggestions();
+      showNotice('That option matched the current text, so nothing was applied.');
+      return;
+    }
     workspace.clearPreview();
     const result = editor.acceptSuggestion(suggestion, variant.text);
     if (!result.ok) {
       await workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', { reason: result.reason });
-      workspace.notice = 'That note expired because its text changed.';
+      showNotice('That note expired because its text changed.');
       return;
     }
     const eventType = edit ? 'accepted_then_edited' : viaKeyboard ? 'accepted_via_keyboard' : 'accepted_via_tick';
     await workspace.resolveSuggestion(suggestion.id, 'accepted', eventType, { variantId: variant.id, replacement: variant.text });
     await workspace.supersedeSiblings(suggestion, variant.id);
     refreshLiveSuggestions();
-    if (edit && result.to != null) editor.focusAt(result.to);
+    if (edit && result.from != null && result.to != null) {
+      if (variant.text) editor.selectRange(result.from, result.to);
+      else editor.focusAt(result.to);
+    }
   }
 
   async function reject(suggestion: Suggestion, viaDrag: boolean): Promise<void> {
@@ -215,7 +274,7 @@
     if (event.key === 'Tab') {
       event.preventDefault();
       index = index < 0 ? 0 : (index + (event.shiftKey ? -1 : 1) + list.length) % list.length;
-      activate(list[index].id);
+      void activateCard(list[index].id);
       return;
     }
     const current = list[index < 0 ? 0 : index];
@@ -233,7 +292,7 @@
     const prompt = workspace.prompts.find((item) => item.id === 'sentinel');
     if (prompt && sentinelInstruction !== prompt.instruction) await workspace.savePrompt({ ...prompt, instruction: sentinelInstruction });
     settingsOpen = false;
-    workspace.notice = `Brief v${workspace.brief.version} saved; older notes expired.`;
+    showNotice(`Brief v${workspace.brief.version} saved; older notes expired.`);
   }
 
   async function forkBranch(): Promise<void> {
@@ -247,15 +306,13 @@
   }
 
   async function exportMarkdown(): Promise<void> {
-    const response = await fetch('/api/export', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ markdown: editor.getText(), title: workspace.branches.find((branch) => branch.id === workspace.branchId)?.name, sessionId: workspace.sessionId, branchId: workspace.branchId }) });
-    const blob = await response.blob();
-    const href = URL.createObjectURL(blob);
+    const result = await workspace.exportMarkdown(editor.getText(), workspace.branches.find((branch) => branch.id === workspace.branchId)?.name);
+    const href = URL.createObjectURL(result.blob);
     const anchor = document.createElement('a');
     anchor.href = href;
-    anchor.download = response.headers.get('content-disposition')?.match(/filename="(.+)"/)?.[1] ?? 'draft.md';
+    anchor.download = result.filename;
     anchor.click();
     URL.revokeObjectURL(href);
-    await workspace.refreshLedger();
   }
 </script>
 
@@ -271,7 +328,7 @@
     <div class="top-actions">
       <button class:paused={isPaused} on:click={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
       <button on:click={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
-      <a href="/review">Judge</a>
+      <a href="/review">Compare</a>
       <button on:click={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
     </div>
   </header>
@@ -313,7 +370,7 @@
               paused={isPaused}
               onTextChange={textChanged}
               onSelectionChange={(detail) => selection = detail}
-              onSuggestionActivate={activate}
+              onSuggestionActivate={activateFromEditor}
               onSuggestionHover={(id) => workspace.activate(id)}
               onUndoAcceptance={(origin) => workspace.log('reverted', { source: origin.source }, origin.suggestionId)}
             />
@@ -322,10 +379,10 @@
           {#if selection.text && !workspace.paused}
             <div class="selection-menu">
               <span>{selection.text.split(/\s+/).length}w selected</span>
-              <button on:click={() => runSelection('heighten')}>Heighten</button>
-              <button on:click={() => runSelection('cadence')}>Vary cadence</button>
-              <button on:click={() => runSelection('distance')}>More distant</button>
-              <button on:click={() => runSelection('synonyms')}>Synonyms</button>
+              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('heighten')}>Heighten</button>
+              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('cadence')}>Vary cadence</button>
+              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('distance')}>More distant</button>
+              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('synonyms')}>Synonyms</button>
             </div>
           {/if}
         </div>
@@ -356,18 +413,28 @@
             <div><span>{workspace.surface === 'docked' ? 'Margin' : 'Triage tray'}</span><strong>{liveSuggestions.length} live</strong></div>
             {#if queuedCount}<small>+{queuedCount} queued by density cap</small>{/if}
           </header>
-          <div class="cards" class:docked={workspace.surface === 'docked'}>
+          <div
+            class="cards"
+            class:docked={workspace.surface === 'docked'}
+            bind:this={cardsElement}
+            style={workspace.surface === 'docked' ? `min-height:max(68vh, ${cardsHeight}px)` : ''}
+          >
             {#if !liveSuggestions.length}
               <div class="empty-notes"><span>✓</span><p>No visible notes.</p><small>Run a craft pass, change filters, or bring an invisible source back.</small></div>
             {/if}
             {#each liveSuggestions as suggestion}
-              <div class="card-slot" style={workspace.surface === 'docked' ? `top:${cardTops[suggestion.id] ?? 18}px` : ''}>
+              <div
+                class="card-slot"
+                data-suggestion-id={suggestion.id}
+                use:observeCard
+                style={workspace.surface === 'docked' ? `top:${cardTops[suggestion.id] ?? 18}px` : ''}
+              >
                 <SuggestionCard
                   {suggestion}
                   active={workspace.activeSuggestionId === suggestion.id}
                   tray={workspace.surface === 'tray'}
                   selectedVariant={selectedVariants[suggestion.id] ?? 0}
-                  onActivate={() => activate(suggestion.id)}
+                  onActivate={() => void activateCard(suggestion.id)}
                   onSelectVariant={(index) => chooseVariant(suggestion.id, index)}
                   onAccept={(index, edit) => accept(suggestion, index, edit)}
                   onReject={(viaDrag) => reject(suggestion, viaDrag)}
@@ -378,9 +445,9 @@
               </div>
             {/each}
           </div>
-          {#if liveSuggestions.length}<p class="key-help"><kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>E</kbd> accept/edit · <kbd>X</kbd> reject</p>{/if}
+          {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>E</kbd> accept/edit · <kbd>X</kbd> reject</p>{/if}
         </aside>
-        <aside class="drafting-aside" class:mode-hidden={workspace.mode === 'revising'}>
+        <aside class="drafting-aside" class:mode-hidden={workspace.mode === 'revising'} aria-live="polite">
           <span class="quiet-count">{workspace.pendingCount}</span>
           <p>{workspace.pendingCount === 1 ? 'note is' : 'notes are'} waiting quietly.</p>
           <button on:click={() => changeMode('revising')}>Open revision margin</button>
@@ -392,7 +459,7 @@
   </main>
 
   <div class="pause-banner" class:mode-hidden={!isPaused}><b>Paused</b> — editing, dispatch timers, and provider spend are suspended.</div>
-  {#if workspace.notice}<button class="notice" on:click={() => workspace.notice = null}>{workspace.notice}<span>×</span></button>{/if}
+  {#if workspace.notice}<button class="notice" on:click={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
   {#if workspace.lastError}<button class="error" on:click={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
   {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button on:click={undoDragDismiss}>Undo</button></div>{/if}
 

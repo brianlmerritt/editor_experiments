@@ -52,6 +52,7 @@
   class:active
   class:tray
   class:dragging
+  tabindex="-1"
   style:transform={`translateX(${dragX}px)`}
   on:pointerdown={pointerDown}
   on:pointermove={pointerMove}
@@ -109,6 +110,7 @@
 <style>
   .card { --category: var(--cat-diction); position: relative; width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-left: 4px solid var(--category); border-radius: 3px; background: color-mix(in srgb, var(--paper) 96%, var(--category)); padding: 13px 13px 10px; box-shadow: 0 7px 25px rgb(32 27 20 / .06); cursor: pointer; touch-action: pan-y; transition: transform .18s ease, opacity .18s ease, box-shadow .18s ease; user-select: none; }
   .card.active { box-shadow: 0 12px 32px rgb(32 27 20 / .14); border-color: color-mix(in srgb, var(--category) 48%, var(--line)); }
+  .card:focus-visible { outline: 2px solid color-mix(in srgb, var(--category) 70%, var(--ink)); outline-offset: 2px; }
   .card.dragging { transition: none; cursor: grabbing; }
   .cat-pov { --category: var(--cat-pov); } .cat-tense { --category: var(--cat-tense); } .cat-canon { --category: var(--cat-canon); } .cat-cadence { --category: var(--cat-cadence); } .cat-diction { --category: var(--cat-diction); } .cat-distance { --category: var(--cat-distance); }
   header, footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

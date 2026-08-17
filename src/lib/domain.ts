@@ -55,7 +55,7 @@ export const eventTypes = [
   'session_started', 'suggestion_generated', 'generated_hidden', 'suggestion_shown',
   'accepted_via_tick', 'accepted_via_keyboard', 'accepted_then_edited', 'rejected',
   'dismissed_via_drag', 'dismiss_undone', 'superseded_by', 'stale_on_arrival',
-  'expired_on_brief_change', 'human_edit_session', 'mode_switch', 'paused', 'resumed',
+  'stale_after_edit', 'expired_on_brief_change', 'human_edit_session', 'mode_switch', 'paused', 'resumed',
   'source_state_changed', 'arrived_after_off', 'brief_updated', 'prompt_updated',
   'branch_forked', 'branch_switched', 'reverted', 'source_tooltip_hovered',
   'judgment_recorded', 'suggestions_requested', 'duplicate_suppressed', 'markdown_exported'
@@ -160,6 +160,26 @@ export function suggestionFingerprint(suggestion: Suggestion): string {
     normalizedSuggestionText(suggestion.payload.text),
     variantTexts
   ]);
+}
+
+export function reconcileSuggestionAnchors(
+  items: Suggestion[],
+  resolve: (suggestion: Suggestion) => { from: number; to: number; text: string } | null
+): { suggestions: Suggestion[]; expired: Suggestion[] } {
+  const expired: Suggestion[] = [];
+  const suggestions = items.map((suggestion) => {
+    if (suggestion.state !== 'pending' && suggestion.state !== 'hidden') return suggestion;
+    const current = resolve(suggestion);
+    if (!current) {
+      expired.push(suggestion);
+      return { ...suggestion, state: 'stale' as const };
+    }
+    const rebased = { ...suggestion, anchor: { ...suggestion.anchor, from: current.from, to: current.to } };
+    if (current.text === suggestion.anchor.text) return rebased;
+    expired.push(suggestion);
+    return { ...rebased, state: 'stale' as const };
+  });
+  return { suggestions, expired };
 }
 
 export interface SuppressedDuplicate {

@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { Branch, LedgerEvent, WritingBrief, TaskPrompt, Suggestion, JudgmentPair } from '$lib/domain';
+import type { Branch, LedgerEvent, WritingBrief, TaskPrompt, JudgmentPair } from '$lib/domain';
+import { buildReviewQueue } from '$lib/review-queue';
 
 const databasePath = process.env.LEDGER_PATH ?? resolve('data/writing-ledger.sqlite');
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -101,7 +102,9 @@ export function getPrompts(): TaskPrompt[] {
   return [
     { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag POV, tense, canon, cadence, diction, and distance issues. Prefer precise observations over rewrites.' },
     { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten the selected passage without adding unsupported facts.' },
-    { id: 'cadence', name: 'Vary cadence', version: 1, instruction: 'Offer alternatives with more varied sentence rhythm.' }
+    { id: 'cadence', name: 'Vary cadence', version: 1, instruction: 'Offer alternatives with more varied sentence rhythm.' },
+    { id: 'distance', name: 'More distant', version: 1, instruction: 'Offer alternatives at a more observational narrative distance.' },
+    { id: 'synonyms', name: 'Synonyms', version: 1, instruction: 'Offer contextually appropriate alternatives for the selected wording.' }
   ];
 }
 
@@ -132,28 +135,14 @@ export function getBranches(): Branch[] {
   return [...seen.values()];
 }
 
-export function reviewPairs(): JudgmentPair[] {
-  const generated = database.prepare("SELECT suggestion_id, payload FROM events WHERE type IN ('suggestion_generated', 'generated_hidden') ORDER BY id DESC").all() as Pick<EventRow, 'suggestion_id' | 'payload'>[];
-  const suppressedIds = new Set((database.prepare("SELECT suggestion_id FROM events WHERE type = 'duplicate_suppressed'").all() as Pick<EventRow, 'suggestion_id'>[])
-    .map((row) => row.suggestion_id)
-    .filter((id): id is string => Boolean(id)));
-  const pairs: JudgmentPair[] = [];
-  for (const row of generated) {
-    if (row.suggestion_id && suppressedIds.has(row.suggestion_id)) continue;
-    const suggestion = (JSON.parse(row.payload) as { suggestion?: Suggestion }).suggestion;
-    if (!suggestion || !row.suggestion_id) continue;
-    const candidates = suggestion.variants.length ? suggestion.variants : suggestion.payload.text ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
-    if (!candidates.length) continue;
-    pairs.push({
-      id: `pair_${row.suggestion_id}`,
-      suggestionId: row.suggestion_id,
-      category: suggestion.category,
-      brief: getBrief(),
-      left: { id: 'original', text: suggestion.anchor.text },
-      right: { id: candidates[0].id, text: candidates[0].text }
-    });
-  }
-  return pairs.slice(0, 50);
+export function reviewPairs(sessionId?: string, branchId?: string): JudgmentPair[] {
+  const rows = database.prepare(`
+    SELECT * FROM events
+    WHERE (@sessionId IS NULL OR session_id = @sessionId)
+      AND (@branchId IS NULL OR branch_id = @branchId)
+    ORDER BY id DESC
+  `).all({ sessionId: sessionId ?? null, branchId: branchId ?? null }) as EventRow[];
+  return buildReviewQueue(rows.map(hydrate), getBrief());
 }
 
 export function ledgerStats() {

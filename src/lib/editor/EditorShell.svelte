@@ -93,7 +93,7 @@
               onTextChange({ text, characters, origin });
             }
           }
-          if (transaction.selectionSet) notifySelection();
+          if (transaction.docChanged || transaction.selectionSet) notifySelection();
         }
       });
       lastText = plainText();
@@ -120,6 +120,11 @@
   export function getText(): string { return plainText(); }
   export function getTextBetween(from: number, to: number): string {
     return view?.state.doc.textBetween(from, to, '\n') ?? '';
+  }
+  export function resolveSuggestionAnchor(suggestion: Suggestion): { from: number; to: number; text: string } | null {
+    if (!view) return null;
+    const range = currentSuggestionRange(view, suggestion);
+    return range ? { ...range, text: view.state.doc.textBetween(range.from, range.to, '\n') } : null;
   }
   export function getParagraphs(): { from: number; to: number; text: string }[] {
     if (!view) return [];
@@ -163,6 +168,8 @@
         ? transaction.replaceWith(deletion.from, deletion.to, schema.text(deletion.insert))
         : transaction.delete(deletion.from, deletion.to);
     }
+    const caret = Math.max(1, Math.min(acceptedFrom + acceptedText.length, transaction.doc.content.size));
+    transaction = transaction.setSelection(TextSelection.create(transaction.doc, caret));
     transaction.setMeta('suggestionOrigin', { suggestionId: suggestion.id, source: suggestion.source });
     transaction.setMeta('addToHistory', true);
     view.dispatch(transaction);
@@ -191,6 +198,14 @@
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, safe)).scrollIntoView());
     view.focus();
   }
+  export function selectRange(from: number, to: number): void {
+    if (!view) return;
+    const max = view.state.doc.content.size;
+    const safeFrom = Math.max(1, Math.min(from, max));
+    const safeTo = Math.max(safeFrom, Math.min(to, max));
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, safeFrom, safeTo)).scrollIntoView());
+    view.focus();
+  }
   export async function forkTo(targetBranchId: string): Promise<void> {
     if (!ydoc) throw new Error('Editor is not ready');
     const copy = new Y.Doc();
@@ -215,7 +230,7 @@
   .is-paused .editor { opacity: .72; }
   :global(.ProseMirror) { box-sizing: border-box; min-height: 68vh; padding: 64px clamp(40px, 8vw, 104px) 120px; outline: none; color: var(--ink); font-family: var(--font-reading); font-size: clamp(18px, 1.5vw, 21px); line-height: 1.82; caret-color: var(--accent); }
   :global(.ProseMirror p) { position: relative; margin: 0 0 1.2em; }
-  :global(.mn-suggestion) { cursor: pointer; border-radius: 2px; text-decoration-line: underline; text-decoration-thickness: 1.5px; text-underline-offset: 4px; background: color-mix(in srgb, var(--category-color) 9%, transparent); }
+  :global(.mn-suggestion) { cursor: text; border-radius: 2px; text-decoration-line: underline; text-decoration-thickness: 1.5px; text-underline-offset: 4px; background: color-mix(in srgb, var(--category-color) 9%, transparent); }
   :global(.mn-type-annotation) { text-decoration-style: dotted; }
   :global(.mn-type-replacement) { text-decoration-style: solid; }
   :global(.mn-cat-pov), :global(.mn-cat-tense), :global(.mn-cat-canon) { text-decoration-style: wavy; }
@@ -228,6 +243,5 @@
   :global(.mn-suggestion.is-active) { background: color-mix(in srgb, var(--category-color) 19%, transparent); text-decoration-thickness: 2px; }
   :global(.mn-suggestion.is-previewing) { color: transparent; text-decoration: none; background: color-mix(in srgb, var(--category-color) 5%, transparent); }
   :global(.mn-preview-text) { color: var(--ink); background: color-mix(in srgb, var(--category-color) 13%, var(--paper)); border-bottom: 2px solid var(--category-color); white-space: pre; }
-  :global(.mn-variant-chip) { position: relative; top: -8px; margin: 0 2px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper-deep); color: var(--muted); font: 700 9px/1 var(--font-ui); padding: 3px 5px; cursor: pointer; }
   :global(.mn-paragraph-note) { border-left: 2px solid color-mix(in srgb, var(--category-color, var(--accent)) 55%, transparent); padding-left: 14px; margin-left: -16px !important; }
 </style>

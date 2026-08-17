@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { categoryMeta, categories, makeId, type Category, type JudgmentPair } from '$lib/domain';
+  import { workspaceFacade } from '$lib/workspace/facade';
 
   let pairs: JudgmentPair[] = [];
   let index = 0;
@@ -8,17 +9,34 @@
   let loading = true;
   let completed = 0;
   let sessionId = 'judge_pending';
+  let branchId = 'main';
+  let refreshing = false;
+  let loadError = '';
+  let lastRefreshed = '';
+  let presentedPairId = '';
   let presentation: { left: JudgmentPair['left']; right: JudgmentPair['right']; swapped: boolean } | null = null;
 
   $: pair = pairs[index];
-  $: if (pair) presentation = randomize(pair);
+  $: if (pair && pair.id !== presentedPairId) {
+    presentation = randomize(pair);
+    presentedPairId = pair.id;
+  }
+  $: if (!pair) {
+    presentation = null;
+    presentedPairId = '';
+  }
 
-  onMount(async () => {
+  onMount(() => {
     sessionId = localStorage.getItem('margin-note:session') ?? makeId('judge');
-    const response = await fetch('/api/review');
-    const data = await response.json();
-    pairs = data.pairs;
-    loading = false;
+    branchId = localStorage.getItem('margin-note:branch') ?? 'main';
+    const refresh = () => void refreshPairs();
+    void refreshPairs(true);
+    window.addEventListener('focus', refresh);
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      window.clearInterval(timer);
+    };
   });
 
   function randomize(item: JudgmentPair) {
@@ -26,56 +44,90 @@
     return { left: swapped ? item.right : item.left, right: swapped ? item.left : item.right, swapped };
   }
 
+  async function refreshPairs(initial = false): Promise<void> {
+    if (refreshing) return;
+    refreshing = true;
+    if (initial) loading = true;
+    const currentId = pair?.id;
+    try {
+      const next = await workspaceFacade.reviewPairs({ sessionId, branchId });
+      pairs = next;
+      const preserved = currentId ? next.findIndex((item) => item.id === currentId) : -1;
+      index = preserved >= 0 ? preserved : Math.min(index, Math.max(0, next.length - 1));
+      if (!currentId || preserved < 0) presentedPairId = '';
+      lastRefreshed = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      loadError = '';
+    } catch (error) {
+      loadError = error instanceof Error ? error.message : 'Could not refresh comparisons';
+    } finally {
+      refreshing = false;
+      loading = false;
+    }
+  }
+
   async function choose(side: 'left' | 'right'): Promise<void> {
     if (!pair || !presentation) return;
     const winner = presentation[side].id;
-    await fetch('/api/review', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        pairId: pair.id,
-        suggestionId: pair.suggestionId,
-        winner,
-        reason,
-        category: pair.category,
-        sessionId,
-        branchId: 'main',
-        presentationOrder: [presentation.left.id, presentation.right.id]
-      })
+    await workspaceFacade.recordJudgment({
+      pairId: pair.id,
+      suggestionId: pair.suggestionId,
+      winner,
+      reason,
+      category: pair.category,
+      sessionId,
+      branchId,
+      presentationOrder: [presentation.left.id, presentation.right.id]
     });
     reason = '';
     completed += 1;
-    index += 1;
+    pairs = pairs.filter((item) => item.id !== pair.id);
+    index = Math.min(index, Math.max(0, pairs.length - 1));
+    presentedPairId = '';
   }
 
-  function skip(): void { reason = ''; index += 1; }
+  function navigate(direction: -1 | 1): void {
+    index = Math.max(0, Math.min(index + direction, pairs.length - 1));
+    reason = '';
+    presentedPairId = '';
+  }
 </script>
 
-<svelte:head><title>Blind review — Margin Note</title></svelte:head>
+<svelte:head><title>Suggestion comparison — Margin Note</title></svelte:head>
 
 <header class="topbar">
   <a href="/"><span>¶</span><strong>Margin Note</strong></a>
-  <div><small>Blind pairwise judge</small><b>{completed} recorded</b></div>
+  <div><small>Suggestion evaluation</small><b>{pairs.length} pending · {completed} recorded this visit</b></div>
   <a class="back" href="/">Back to draft</a>
 </header>
 
 <main>
+  <section class="purpose">
+    <div><b>What this does</b><p>Compare an unresolved suggestion with the original wording, without source labels, to measure suggestion quality. Choosing A or B records a research judgment; it does not alter the draft.</p></div>
+    <div class="refresh"><small>{lastRefreshed ? `Current session and branch · refreshed ${lastRefreshed}` : 'Current session and branch'}</small><button disabled={refreshing} on:click={() => refreshPairs()}>{refreshing ? 'Refreshing…' : 'Refresh queue'}</button></div>
+  </section>
+  {#if loadError}<p class="load-error">{loadError}</p>{/if}
   {#if loading}
-    <section class="empty"><span class="spinner"></span><p>Building blind pairs from the ledger…</p></section>
+    <section class="empty"><span class="spinner"></span><p>Building the current comparison queue…</p></section>
   {:else if !pair}
     <section class="empty done">
       <span>✓</span>
-      <h1>{completed ? 'Review pass complete' : 'No pairs yet'}</h1>
-      <p>{completed ? `${completed} raw judgments were written to the ledger.` : 'Generate suggestions in the writing workbench first. Before/after pairs will appear here automatically.'}</p>
+      <h1>No unresolved comparisons</h1>
+      <p>{completed ? `${completed} ${completed === 1 ? 'judgment was' : 'judgments were'} recorded this visit.` : 'Generate replacement suggestions in the writing workbench. This queue refreshes automatically while open.'}</p>
       <a href="/">Return to the draft</a>
     </section>
   {:else if presentation}
     <section class="review-head">
       <div>
-        <small>Pair {index + 1} of {pairs.length}</small>
+        <small>Comparison {index + 1} of {pairs.length}</small>
         <h1>Which passage better serves the brief?</h1>
       </div>
-      <span class="category cat-{pair.category}"><i>{categoryMeta[pair.category].icon}</i>{categoryMeta[pair.category].label}</span>
+      <div class="review-tools">
+        <span class="category cat-{pair.category}"><i>{categoryMeta[pair.category].icon}</i>{categoryMeta[pair.category].label}</span>
+        <nav aria-label="Comparison navigation">
+          <button disabled={index === 0} on:click={() => navigate(-1)}>← Previous</button>
+          <button disabled={index === pairs.length - 1} on:click={() => navigate(1)}>Next →</button>
+        </nav>
+      </div>
     </section>
 
     <section class="brief">
@@ -104,7 +156,6 @@
     <section class="reason">
       <label for="reason">Optional one-line reason <span>qualitative gold</span></label>
       <input id="reason" bind:value={reason} placeholder="A keeps the viewpoint closer without over-explaining…" on:keydown={(event) => { if (event.key === 'ArrowLeft' && event.metaKey) void choose('left'); if (event.key === 'ArrowRight' && event.metaKey) void choose('right'); }} />
-      <button on:click={skip}>Skip this pair</button>
     </section>
 
     <section class="rubric">
@@ -125,7 +176,18 @@
   .topbar b { color: var(--ink-soft); font-size: 10px; }
   .back { justify-self: end; color: var(--ink-soft); font-size: 10px; }
   main { width: min(1080px, calc(100% - 40px)); margin: 0 auto; padding: 48px 0 80px; }
+  .purpose { display: flex; justify-content: space-between; gap: 30px; margin-bottom: 30px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--paper) 60%, transparent); }
+  .purpose > div:first-child { max-width: 700px; }
+  .purpose b { font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .09em; }
+  .purpose p { margin: 6px 0 0; color: var(--ink-soft); font: 11px/1.5 var(--font-ui); }
+  .refresh { display: grid; justify-items: end; align-content: center; gap: 7px; min-width: 230px; }
+  .refresh small { color: var(--muted); font: 9px/1.3 var(--font-ui); }
+  .refresh button, .review-tools nav button { border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 9px; font: 600 9px/1 var(--font-ui); cursor: pointer; }
+  .refresh button:disabled, .review-tools nav button:disabled { opacity: .4; cursor: default; }
+  .load-error { border-left: 3px solid var(--reject); padding: 8px 10px; color: var(--reject); font: 11px/1.4 var(--font-ui); }
   .review-head { display: flex; justify-content: space-between; align-items: end; }
+  .review-tools { display: grid; justify-items: end; gap: 10px; }
+  .review-tools nav { display: flex; gap: 6px; }
   .review-head small { color: var(--muted); font: 600 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .1em; }
   h1 { margin: 8px 0 0; font: 500 27px/1.2 var(--font-reading); }
   .category { --category: var(--cat-diction); display: flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--category) 35%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--category) 8%, var(--paper)); padding: 7px 10px; color: var(--ink-soft); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
@@ -150,12 +212,11 @@
   .comparison footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 11px 14px; border-top: 1px solid var(--line); color: var(--accent); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .07em; }
   kbd { border: 1px solid var(--line-strong); border-radius: 3px; padding: 3px 5px; background: var(--paper-deep); color: var(--muted); font: 9px/1 var(--font-mono); }
   .or { position: absolute; z-index: 2; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; background: #eeeae1; color: var(--muted); font: italic 10px/1 var(--font-reading); }
-  .reason { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: 20px; }
+  .reason { display: grid; gap: 7px; margin-top: 20px; }
   .reason label { grid-column: 1 / -1; color: var(--ink-soft); font: 600 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .07em; }
   .reason label span { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
   .reason input { border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink); padding: 11px 12px; outline: none; font-size: 11px; }
   .reason input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-  .reason button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--muted); padding: 0 13px; font-size: 9px; cursor: pointer; }
   .rubric { display: flex; align-items: center; gap: 9px; margin-top: 24px; color: var(--muted); font: 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
   .rubric i { border-radius: 999px; background: var(--paper-deep); padding: 5px 7px; font-style: normal; opacity: .6; }
   .rubric i.focus { background: var(--accent-soft); color: var(--accent); opacity: 1; font-weight: 700; }
@@ -166,5 +227,5 @@
   .empty a { border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); padding: 9px 13px; color: var(--ink-soft); font-size: 10px; }
   .spinner { border-top-color: var(--accent) !important; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 700px) { .comparison { grid-template-columns: 1fr; } .or { top: 50%; } dl { grid-template-columns: 1fr; } dl div { border-right: 0; border-bottom: 1px solid var(--line); } }
+  @media (max-width: 700px) { .purpose, .review-head { align-items: stretch; flex-direction: column; } .refresh, .review-tools { justify-items: start; } .comparison { grid-template-columns: 1fr; } .or { top: 50%; } dl { grid-template-columns: 1fr; } dl div { border-right: 0; border-bottom: 1px solid var(--line); } }
 </style>

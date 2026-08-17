@@ -15,15 +15,19 @@ interface DraftSuggestion {
 
 function suggestionFromDraft(draft: DraftSuggestion, request: GenerationRequest, source: string, sourceNumber: number, sourceKind: 'local' | 'ai', latencyMs: number, costUsd = 0): Suggestion {
   const id = makeId('sg');
-  const variants: SuggestionVariant[] = (draft.variants ?? (draft.replacement ? [draft.replacement] : [])).map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, draft.confidence - index * 0.04) }));
+  const anchorText = request.text.slice(draft.from - request.from, draft.to - request.from);
+  const candidates = draft.variants ?? (draft.replacement !== undefined ? [draft.replacement] : []);
+  const effective = [...new Set(candidates)].filter((text) => text !== anchorText);
+  const variants: SuggestionVariant[] = effective.map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, draft.confidence - index * 0.04) }));
+  const type = draft.type === 'replacement' && !variants.length ? 'annotation' : draft.type;
   return {
     id,
     source,
     sourceNumber,
     sourceKind,
-    anchor: { from: draft.from, to: draft.to, text: request.text.slice(draft.from - request.from, draft.to - request.from) },
-    type: draft.type,
-    payload: { text: draft.replacement, comment: draft.comment },
+    anchor: { from: draft.from, to: draft.to, text: anchorText },
+    type,
+    payload: { text: variants[0]?.text, comment: draft.comment },
     category: draft.category,
     confidence: draft.confidence,
     variants,
@@ -38,6 +42,59 @@ function suggestionFromDraft(draft: DraftSuggestion, request: GenerationRequest,
       costUsd
     }
   };
+}
+
+const selectionWords: Record<string, Record<string, string[]>> = {
+  heighten: {
+    noticed: ['saw', 'observed'],
+    felt: ['sensed', 'detected'],
+    looked: ['stared', 'gazed'],
+    said: ['insisted', 'murmured'],
+    saw: ['glimpsed', 'took in'],
+    heard: ['caught', 'made out']
+  },
+  synonyms: {
+    noticed: ['observed', 'registered'],
+    felt: ['sensed', 'experienced'],
+    looked: ['gazed', 'glanced'],
+    said: ['replied', 'remarked'],
+    saw: ['observed', 'glimpsed'],
+    heard: ['caught', 'detected']
+  },
+  distance: {
+    noticed: ['observed', 'perceived'],
+    felt: ['experienced', 'was conscious of'],
+    looked: ['gazed', 'glanced'],
+    saw: ['observed', 'perceived'],
+    heard: ['detected', 'could make out']
+  }
+};
+
+function matchInitialCase(source: string, replacement: string): string {
+  return /^[A-Z]/.test(source) ? replacement[0].toUpperCase() + replacement.slice(1) : replacement;
+}
+
+function selectionVariants(text: string, promptId: string): string[] {
+  if (promptId === 'cadence') {
+    if (text.trim().split(/\s+/).length < 4) return [];
+    const conjunctionPivot = /,\s+(and|but|yet)\s+/i;
+    if (!conjunctionPivot.test(text)) return [];
+    const candidates = [
+      text.replace(conjunctionPivot, (_match, conjunction: string) => `. ${conjunction[0].toUpperCase()}${conjunction.slice(1)} `),
+      text.replace(conjunctionPivot, (_match, conjunction: string) => ` — ${conjunction.toLowerCase()} `)
+    ];
+    return [...new Set(candidates)].filter((candidate) => candidate !== text);
+  }
+
+  const choices = selectionWords[promptId];
+  if (!choices) return [];
+  for (const [word, alternatives] of Object.entries(choices)) {
+    const pattern = new RegExp(`\\b${word}\\b`, 'i');
+    const match = pattern.exec(text);
+    if (!match) continue;
+    return alternatives.map((alternative) => text.replace(pattern, matchInitialCase(match[0], alternative)));
+  }
+  return [];
 }
 
 function localChecks(request: GenerationRequest): DraftSuggestion[] {
@@ -115,18 +172,19 @@ function scriptedChecks(request: GenerationRequest): DraftSuggestion[] {
   const leading = firstSentence.indexOf(trimmed);
 
   if (request.prompt.id !== 'sentinel') {
-    const replacement = request.prompt.id === 'cadence'
-      ? trimmed.replace(/,\s+/g, '. ').replace(/\bvery\b/gi, '')
-      : trimmed.replace(/\b(looked|went|said)\b/gi, (word) => ({ looked: 'studied', went: 'crossed', said: 'murmured' }[word.toLowerCase()] ?? word));
-    const alternative = trimmed.replace(/\b(very|really|just)\s+/gi, '').replace(/\s+/g, ' ');
+    const variants = selectionVariants(trimmed, request.prompt.id);
+    const category = request.prompt.id === 'cadence' ? 'cadence' : request.prompt.id === 'distance' ? 'distance' : 'diction';
+    const noAlternative = request.prompt.id === 'cadence' && trimmed.split(/\s+/).length < 4
+      ? 'Cadence needs a phrase or sentence. Select at least four words.'
+      : `${request.prompt.name} found no safe replay alternative. Widen the selection or enable an AI source.`;
     findings.push({
       from: offset + leading,
       to: offset + leading + trimmed.length,
-      type: 'replacement',
-      category: request.prompt.id === 'cadence' ? 'cadence' : 'diction',
-      comment: `${request.prompt.name} pass: two restrained alternatives, preserving the passage's facts.`,
-      replacement: replacement || trimmed,
-      variants: [...new Set([replacement || trimmed, alternative || trimmed])],
+      type: variants.length ? 'replacement' : 'annotation',
+      category,
+      comment: variants.length ? `${request.prompt.name} pass: two distinct alternatives, preserving the passage's facts.` : noAlternative,
+      replacement: variants[0],
+      variants,
       confidence: 0.72
     });
     return findings;
@@ -161,7 +219,7 @@ function scriptedChecks(request: GenerationRequest): DraftSuggestion[] {
 
 function assemblePrompt(request: GenerationRequest): string {
   const canon = request.brief.canon.slice(0, 6000);
-  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. Do not rewrite unless useful.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
+  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. For a replacement, provide two or three distinct alternatives in variants; none may equal the selected source text. If there is no useful change, return an annotation or no suggestion instead of a no-op replacement.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
 }
 
 async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number }> {
