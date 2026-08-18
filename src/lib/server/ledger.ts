@@ -73,6 +73,15 @@ export function tailEvents(limit = 40, branchId?: string): Required<LedgerEvent>
   return (rows as EventRow[]).map(hydrate);
 }
 
+export function suggestionHistory(branchId: string): Required<LedgerEvent>[] {
+  const rows = database.prepare(`
+    SELECT * FROM events
+    WHERE branch_id = ? AND suggestion_id IS NOT NULL
+    ORDER BY id DESC
+  `).all(branchId) as EventRow[];
+  return rows.map(hydrate);
+}
+
 function latestPayload<T>(type: LedgerEvent['type']): T | null {
   const row = database.prepare('SELECT payload FROM events WHERE type = ? ORDER BY id DESC LIMIT 1').get(type) as { payload: string } | undefined;
   return row ? (JSON.parse(row.payload) as T) : null;

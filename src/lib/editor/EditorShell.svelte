@@ -13,6 +13,7 @@
   import { planDocumentDeletion } from './deletion';
 
   export let branchId = 'main';
+  export let initialContent = '';
   export let suggestions: Suggestion[] = [];
   export let activeSuggestionId: string | null = null;
   export let preview: { suggestionId: string; text: string } | null = null;
@@ -34,8 +35,6 @@
   let lastAcceptanceOrigin: { suggestionId: string; source: string } | null = null;
   let lastChangeWasAcceptance = false;
 
-  const starter = `The rain had stopped before Mara reached the station. She noticed the platform clock was running seven minutes slow, and she felt an old unease return.\n\nThe porter was standing beneath the awning, turning a brass key slowly between his fingers. “You came,” he said quietly.\n\nMara looked toward the empty tracks. I had promised myself this would be the last time.`;
-
   function plainText(): string {
     return view?.state.doc.textBetween(0, view.state.doc.content.size, '\n\n') ?? '';
   }
@@ -54,7 +53,7 @@
       await persistence.whenSynced;
       if (destroyed || !ydoc) return;
       const fragment = ydoc.getXmlFragment('prosemirror');
-      const initialDoc = schema.node('doc', null, starter.split(/\n\n/).map((paragraph) => schema.node('paragraph', null, paragraph ? schema.text(paragraph) : undefined)));
+      const initialDoc = schema.node('doc', null, initialContent.split(/\n\n/).map((paragraph) => schema.node('paragraph', null, paragraph ? schema.text(paragraph) : undefined)));
       const state = EditorState.create({
         schema,
         doc: initialDoc,

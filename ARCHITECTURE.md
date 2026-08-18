@@ -38,8 +38,10 @@ The minimum shared vocabulary lives in `src/lib/workspace/model.ts`:
 - **Container** — an ordered, nestable bucket.
 - **Document** — a titled text leaf with an optional descriptive role.
 - **Revision** — a preserved document snapshot with authorship and reason.
+- **Context bucket** — freely named project- or document-scoped knowledge with its own
+  revision history.
 
-The manuscript and Codex use the same container/document primitives. `scene`,
+The manuscript and Codex use the same neutral document/context primitives. `scene`,
 `chapter`, `character`, `research`, and `narrative_rules` are optional roles, not
 required folder names or hard-coded node kinds.
 
@@ -94,8 +96,22 @@ editing enough to justify a timeline add-on.
 Markdown export remains an interchange convenience. It is not yet the canonical
 workspace store.
 
+## Implemented persistence slice
+
+Projects, documents, immutable document revisions, and independently versioned context
+buckets are stored in SQLite behind `WorkspaceFacade`. The existing branch-per-Y.Doc
+editing model maps each branch to a durable document, preserving ledger identities.
+Browser Yjs persistence remains the live editing and local-recovery layer; debounced
+plain-text snapshots provide durable server-side versions.
+
+The first project receives a project-scoped `narrative_rules` context bucket. Writers
+may add any other project- or document-scoped buckets without registering a schema.
+Active buckets are included in provider craft requests.
+
+Containers, moving documents, and a specialised scene/chapter hierarchy remain
+deferred until a real workflow proves they are necessary.
+
 ## Next vertical slice
 
-Add the first user-visible Codex container and document through the façade. It should
-support create, rename, move, edit, and revision recovery before adding specialised
-character, timeline, or narrative-rule behaviour.
+Use the context façade in one focused AI revision flow: selection, compiled active
+context, alternatives with provenance, and acceptance into the next document version.

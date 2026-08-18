@@ -7,6 +7,15 @@ import type {
   TaskPrompt,
   WritingBrief
 } from '$lib/domain';
+import type {
+  ContextBucket,
+  ContextBucketRevision,
+  ContextScope,
+  DocumentRevision,
+  PersistentWorkspace,
+  WorkspaceDocument,
+  WorkspaceProject
+} from '$lib/workspace/model';
 
 export interface LedgerStats {
   events: number;
@@ -19,6 +28,9 @@ export interface WorkspaceBootstrap {
   branches: Branch[];
   events: Required<LedgerEvent>[];
   stats: LedgerStats;
+  persistent: PersistentWorkspace;
+  activeProjectId: string;
+  activeDocumentId: string;
 }
 
 export interface SuggestionResult {
@@ -85,19 +97,103 @@ function exportFilename(response: Response): string {
 export class WorkspaceFacade {
   constructor(private readonly fetcher: FetchLike = fetch) {}
 
-  async load(): Promise<WorkspaceBootstrap> {
-    const [settings, branches, eventFeed] = await Promise.all([
+  async load(preferred?: { projectId?: string; documentId?: string }): Promise<WorkspaceBootstrap> {
+    const persistent = await this.get<PersistentWorkspace>('/api/workspace');
+    const activeProject = persistent.projects.find((project) => project.id === preferred?.projectId) ?? persistent.projects[0];
+    if (!activeProject) throw new Error('Workspace has no project');
+    const projectDocuments = persistent.documents.filter((document) => document.projectId === activeProject.id);
+    const activeDocument = projectDocuments.find((document) => document.id === preferred?.documentId) ?? projectDocuments[0];
+    if (!activeDocument) throw new Error('Project has no document');
+    const [settings, eventFeed] = await Promise.all([
       this.get<{ brief: WritingBrief; prompts: TaskPrompt[] }>('/api/settings'),
-      this.get<{ branches: Branch[] }>('/api/branches'),
-      this.get<{ events: Required<LedgerEvent>[]; stats: LedgerStats }>('/api/events?limit=45')
+      this.get<{ events: Required<LedgerEvent>[]; stats: LedgerStats }>(`/api/events?history=suggestions&branch=${encodeURIComponent(activeDocument.id)}`)
     ]);
     return {
       brief: settings.brief,
       prompts: settings.prompts,
-      branches: branches.branches,
+      branches: projectDocuments.map((document) => ({
+        id: document.id,
+        name: document.title,
+        createdAt: document.updatedAt,
+        wordCount: document.content.trim() ? document.content.trim().split(/\s+/).length : 0,
+        lastEdited: document.updatedAt
+      })),
       events: eventFeed.events,
-      stats: eventFeed.stats
+      stats: eventFeed.stats,
+      persistent,
+      activeProjectId: activeProject.id,
+      activeDocumentId: activeDocument.id
     };
+  }
+
+  persistentWorkspace(): Promise<PersistentWorkspace> {
+    return this.get('/api/workspace');
+  }
+
+  async createProject(title: string): Promise<WorkspaceProject> {
+    const result = await this.post<{ project: WorkspaceProject }>('/api/workspace', { action: 'create_project', title });
+    return result.project;
+  }
+
+  async saveProject(id: string, title: string): Promise<WorkspaceProject> {
+    const result = await this.post<{ project: WorkspaceProject }>('/api/workspace', { action: 'save_project', id, title });
+    return result.project;
+  }
+
+  async createDocument(input: {
+    id?: string;
+    projectId: string;
+    title: string;
+    content?: string;
+    role?: string;
+    parentId?: string | null;
+    createdBy?: string;
+    reason?: string;
+  }): Promise<WorkspaceDocument> {
+    const result = await this.post<{ document: WorkspaceDocument }>('/api/workspace', { action: 'create_document', input });
+    return result.document;
+  }
+
+  async saveDocument(input: { id: string; title?: string; content?: string; createdBy?: string; reason?: string }): Promise<WorkspaceDocument> {
+    const result = await this.post<{ document: WorkspaceDocument }>('/api/workspace', { action: 'save_document', input });
+    return result.document;
+  }
+
+  async restoreDocument(documentId: string, revisionId: string, sessionId: string): Promise<WorkspaceDocument> {
+    const result = await this.post<{ document: WorkspaceDocument }>('/api/workspace', { action: 'restore_document', documentId, revisionId, sessionId });
+    return result.document;
+  }
+
+  async documentRevisions(documentId: string): Promise<DocumentRevision[]> {
+    const result = await this.get<{ revisions: DocumentRevision[] }>(`/api/workspace?document=${encodeURIComponent(documentId)}`);
+    return result.revisions;
+  }
+
+  async createContextBucket(input: {
+    projectId: string;
+    documentId?: string | null;
+    scope: ContextScope;
+    title: string;
+    role?: string;
+    content?: string;
+    createdBy?: string;
+  }): Promise<ContextBucket> {
+    const result = await this.post<{ bucket: ContextBucket }>('/api/workspace', { action: 'create_bucket', input });
+    return result.bucket;
+  }
+
+  async saveContextBucket(input: { id: string; title?: string; role?: string; content?: string; createdBy?: string; reason?: string }): Promise<ContextBucket> {
+    const result = await this.post<{ bucket: ContextBucket }>('/api/workspace', { action: 'save_bucket', input });
+    return result.bucket;
+  }
+
+  async deleteContextBucket(id: string): Promise<void> {
+    await this.post('/api/workspace', { action: 'delete_bucket', id });
+  }
+
+  async contextBucketRevisions(bucketId: string): Promise<ContextBucketRevision[]> {
+    const result = await this.get<{ revisions: ContextBucketRevision[] }>(`/api/workspace?bucket=${encodeURIComponent(bucketId)}`);
+    return result.revisions;
   }
 
   async appendEvent(event: LedgerEvent): Promise<Required<LedgerEvent>> {
@@ -109,6 +205,10 @@ export class WorkspaceFacade {
     const query = new URLSearchParams({ limit: String(limit) });
     if (branchId) query.set('branch', branchId);
     return this.get(`/api/events?${query}`);
+  }
+
+  suggestionHistory(branchId: string): Promise<{ events: Required<LedgerEvent>[]; stats: LedgerStats }> {
+    return this.get(`/api/events?history=suggestions&branch=${encodeURIComponent(branchId)}`);
   }
 
   suggestions(request: GenerationRequest, signal?: AbortSignal): Promise<SuggestionResult> {

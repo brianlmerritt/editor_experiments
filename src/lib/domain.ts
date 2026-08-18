@@ -107,6 +107,13 @@ export interface GenerationRequest {
   prompt: TaskPrompt;
   sourceStates: Record<string, SourceState>;
   mode: WritingMode;
+  context?: Array<{
+    title: string;
+    role?: string;
+    scope: 'project' | 'document';
+    content: string;
+    revision: number;
+  }>;
 }
 
 export interface JudgmentPair {

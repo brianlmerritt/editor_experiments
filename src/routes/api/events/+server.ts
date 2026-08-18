@@ -1,11 +1,14 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { appendEvent, tailEvents, ledgerStats } from '$lib/server/ledger';
+import { appendEvent, tailEvents, ledgerStats, suggestionHistory } from '$lib/server/ledger';
 import type { LedgerEvent } from '$lib/domain';
 
 export const GET: RequestHandler = ({ url }) => {
   const limit = Number(url.searchParams.get('limit') ?? 40);
   const branch = url.searchParams.get('branch') ?? undefined;
+  if (url.searchParams.get('history') === 'suggestions' && branch) {
+    return json({ events: suggestionHistory(branch), stats: ledgerStats() });
+  }
   return json({ events: tailEvents(limit, branch), stats: ledgerStats() });
 };
 

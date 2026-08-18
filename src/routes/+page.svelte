@@ -5,20 +5,28 @@
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type Suggestion, type WritingBrief } from '$lib/domain';
   import { workspace } from '$lib/state/workspace.svelte';
+  import type { ContextBucket, ContextScope } from '$lib/workspace/model';
+
+  type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
   let editor: EditorShell;
   let selection = { from: 1, to: 1, text: '' };
   let selectedVariants: Record<string, number> = {};
   let settingsOpen = false;
+  let contextOpen = false;
   let ledgerOpen = false;
   let sourceLegendOpen = false;
   let briefDraft: WritingBrief = { ...workspace.brief };
   let sentinelInstruction = '';
   let editTimer: ReturnType<typeof setTimeout> | null = null;
+  let documentSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let editSession = { started: 0, characters: 0, text: '' };
   let editorReady = false;
+  let workspaceReady = false;
+  let displayedDocumentRevision = 1;
+  let documentSaving = false;
   let documentText = '';
   let cardTops: Record<string, number> = {};
   let cardsHeight = 0;
@@ -27,6 +35,10 @@
   let liveSuggestions: Suggestion[] = [];
   let queuedCount = 0;
   let isPaused = false;
+  let contextDrafts: Record<string, ContextDraft> = {};
+  let newContextTitle = '';
+  let newContextRole = '';
+  let newContextScope: ContextScope = 'project';
 
   $: activeSuggestion = workspace.suggestions.find((suggestion) => suggestion.id === workspace.activeSuggestionId) ?? null;
   $: selectedPrompt = workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0];
@@ -35,6 +47,9 @@
     void workspace.initialize().then(() => {
       briefDraft = { ...workspace.brief };
       sentinelInstruction = workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.instruction ?? '';
+      workspaceReady = true;
+      displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
+      refreshLiveSuggestions();
     });
     const keydown = (event: KeyboardEvent) => handleReviewKeys(event);
     const relayout = () => layoutCards();
@@ -46,6 +61,7 @@
       window.removeEventListener('resize', relayout);
       window.removeEventListener('scroll', relayout);
       if (editTimer) clearTimeout(editTimer);
+      if (documentSaveTimer) clearTimeout(documentSaveTimer);
       if (scanTimer) clearTimeout(scanTimer);
       if (noticeTimer) clearTimeout(noticeTimer);
     };
@@ -139,12 +155,20 @@
     documentText = detail.text;
     if (!editorReady) {
       editorReady = true;
+      if (editor) {
+        void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
+        refreshLiveSuggestions();
+      }
+      if (workspace.currentDocument && detail.text !== workspace.currentDocument.content) {
+        scheduleDocumentSave(detail.text, 'Recovered local editor state');
+      }
       return;
     }
     if (editor) {
       void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
       refreshLiveSuggestions();
     }
+    scheduleDocumentSave(detail.text, detail.origin ? 'Accepted revision' : 'Editing session');
     if (detail.origin) return;
     const now = Date.now();
     if (!editSession.started) editSession.started = now;
@@ -158,6 +182,17 @@
     }, 1600);
     if (scanTimer) clearTimeout(scanTimer);
     if (workspace.mode === 'revising' && !workspace.paused) scanTimer = setTimeout(() => void runSentinels(), 5000);
+  }
+
+  function scheduleDocumentSave(text: string, reason: string): void {
+    if (documentSaveTimer) clearTimeout(documentSaveTimer);
+    documentSaving = true;
+    documentSaveTimer = setTimeout(async () => {
+      documentSaveTimer = null;
+      await workspace.saveDocumentContent(text, reason);
+      displayedDocumentRevision = workspace.currentDocument?.revision ?? displayedDocumentRevision;
+      documentSaving = false;
+    }, 1200);
   }
 
   async function runSentinels(): Promise<void> {
@@ -301,8 +336,101 @@
     const id = makeId('branch');
     await editor.forkTo(id);
     const branch: Branch = { id, name, parentId: workspace.branchId, createdAt: new Date().toISOString(), wordCount: wordCount(editor.getText()), lastEdited: new Date().toISOString() };
-    await workspace.addBranch(branch);
+    await workspace.addBranch(branch, editor.getText());
+    await switchDocument(id);
+  }
+
+  async function switchDocument(id: string): Promise<void> {
+    if (id === workspace.branchId) return;
+    if (documentSaveTimer) {
+      clearTimeout(documentSaveTimer);
+      documentSaveTimer = null;
+      await workspace.saveDocumentContent(documentText, 'Saved before switching document');
+      documentSaving = false;
+    }
+    editorReady = false;
+    selection = { from: 1, to: 1, text: '' };
+    documentText = '';
     await workspace.switchBranch(id);
+    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
+    refreshLiveSuggestions();
+  }
+
+  async function switchProject(id: string): Promise<void> {
+    if (id === workspace.projectId) return;
+    if (documentSaveTimer) {
+      clearTimeout(documentSaveTimer);
+      documentSaveTimer = null;
+      await workspace.saveDocumentContent(documentText, 'Saved before switching project');
+      documentSaving = false;
+    }
+    editorReady = false;
+    selection = { from: 1, to: 1, text: '' };
+    documentText = '';
+    await workspace.switchProject(id);
+    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
+    refreshLiveSuggestions();
+  }
+
+  async function createProject(): Promise<void> {
+    const title = window.prompt('Project name')?.trim();
+    if (!title) return;
+    editorReady = false;
+    await workspace.createProject(title);
+    refreshLiveSuggestions();
+  }
+
+  async function createDocument(): Promise<void> {
+    const title = window.prompt('Document name', 'Untitled draft')?.trim();
+    if (!title) return;
+    const document = await workspace.createDocument(title);
+    await switchDocument(document.id);
+  }
+
+  async function renameDocument(): Promise<void> {
+    const current = workspace.currentDocument;
+    if (!current) return;
+    const title = window.prompt('Document name', current.title)?.trim();
+    if (!title || title === current.title) return;
+    await workspace.renameDocument(current.id, title);
+  }
+
+  function openContext(): void {
+    contextDrafts = Object.fromEntries(workspace.currentContext.map((bucket) => [bucket.id, {
+      title: bucket.title,
+      role: bucket.role,
+      content: bucket.content
+    }]));
+    newContextTitle = '';
+    newContextRole = '';
+    newContextScope = 'project';
+    contextOpen = true;
+  }
+
+  async function addContextBucket(): Promise<void> {
+    const title = newContextTitle.trim();
+    if (!title) return;
+    const bucket = await workspace.createContextBucket({ title, role: newContextRole.trim() || undefined, scope: newContextScope });
+    contextDrafts = { ...contextDrafts, [bucket.id]: { title: bucket.title, role: bucket.role, content: bucket.content } };
+    newContextTitle = '';
+    newContextRole = '';
+    showNotice(`${bucket.title} added to ${bucket.scope} context.`);
+  }
+
+  async function saveContextBucket(bucket: ContextBucket): Promise<void> {
+    const draft = contextDrafts[bucket.id];
+    if (!draft?.title.trim()) return;
+    const saved = await workspace.saveContextBucket({ ...draft, id: bucket.id, title: draft.title.trim(), role: draft.role?.trim() || undefined });
+    contextDrafts = { ...contextDrafts, [saved.id]: { title: saved.title, role: saved.role, content: saved.content } };
+    showNotice(`${saved.title} saved as version ${saved.revision}.`);
+  }
+
+  async function deleteContextBucket(bucket: ContextBucket): Promise<void> {
+    if (bucket.role === 'narrative_rules') return;
+    if (!window.confirm(`Remove “${bucket.title}” from active context? Its version history will be retained.`)) return;
+    await workspace.deleteContextBucket(bucket.id);
+    const { [bucket.id]: _removed, ...remaining } = contextDrafts;
+    contextDrafts = remaining;
   }
 
   async function exportMarkdown(): Promise<void> {
@@ -327,6 +455,7 @@
     </div>
     <div class="top-actions">
       <button class:paused={isPaused} on:click={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
+      <button on:click={openContext}>Context <span>{workspace.currentContext.length}</span></button>
       <button on:click={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
       <button on:click={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
@@ -350,31 +479,43 @@
     <section class="workspace">
       <div class="document-column">
         <div class="document-meta">
-          <div>
-            <select value={workspace.branchId} on:change={(event) => workspace.switchBranch((event.currentTarget as HTMLSelectElement).value)} aria-label="Branch">
-              {#each workspace.branches as branch}<option value={branch.id}>{branch.name} · {branch.wordCount}w</option>{/each}
+          <div class="document-selectors">
+            <select value={workspace.projectId} on:change={(event) => switchProject((event.currentTarget as HTMLSelectElement).value)} aria-label="Project">
+              {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
             </select>
+            <button on:click={createProject} title="Create project">+ Project</button>
+            <span aria-hidden="true">/</span>
+            <select value={workspace.branchId} on:change={(event) => switchDocument((event.currentTarget as HTMLSelectElement).value)} aria-label="Document">
+              {#each workspace.documents.filter((document) => document.projectId === workspace.projectId) as document}<option value={document.id}>{document.title} · {document.id === workspace.branchId ? wordCount(documentText) : wordCount(document.content)}w</option>{/each}
+            </select>
+            <button on:click={createDocument} title="Create blank document">+ Document</button>
+            <button on:click={renameDocument}>Rename</button>
             <button on:click={forkBranch}>Fork from here</button>
           </div>
-          <div><span>{wordCount(documentText)} words</span><button on:click={exportMarkdown}>Export .md</button></div>
+          <div><span>{wordCount(documentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button on:click={exportMarkdown}>Export .md</button></div>
         </div>
 
         <div class="editor-wrap">
-          {#key workspace.branchId}
-            <EditorShell
-              bind:this={editor}
-              branchId={workspace.branchId}
-              suggestions={liveSuggestions}
-              activeSuggestionId={workspace.activeSuggestionId}
-              preview={workspace.preview}
-              paused={isPaused}
-              onTextChange={textChanged}
-              onSelectionChange={(detail) => selection = detail}
-              onSuggestionActivate={activateFromEditor}
-              onSuggestionHover={(id) => workspace.activate(id)}
-              onUndoAcceptance={(origin) => workspace.log('reverted', { source: origin.source }, origin.suggestionId)}
-            />
-          {/key}
+          {#if !workspaceReady || !workspace.currentDocument}
+            <div class="editor-loading">Opening workspace…</div>
+          {:else}
+            {#key workspace.branchId}
+              <EditorShell
+                bind:this={editor}
+                branchId={workspace.branchId}
+                initialContent={workspace.currentDocument.content}
+                suggestions={liveSuggestions}
+                activeSuggestionId={workspace.activeSuggestionId}
+                preview={workspace.preview}
+                paused={isPaused}
+                onTextChange={textChanged}
+                onSelectionChange={(detail) => selection = detail}
+                onSuggestionActivate={activateFromEditor}
+                onSuggestionHover={(id) => workspace.activate(id)}
+                onUndoAcceptance={(origin) => workspace.log('reverted', { source: origin.source }, origin.suggestionId)}
+              />
+            {/key}
+          {/if}
 
           {#if selection.text && !workspace.paused}
             <div class="selection-menu">
@@ -479,6 +620,51 @@
       </div>
     </div>
   {/if}
+
+  {#if contextOpen}
+    <div class="modal-backdrop" role="presentation" on:click={() => contextOpen = false}>
+      <div class="settings context-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="context-title" on:click|stopPropagation on:keydown|stopPropagation>
+        <header>
+          <div><small>Versioned project knowledge</small><h2 id="context-title">Context buckets</h2></div>
+          <button on:click={() => contextOpen = false}>×</button>
+        </header>
+        <p class="context-intro">Project buckets follow every document. Document buckets apply only to <strong>{workspace.currentDocument?.title}</strong>. Names and roles are descriptive, not a fixed schema.</p>
+        <div class="context-list">
+          {#each workspace.currentContext as bucket}
+            {@const draft = contextDrafts[bucket.id]}
+            {#if draft}
+              <article class="context-bucket">
+                <header>
+                  <span>{bucket.scope} context · v{bucket.revision}</span>
+                  {#if bucket.role === 'narrative_rules'}<b>carried forward</b>{/if}
+                </header>
+                <div class="context-fields">
+                  <label>Title<input bind:value={draft.title} /></label>
+                  <label>Optional role<input bind:value={draft.role} placeholder="character, research, scene_state…" /></label>
+                </div>
+                <label>Content<textarea rows={bucket.role === 'narrative_rules' ? 9 : 6} bind:value={draft.content}></textarea></label>
+                <footer>
+                  <small>Saving creates a new version; earlier content remains recoverable.</small>
+                  {#if bucket.role !== 'narrative_rules'}<button class="danger" on:click={() => deleteContextBucket(bucket)}>Remove</button>{/if}
+                  <button class="primary" on:click={() => saveContextBucket(bucket)}>Save new version</button>
+                </footer>
+              </article>
+            {/if}
+          {/each}
+        </div>
+        <section class="new-context">
+          <h3>Add a bucket</h3>
+          <div class="context-fields">
+            <label>Title<input bind:value={newContextTitle} placeholder="Characters, location, scene state…" /></label>
+            <label>Optional role<input bind:value={newContextRole} placeholder="Free-form label" /></label>
+          </div>
+          <label>Scope<select bind:value={newContextScope}><option value="project">Entire project</option><option value="document">Current document only</option></select></label>
+          <button class="primary" disabled={!newContextTitle.trim()} on:click={addContextBucket}>Add empty bucket</button>
+        </section>
+        <footer><p>Active buckets are included in AI craft requests. There is no required scene, chapter, character, or genre schema.</p><button on:click={() => contextOpen = false}>Done</button></footer>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -513,10 +699,13 @@
   .document-column { min-width: 0; }
   .document-meta { display: flex; justify-content: space-between; align-items: center; min-height: 34px; margin-bottom: 8px; color: var(--muted); font-size: 10px; }
   .document-meta > div { display: flex; align-items: center; gap: 7px; }
+  .document-selectors { min-width: 0; flex-wrap: wrap; }
+  .document-selectors > span { color: var(--line-strong); }
   .document-meta select, .document-meta button { border: 0; background: transparent; color: var(--muted); padding: 4px; font-size: 10px; cursor: pointer; }
   .document-meta select { color: var(--ink-soft); font-weight: 600; }
   .document-meta button:hover { color: var(--accent); }
   .editor-wrap { position: relative; }
+  .editor-loading { display: grid; place-items: center; min-height: 68vh; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); font: 12px/1.5 var(--font-ui); }
   .selection-menu { position: sticky; z-index: 12; bottom: 22px; display: flex; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 40px); margin: -58px auto 17px; padding: 5px; border: 1px solid #34322e; border-radius: 4px; background: #282723; color: #f7f3e9; box-shadow: 0 10px 30px rgb(0 0 0 / .2); }
   .selection-menu span { padding: 0 8px; color: #a9a69f; font-size: 9px; }
   .selection-menu button { border: 0; border-radius: 2px; background: transparent; color: inherit; padding: 7px 9px; font-size: 10px; cursor: pointer; }
@@ -583,6 +772,21 @@
   .settings footer p { flex: 1; margin: 0; color: var(--muted); font: 9px/1.5 var(--font-ui); }
   .settings footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
   .settings footer .primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .context-settings { width: min(840px, 100%); }
+  .context-intro { margin: -8px 0 20px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
+  .context-list { display: grid; gap: 14px; }
+  .context-bucket { border: 1px solid var(--line); border-radius: 4px; background: #fffefa; padding: 14px; }
+  .context-bucket > header { display: flex; justify-content: space-between; margin-bottom: 12px; color: var(--muted); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .07em; }
+  .context-bucket > header b { color: var(--accent); }
+  .context-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .context-bucket > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding-top: 3px; }
+  .context-bucket > footer small { flex: 1; color: var(--muted); font: 9px/1.4 var(--font-ui); }
+  .settings footer .danger { border-color: #d9b9b3; color: var(--reject); }
+  .new-context { margin-top: 18px; padding: 16px; border: 1px dashed var(--line-strong); border-radius: 4px; }
+  .new-context h3 { margin: 0 0 12px; font: 600 14px/1.2 var(--font-ui); }
+  .new-context > button { float: right; border: 1px solid var(--accent); border-radius: 3px; background: var(--accent); color: white; padding: 8px 12px; font-size: 10px; cursor: pointer; }
+  .new-context > button:disabled { opacity: .45; cursor: default; }
+  .new-context::after { display: block; clear: both; content: ''; }
   @media (max-width: 980px) {
     .workspace { grid-template-columns: minmax(0, 1fr); }
     aside { padding-top: 8px; }
@@ -599,5 +803,6 @@
     .filterbar { top: 99px; }
     main { width: calc(100% - 20px); padding-top: 18px; }
     .form-grid { grid-template-columns: 1fr; }
+    .context-fields { grid-template-columns: 1fr; }
   }
 </style>

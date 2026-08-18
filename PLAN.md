@@ -106,8 +106,8 @@ keys, and deterministically reproduce async interaction bugs.
   it's all raw PM API (decoration plugin, custom keymaps, margin sync) anyway.
 - **Yjs is IN** (decision: keep the multi-user door open):
   - `y-prosemirror` binding, `y-indexeddb` persistence. **No y-websocket in POC** —
-    the doc is client-local; the server receives text snapshots via API, it does not
-    participate in the CRDT.
+    the live CRDT is client-local; the server receives versioned text snapshots via
+    the workspace façade, but does not participate in the CRDT.
   - Suggestion anchors stored as **Yjs relative positions**, converted to absolute on
     each decoration render.
   - **AI sources are NOT Yjs participants** — no per-source client identities. They
@@ -120,8 +120,9 @@ keys, and deterministically reproduce async interaction bugs.
 - **State:** runes stores in `.svelte.ts` modules (`$state`/`$derived`); no store
   library. Bridge to the (non-reactive) decoration plugin via metadata-only
   transactions when the store changes.
-- **Persistence/backend:** `better-sqlite3`, single append-only events table with JSON
-  payload column. Don't over-schema; learn the schema by querying.
+- **Persistence/backend:** `better-sqlite3`; the append-only event ledger remains JSON
+  shaped, while durable projects, documents, document revisions, and context-bucket
+  revisions use a deliberately small relational store behind the workspace façade.
 
 ### 3.2 Decorations (marks vs decorations rule)
 - **Suggestions = decorations, always.** Never marks (marks would sync/undo/serialize

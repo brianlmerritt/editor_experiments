@@ -219,7 +219,10 @@ function scriptedChecks(request: GenerationRequest): DraftSuggestion[] {
 
 function assemblePrompt(request: GenerationRequest): string {
   const canon = request.brief.canon.slice(0, 6000);
-  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. For a replacement, provide two or three distinct alternatives in variants; none may equal the selected source text. If there is no useful change, return an annotation or no suggestion instead of a no-op replacement.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
+  const context = (request.context ?? [])
+    .map((bucket) => `### ${bucket.title} (${bucket.scope}, v${bucket.revision}${bucket.role ? `, ${bucket.role}` : ''})\n${bucket.content}`)
+    .join('\n\n');
+  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. For a replacement, provide two or three distinct alternatives in variants; none may equal the selected source text. If there is no useful change, return an annotation or no suggestion instead of a no-op replacement.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nCONTEXT BUCKETS\n${context || 'None'}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
 }
 
 async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number }> {

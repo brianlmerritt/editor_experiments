@@ -1,11 +1,14 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, reconcileSuggestionAnchors as reconcileAnchors, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { restoreSuggestions } from '$lib/suggestion-history';
 import { workspaceFacade, type MarkdownExport, type WorkspaceFacade } from '$lib/workspace/facade';
+import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
 
 export class WorkspaceState {
   sessionId = $state('session_pending');
+  projectId = $state('project_default');
   branchId = $state('main');
   mode = $state<WritingMode>('drafting');
   paused = $state(false);
@@ -17,6 +20,9 @@ export class WorkspaceState {
   brief = $state<WritingBrief>(defaultBrief);
   prompts = $state<TaskPrompt[]>([defaultPrompt]);
   branches = $state<Branch[]>([{ id: 'main', name: 'Main draft', createdAt: new Date().toISOString(), wordCount: 0, lastEdited: new Date().toISOString() }]);
+  projects = $state<WorkspaceProject[]>([]);
+  documents = $state<WorkspaceDocument[]>([]);
+  contextBuckets = $state<ContextBucket[]>([]);
   sourceStates = $state<Record<string, SourceState>>(Object.fromEntries(sourceCatalog.map((source) => [source.id, source.id === 'openrouter' || source.id === 'ollama' ? 'off' : 'visible'])));
   categoryVisibility = $state<Record<Category, boolean>>(Object.fromEntries(categories.map((category) => [category, true])) as Record<Category, boolean>);
   densityCap = $state(8);
@@ -27,6 +33,7 @@ export class WorkspaceState {
   lastError = $state<string | null>(null);
   sourceClickAt = $state<Record<string, number>>({});
   private dispatches = new Map<string, AbortController>();
+  private documentSave: Promise<void> = Promise.resolve();
   private initialized = false;
 
   constructor(private readonly facade: WorkspaceFacade = workspaceFacade) {}
@@ -49,23 +56,46 @@ export class WorkspaceState {
     return Math.max(0, this.suggestions.filter((suggestion) => suggestion.state === 'pending').length - this.visibleSuggestions.length);
   }
 
+  get currentProject(): WorkspaceProject | null {
+    return this.projects.find((project) => project.id === this.projectId) ?? null;
+  }
+
+  get currentDocument(): WorkspaceDocument | null {
+    return this.documents.find((document) => document.id === this.branchId) ?? null;
+  }
+
+  get currentContext(): ContextBucket[] {
+    return this.contextBuckets.filter((bucket) => bucket.projectId === this.projectId && (bucket.scope === 'project' || bucket.documentId === this.branchId));
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
     if (typeof localStorage !== 'undefined') {
       this.sessionId = localStorage.getItem('margin-note:session') ?? makeId('session');
       localStorage.setItem('margin-note:session', this.sessionId);
-      this.branchId = localStorage.getItem('margin-note:branch') ?? 'main';
+      this.projectId = localStorage.getItem('margin-note:project') ?? 'project_default';
+      this.branchId = localStorage.getItem('margin-note:document') ?? localStorage.getItem('margin-note:branch') ?? 'main';
     }
     try {
-      const loaded = await this.facade.load();
+      const loaded = await this.facade.load({ projectId: this.projectId, documentId: this.branchId });
       this.brief = loaded.brief;
       this.prompts = loaded.prompts;
+      this.projects = loaded.persistent.projects;
+      this.documents = loaded.persistent.documents;
+      this.contextBuckets = loaded.persistent.contextBuckets;
+      this.projectId = loaded.activeProjectId;
+      this.branchId = loaded.activeDocumentId;
       this.branches = loaded.branches;
       this.ledger = loaded.events;
+      this.suggestions = restoreSuggestions(loaded.events);
       this.costUsd = loaded.stats.costUsd;
-      if (!this.branches.some((branch) => branch.id === this.branchId)) this.branchId = 'main';
-      await this.log('session_started', { userAgent: navigator.userAgent, resumedSession: this.ledger.some((event) => event.sessionId === this.sessionId) });
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('margin-note:project', this.projectId);
+        localStorage.setItem('margin-note:document', this.branchId);
+        localStorage.setItem('margin-note:branch', this.branchId);
+      }
+      void this.log('session_started', { userAgent: navigator.userAgent, resumedSession: this.ledger.some((event) => event.sessionId === this.sessionId) });
     } catch (error) {
       this.initialized = false;
       this.lastError = error instanceof Error ? error.message : 'Could not initialize workspace';
@@ -140,7 +170,21 @@ export class WorkspaceState {
     this.generating = true;
     await this.log('suggestions_requested', { range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
-      const request: GenerationRequest = { ...input, sessionId: this.sessionId, branchId: this.branchId, brief: this.brief, sourceStates: { ...this.sourceStates }, mode: this.mode };
+      const request: GenerationRequest = {
+        ...input,
+        sessionId: this.sessionId,
+        branchId: this.branchId,
+        brief: this.brief,
+        sourceStates: { ...this.sourceStates },
+        mode: this.mode,
+        context: this.currentContext.map((bucket) => ({
+          title: bucket.title,
+          role: bucket.role,
+          scope: bucket.scope,
+          content: bucket.content,
+          revision: bucket.revision
+        }))
+      };
       const data = await this.facade.suggestions(request, controller.signal);
       if (data.errors.length) this.notice = data.errors.map((item) => `${item.source}: ${item.message}`).join(' · ');
       await this.coalesceSuggestions([...this.suggestions, ...data.suggestions]);
@@ -217,8 +261,20 @@ export class WorkspaceState {
     await this.refreshLedger();
   }
 
-  async addBranch(branch: Branch): Promise<void> {
-    this.branches = await this.facade.createBranch(branch, this.sessionId);
+  async addBranch(branch: Branch, content = ''): Promise<void> {
+    const document = await this.facade.createDocument({
+      id: branch.id,
+      projectId: this.projectId,
+      title: branch.name,
+      content,
+      role: 'manuscript',
+      parentId: branch.parentId ?? null,
+      createdBy: this.sessionId,
+      reason: 'Forked document'
+    });
+    this.documents = [...this.documents, document];
+    this.refreshBranches();
+    await this.log('branch_forked', { name: branch.name, parentId: branch.parentId, wordCount: branch.wordCount });
   }
 
   async exportMarkdown(markdown: string, title?: string): Promise<MarkdownExport> {
@@ -231,9 +287,112 @@ export class WorkspaceState {
     if (id === this.branchId) return;
     const previous = this.branchId;
     this.branchId = id;
-    localStorage.setItem('margin-note:branch', id);
-    this.suggestions = [];
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('margin-note:document', id);
+      localStorage.setItem('margin-note:branch', id);
+    }
+    const data = await this.facade.suggestionHistory(id);
+    this.ledger = data.events;
+    this.costUsd = data.stats.costUsd;
+    this.suggestions = restoreSuggestions(data.events);
     await this.log('branch_switched', { from: previous, to: id });
+  }
+
+  async switchProject(id: string): Promise<void> {
+    if (id === this.projectId) return;
+    const document = this.documents.find((item) => item.projectId === id);
+    if (!document) throw new Error('Project has no document');
+    this.projectId = id;
+    if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', id);
+    this.refreshBranches();
+    await this.switchBranch(document.id);
+  }
+
+  async createProject(title: string): Promise<void> {
+    const project = await this.facade.createProject(title);
+    const document = await this.facade.createDocument({
+      projectId: project.id,
+      title: 'Main draft',
+      role: 'manuscript',
+      createdBy: this.sessionId,
+      reason: 'Initial project document'
+    });
+    this.projects = [...this.projects, project];
+    this.documents = [...this.documents, document];
+    const persistent = await this.facade.persistentWorkspace();
+    this.contextBuckets = persistent.contextBuckets;
+    this.projectId = project.id;
+    if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
+    this.refreshBranches();
+    await this.switchBranch(document.id);
+  }
+
+  async createDocument(title: string): Promise<WorkspaceDocument> {
+    const document = await this.facade.createDocument({
+      projectId: this.projectId,
+      title,
+      role: 'manuscript',
+      createdBy: this.sessionId
+    });
+    this.documents = [...this.documents, document];
+    this.refreshBranches();
+    return document;
+  }
+
+  async saveDocumentContent(content: string, reason = 'Editing session'): Promise<void> {
+    const documentId = this.branchId;
+    this.documentSave = this.documentSave.then(async () => {
+      const document = await this.facade.saveDocument({ id: documentId, content, createdBy: this.sessionId, reason });
+      this.documents = this.documents.map((item) => item.id === document.id ? document : item);
+      this.refreshBranches();
+    }).catch((error) => {
+      this.lastError = error instanceof Error ? error.message : 'Document save failed';
+    });
+    await this.documentSave;
+  }
+
+  async renameDocument(id: string, title: string): Promise<void> {
+    const document = await this.facade.saveDocument({ id, title, createdBy: this.sessionId, reason: 'Renamed document' });
+    this.documents = this.documents.map((item) => item.id === id ? document : item);
+    this.refreshBranches();
+  }
+
+  async createContextBucket(input: { title: string; role?: string; scope: ContextScope; content?: string }): Promise<ContextBucket> {
+    const bucket = await this.facade.createContextBucket({
+      projectId: this.projectId,
+      documentId: input.scope === 'document' ? this.branchId : null,
+      scope: input.scope,
+      title: input.title,
+      role: input.role,
+      content: input.content,
+      createdBy: this.sessionId
+    });
+    this.contextBuckets = [...this.contextBuckets, bucket];
+    return bucket;
+  }
+
+  async saveContextBucket(input: { id: string; title: string; role?: string; content: string }): Promise<ContextBucket> {
+    const bucket = await this.facade.saveContextBucket({ ...input, createdBy: this.sessionId, reason: 'Edited context' });
+    this.contextBuckets = this.contextBuckets.map((item) => item.id === bucket.id ? bucket : item);
+    return bucket;
+  }
+
+  async deleteContextBucket(id: string): Promise<void> {
+    await this.facade.deleteContextBucket(id);
+    this.contextBuckets = this.contextBuckets.filter((bucket) => bucket.id !== id);
+  }
+
+  private refreshBranches(): void {
+    this.branches = this.documents
+      .filter((document) => document.projectId === this.projectId)
+      .map((document) => ({
+        id: document.id,
+        name: document.title,
+        parentId: document.parentId ?? undefined,
+        createdAt: document.updatedAt,
+        wordCount: document.content.trim() ? document.content.trim().split(/\s+/).length : 0,
+        lastEdited: document.updatedAt
+      }));
   }
 
   private async coalesceSuggestions(items: Suggestion[]): Promise<void> {

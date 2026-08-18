@@ -1,8 +1,9 @@
 # Margin Note
 
-Margin Note is a meta-first creative writing support POC. The draft is persisted as a
-local Yjs document, suggestions are ProseMirror decorations that never mutate it, and
-every meaningful interaction is appended to a SQLite ledger.
+Margin Note is a meta-first creative writing support POC. The live draft uses local
+Yjs persistence and is also saved as immutable SQLite document versions. Suggestions
+are ProseMirror decorations that never mutate it, and every meaningful interaction is
+appended to a SQLite ledger.
 
 The deliberately small façade and adaptable Codex direction are described in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
@@ -27,6 +28,8 @@ For a quick tour:
    `X` for keyboard review.
 4. Open **Ledger** to verify the instrumentation.
 5. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
+6. Open **Context** to edit the carried-forward narrative rules or add freely named
+   project- and document-scoped knowledge buckets.
 
 ## Optional providers
 
@@ -40,8 +43,11 @@ OpenRouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Ollama uses
 
 ## Persistence
 
-- Draft branches: browser IndexedDB keys named `margin-note:<branch-id>`.
-- Event ledger: `data/writing-ledger.sqlite` by default.
+- Live draft branches: browser IndexedDB keys named `margin-note:<document-id>`.
+- Projects, durable documents, immutable document/context versions, and the event
+  ledger: `data/writing-ledger.sqlite` by default.
+- Existing browser-only drafts are adopted into the durable document on first load.
+- Pending and resolved suggestions are reconstructed from the ledger after reload.
 - Change the ledger location with `LEDGER_PATH`.
 - Markdown export is available from the document toolbar.
 

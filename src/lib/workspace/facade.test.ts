@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Branch, LedgerEvent, TaskPrompt, WritingBrief } from '$lib/domain';
+import type { PersistentWorkspace } from '$lib/workspace/model';
 import { WorkspaceFacade, type FetchLike } from './facade';
 
 const brief: WritingBrief = {
@@ -11,8 +12,13 @@ const brief: WritingBrief = {
   canon: 'The moon is dark.'
 };
 const prompts: TaskPrompt[] = [{ id: 'review', name: 'Review', version: 1, instruction: 'Review it.' }];
-const branches: Branch[] = [{ id: 'main', name: 'Main', createdAt: '2026-08-17T00:00:00Z', wordCount: 10, lastEdited: '2026-08-17T00:00:00Z' }];
+const branches: Branch[] = [{ id: 'main', name: 'Main draft', createdAt: '2026-08-17T00:00:00Z', wordCount: 10, lastEdited: '2026-08-17T00:00:00Z' }];
 const events: Required<LedgerEvent>[] = [{ id: 1, timestamp: '2026-08-17T00:00:00Z', type: 'session_started', sessionId: 'session', branchId: 'main', suggestionId: '', payload: {} }];
+const persistent: PersistentWorkspace = {
+  projects: [{ id: 'project', title: 'Moon Dark', revision: 1, extensions: {}, updatedAt: '2026-08-17T00:00:00Z' }],
+  documents: [{ id: 'main', projectId: 'project', parentId: null, title: 'Main draft', order: 0, revision: 1, role: 'manuscript', extensions: {}, kind: 'document', content: 'Ten words live in this persistent draft today, all told.', updatedAt: '2026-08-17T00:00:00Z' }],
+  contextBuckets: []
+};
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -22,15 +28,24 @@ describe('WorkspaceFacade', () => {
   it('assembles workspace state without exposing endpoint response shapes', async () => {
     const fetcher = vi.fn<FetchLike>(async (input) => {
       const path = String(input);
+      if (path === '/api/workspace') return json(persistent);
       if (path === '/api/settings') return json({ brief, prompts });
-      if (path === '/api/branches') return json({ branches });
-      if (path === '/api/events?limit=45') return json({ events, stats: { events: 1, costUsd: 0.25 } });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25 } });
       return json({ error: 'unexpected path' }, 404);
     });
 
     const result = await new WorkspaceFacade(fetcher).load();
 
-    expect(result).toEqual({ brief, prompts, branches, events, stats: { events: 1, costUsd: 0.25 } });
+    expect(result).toEqual({
+      brief,
+      prompts,
+      branches,
+      events,
+      stats: { events: 1, costUsd: 0.25 },
+      persistent,
+      activeProjectId: 'project',
+      activeDocumentId: 'main'
+    });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
