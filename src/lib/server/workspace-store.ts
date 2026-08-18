@@ -59,6 +59,7 @@ interface DocumentRevisionRow {
   number: number;
   title: string;
   content: string;
+  extensions: string;
   created_at: string;
   created_by: string | null;
   reason: string | null;
@@ -104,6 +105,7 @@ export interface SaveDocumentInput {
   id: string;
   title?: string;
   content?: string;
+  extensions?: ExtensionData;
   createdBy?: string;
   reason?: string;
 }
@@ -168,6 +170,7 @@ function revisionFromRow(row: DocumentRevisionRow): DocumentRevision {
     number: row.number,
     title: row.title,
     content: row.content,
+    extensions: extensions(row.extensions),
     createdAt: row.created_at,
     createdBy: row.created_by ?? undefined,
     reason: row.reason ?? undefined
@@ -239,6 +242,7 @@ export class WorkspaceRepository {
         number INTEGER NOT NULL,
         title TEXT NOT NULL,
         content TEXT NOT NULL,
+        extensions TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(extensions)),
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
         created_by TEXT,
         reason TEXT,
@@ -277,6 +281,10 @@ export class WorkspaceRepository {
     if (!bucketColumns.some((column) => column.name === 'deleted_at')) {
       this.database.exec('ALTER TABLE workspace_context_buckets ADD COLUMN deleted_at TEXT');
     }
+    const revisionColumns = this.database.prepare("PRAGMA table_info('workspace_document_revisions')").all() as { name: string }[];
+    if (!revisionColumns.some((column) => column.name === 'extensions')) {
+      this.database.exec("ALTER TABLE workspace_document_revisions ADD COLUMN extensions TEXT NOT NULL DEFAULT '{}'");
+    }
   }
 
   ensureDefaults(legacyBranches: Branch[] = []): void {
@@ -295,7 +303,7 @@ export class WorkspaceRepository {
             (id, project_id, parent_id, title, sort_order, role, content)
           VALUES (?, ?, ?, ?, ?, 'manuscript', ?)
         `).run(branch.id, defaultProjectId, branch.parentId ?? null, branch.name, index, initialContent);
-        if (inserted.changes) this.insertDocumentRevision(branch.id, 1, branch.name, initialContent, 'system', 'Initial document');
+        if (inserted.changes) this.insertDocumentRevision(branch.id, 1, branch.name, initialContent, {}, 'system', 'Initial document');
       }
 
       const narrativeExists = this.database.prepare(`
@@ -363,7 +371,7 @@ export class WorkspaceRepository {
           (id, project_id, parent_id, title, sort_order, role, content)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(documentId, input.projectId, input.parentId ?? null, title, order, input.role ?? null, content);
-      this.insertDocumentRevision(documentId, 1, title, content, input.createdBy, input.reason ?? 'Created document');
+      this.insertDocumentRevision(documentId, 1, title, content, {}, input.createdBy, input.reason ?? 'Created document');
     });
     create();
     return this.document(documentId);
@@ -374,15 +382,16 @@ export class WorkspaceRepository {
     const title = input.title?.trim() ?? current.title;
     if (!title) throw new Error('Document title is required');
     const content = input.content ?? current.content;
-    if (title === current.title && content === current.content) return current;
+    const nextExtensions = input.extensions ?? current.extensions;
+    if (title === current.title && content === current.content && JSON.stringify(nextExtensions) === JSON.stringify(current.extensions)) return current;
     const number = current.revision + 1;
     const save = this.database.transaction(() => {
       this.database.prepare(`
         UPDATE workspace_documents
-        SET title = ?, content = ?, revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        SET title = ?, content = ?, extensions = ?, revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
-      `).run(title, content, number, input.id);
-      this.insertDocumentRevision(input.id, number, title, content, input.createdBy, input.reason ?? 'Saved document');
+      `).run(title, content, JSON.stringify(nextExtensions), number, input.id);
+      this.insertDocumentRevision(input.id, number, title, content, nextExtensions, input.createdBy, input.reason ?? 'Saved document');
     });
     save();
     return this.document(input.id);
@@ -397,6 +406,7 @@ export class WorkspaceRepository {
       id: documentId,
       title: prior.title,
       content: prior.content,
+      extensions: extensions(prior.extensions),
       createdBy,
       reason: `Restored revision ${prior.number}`
     });
@@ -482,12 +492,12 @@ export class WorkspaceRepository {
     return bucketFromRow(row);
   }
 
-  private insertDocumentRevision(documentId: string, number: number, title: string, content: string, createdBy?: string, reason?: string): void {
+  private insertDocumentRevision(documentId: string, number: number, title: string, content: string, extensionData: ExtensionData, createdBy?: string, reason?: string): void {
     this.database.prepare(`
       INSERT INTO workspace_document_revisions
-        (id, document_id, number, title, content, created_by, reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id('document_revision'), documentId, number, title, content, createdBy ?? null, reason ?? null);
+        (id, document_id, number, title, content, extensions, created_by, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id('document_revision'), documentId, number, title, content, JSON.stringify(extensionData), createdBy ?? null, reason ?? null);
   }
 
   private insertBucketRevision(bucketId: string, number: number, title: string, role: string | undefined, content: string, createdBy?: string, reason?: string): void {

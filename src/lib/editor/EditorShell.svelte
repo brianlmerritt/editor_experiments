@@ -1,28 +1,35 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorState, TextSelection } from 'prosemirror-state';
+  import { EditorState, TextSelection, type Transaction } from 'prosemirror-state';
   import { EditorView } from 'prosemirror-view';
   import { schema } from 'prosemirror-schema-basic';
   import { keymap } from 'prosemirror-keymap';
   import { baseKeymap } from 'prosemirror-commands';
-  import { ySyncPlugin, yUndoPlugin, undo, redo, yUndoPluginKey, ySyncPluginKey, absolutePositionToRelativePosition } from 'y-prosemirror';
+  import { ySyncPlugin, ySyncPluginKey, absolutePositionToRelativePosition } from 'y-prosemirror';
   import { IndexeddbPersistence } from 'y-indexeddb';
   import * as Y from 'yjs';
   import type { Suggestion } from '$lib/domain';
+  import type { FormatAttachment, TextChange } from '$lib/workspace/attachments';
+  import type { EditorDocumentSnapshot, EditorTransactionDetail, EditorTransactionOrigin } from '$lib/workspace/transactions';
   import { suggestionPlugin, pushSuggestionState, currentSuggestionRange } from './suggestion-plugin';
   import { planDocumentDeletion } from './deletion';
 
   export let branchId = 'main';
   export let initialContent = '';
   export let suggestions: Suggestion[] = [];
+  export let formats: FormatAttachment[] = [];
+  export let attachmentRevision = 0;
   export let activeSuggestionId: string | null = null;
   export let preview: { suggestionId: string; text: string } | null = null;
   export let paused = false;
-  export let onTextChange: (detail: { text: string; characters: number; origin?: unknown }) => void = () => {};
+  export let onTextChange: (detail: { text: string; characters: number; origin?: EditorTransactionOrigin }) => void = () => {};
+  export let onEditorReady: (snapshot: EditorDocumentSnapshot) => void = () => {};
+  export let onEditorTransaction: (detail: EditorTransactionDetail) => void = () => {};
+  export let onUndoRequest: () => void = () => {};
+  export let onRedoRequest: () => void = () => {};
   export let onSelectionChange: (detail: { from: number; to: number; text: string }) => void = () => {};
   export let onSuggestionActivate: (id: string) => void = () => {};
   export let onSuggestionHover: (id: string | null) => void = () => {};
-  export let onUndoAcceptance: (origin: { suggestionId: string; source: string }) => void = () => {};
 
   let mount: HTMLDivElement;
   let view: EditorView | null = null;
@@ -30,10 +37,10 @@
   let persistence: IndexeddbPersistence | null = null;
   let lastText = '';
   let previousSuggestions = suggestions;
+  let previousFormats = formats;
+  let previousAttachmentRevision = attachmentRevision;
   let previousActive = activeSuggestionId;
   let previousPreview = preview;
-  let lastAcceptanceOrigin: { suggestionId: string; source: string } | null = null;
-  let lastChangeWasAcceptance = false;
 
   function plainText(): string {
     return view?.state.doc.textBetween(0, view.state.doc.content.size, '\n\n') ?? '';
@@ -43,6 +50,39 @@
     if (!view) return;
     const { from, to } = view.state.selection;
     onSelectionChange({ from, to, text: view.state.doc.textBetween(from, to, '\n') });
+  }
+
+  function snapshot(state: EditorState): EditorDocumentSnapshot {
+    return {
+      doc: state.doc.toJSON() as Record<string, unknown>,
+      text: state.doc.textBetween(0, state.doc.content.size, '\n\n'),
+      selection: { from: state.selection.from, to: state.selection.to }
+    };
+  }
+
+  function transactionOrigin(transaction: Transaction): EditorTransactionOrigin {
+    const explicit = transaction.getMeta('workspaceOrigin') as EditorTransactionOrigin | undefined;
+    if (explicit) return explicit;
+    const acceptance = transaction.getMeta('suggestionOrigin') as { suggestionId?: string; source?: string } | undefined;
+    if (acceptance?.suggestionId) return { kind: 'input_acceptance', inputId: acceptance.suggestionId, source: acceptance.source };
+    return { kind: 'human' };
+  }
+
+  function transactionChanges(transaction: Transaction): TextChange[] {
+    const changes: TextChange[] = [];
+    transaction.steps.forEach((step, index) => {
+      const before = transaction.docs[index] ?? view?.state.doc;
+      step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
+        changes.push({
+          nodeId: branchId,
+          from: oldStart,
+          to: oldEnd,
+          insertedLength: newEnd - newStart,
+          deletedText: before?.textBetween(oldStart, oldEnd, '\n') ?? ''
+        });
+      });
+    });
+    return changes;
   }
 
   onMount(() => {
@@ -59,18 +99,14 @@
         doc: initialDoc,
         plugins: [
           ySyncPlugin(fragment),
-          yUndoPlugin(),
           suggestionPlugin({ onActivate: onSuggestionActivate, onHover: onSuggestionHover }),
           keymap({
             'Mod-z': () => {
-              const origin = lastChangeWasAcceptance ? lastAcceptanceOrigin : null;
-              const handled = view ? undo(view.state) : false;
-              if (handled && origin) onUndoAcceptance(origin);
-              if (handled) lastChangeWasAcceptance = false;
-              return handled;
+              onUndoRequest();
+              return true;
             },
-            'Mod-Shift-z': () => view ? redo(view.state) : false,
-            'Mod-y': () => view ? redo(view.state) : false
+            'Mod-Shift-z': () => { onRedoRequest(); return true; },
+            'Mod-y': () => { onRedoRequest(); return true; }
           }),
           keymap(baseKeymap)
         ]
@@ -80,16 +116,18 @@
         editable: () => !paused,
         dispatchTransaction(transaction) {
           if (!view) return;
-          const origin = transaction.getMeta('suggestionOrigin');
-          if (transaction.docChanged) lastChangeWasAcceptance = Boolean(origin);
+          const before = snapshot(view.state);
+          const origin = transactionOrigin(transaction);
+          const changes = transaction.docChanged ? transactionChanges(transaction) : [];
           const next = view.state.apply(transaction);
           view.updateState(next);
           if (transaction.docChanged) {
-            const text = plainText();
-            if (text !== lastText) {
-              const characters = Math.abs(text.length - lastText.length);
-              lastText = text;
-              onTextChange({ text, characters, origin });
+            const after = snapshot(next);
+            if (after.text !== before.text) {
+              const characters = Math.abs(after.text.length - before.text.length);
+              lastText = after.text;
+              onEditorTransaction({ before, after, changes, origin });
+              onTextChange({ text: after.text, characters, origin });
             }
           }
           if (transaction.docChanged || transaction.selectionSet) notifySelection();
@@ -97,7 +135,8 @@
       });
       lastText = plainText();
       onTextChange({ text: lastText, characters: lastText.length });
-      pushSuggestionState(view, { suggestions, activeId: activeSuggestionId, preview });
+      onEditorReady(snapshot(view.state));
+      pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
     })();
     return () => {
       destroyed = true;
@@ -107,16 +146,29 @@
     };
   });
 
-  $: if (view && (suggestions !== previousSuggestions || activeSuggestionId !== previousActive || preview !== previousPreview)) {
+  $: if (view && (suggestions !== previousSuggestions || formats !== previousFormats || attachmentRevision !== previousAttachmentRevision || activeSuggestionId !== previousActive || preview !== previousPreview)) {
     previousSuggestions = suggestions;
+    previousFormats = formats;
+    previousAttachmentRevision = attachmentRevision;
     previousActive = activeSuggestionId;
     previousPreview = preview;
-    pushSuggestionState(view, { suggestions, activeId: activeSuggestionId, preview });
+    pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
   }
 
   $: if (view) view.setProps({ editable: () => !paused });
 
   export function getText(): string { return plainText(); }
+  export function getSnapshot(): EditorDocumentSnapshot | null { return view ? snapshot(view.state) : null; }
+  export function syncAttachments(nextSuggestions: Suggestion[], nextFormats: FormatAttachment[]): void {
+    if (!view) return;
+    pushSuggestionState(view, {
+      suggestions: nextSuggestions,
+      formats: nextFormats,
+      documentId: branchId,
+      activeId: activeSuggestionId,
+      preview
+    });
+  }
   export function getTextBetween(from: number, to: number): string {
     return view?.state.doc.textBetween(from, to, '\n') ?? '';
   }
@@ -154,7 +206,6 @@
     if (!range) return { ok: false, reason: 'Anchor no longer resolves' };
     const current = view.state.doc.textBetween(range.from, range.to, '\n');
     if (current !== suggestion.anchor.text) return { ok: false, reason: 'Anchored text changed' };
-    yUndoPluginKey.getState(view.state)?.undoManager?.stopCapturing();
     let transaction = view.state.tr;
     let acceptedFrom = range.from;
     let acceptedText = text;
@@ -169,13 +220,23 @@
     }
     const caret = Math.max(1, Math.min(acceptedFrom + acceptedText.length, transaction.doc.content.size));
     transaction = transaction.setSelection(TextSelection.create(transaction.doc, caret));
-    transaction.setMeta('suggestionOrigin', { suggestionId: suggestion.id, source: suggestion.source });
+    transaction.setMeta('workspaceOrigin', { kind: 'input_acceptance', inputId: suggestion.id, source: suggestion.source } satisfies EditorTransactionOrigin);
     transaction.setMeta('addToHistory', true);
     view.dispatch(transaction);
-    lastAcceptanceOrigin = { suggestionId: suggestion.id, source: suggestion.source };
-    lastChangeWasAcceptance = true;
-    yUndoPluginKey.getState(view.state)?.undoManager?.stopCapturing();
     return { ok: true, from: acceptedFrom, to: acceptedFrom + acceptedText.length };
+  }
+  export function restoreSnapshot(value: EditorDocumentSnapshot, action: 'undo' | 'redo'): void {
+    if (!view) return;
+    const restored = schema.nodeFromJSON(value.doc);
+    let transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, restored.content);
+    const max = transaction.doc.content.size;
+    const from = Math.max(1, Math.min(value.selection.from, max));
+    const to = Math.max(from, Math.min(value.selection.to, max));
+    transaction = transaction.setSelection(TextSelection.create(transaction.doc, from, to));
+    transaction.setMeta('workspaceOrigin', { kind: 'workspace_history', source: action } satisfies EditorTransactionOrigin);
+    transaction.setMeta('addToHistory', false);
+    view.dispatch(transaction);
+    view.focus();
   }
   export function focusSuggestion(suggestion: Suggestion): void {
     if (!view) return;
@@ -243,4 +304,5 @@
   :global(.mn-suggestion.is-previewing) { color: transparent; text-decoration: none; background: color-mix(in srgb, var(--category-color) 5%, transparent); }
   :global(.mn-preview-text) { color: var(--ink); background: color-mix(in srgb, var(--category-color) 13%, var(--paper)); border-bottom: 2px solid var(--category-color); white-space: pre; }
   :global(.mn-paragraph-note) { border-left: 2px solid color-mix(in srgb, var(--category-color, var(--accent)) 55%, transparent); padding-left: 14px; margin-left: -16px !important; }
+  :global(.mn-format-strikethrough) { text-decoration-line: line-through; text-decoration-thickness: 1.5px; text-decoration-color: color-mix(in srgb, var(--reject) 72%, currentColor); }
 </style>

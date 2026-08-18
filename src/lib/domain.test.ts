@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { categories, categoryMeta, coalesceDuplicateSuggestions, eventTypes, makeId, reconcileSuggestionAnchors, sourceCatalog, suggestionFingerprint, wordCount, type Suggestion } from './domain';
+import { textTarget } from '$lib/workspace/attachments';
 
 function suggestion(overrides: Partial<Suggestion> = {}): Suggestion {
   return {
     id: 'sg_1',
+    kind: 'craft_suggestion',
     source: 'local-craft',
     sourceNumber: 1,
     sourceKind: 'local',
+    target: textTarget('main', 4, 11, 'noticed'),
+    behaviourId: 'craft-input',
+    events: [],
     anchor: { from: 4, to: 11, text: 'noticed' },
     type: 'annotation',
     payload: { comment: 'This filters the moment.' },

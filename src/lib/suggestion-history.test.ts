@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { LedgerEvent, Suggestion } from '$lib/domain';
+import { textTarget } from '$lib/workspace/attachments';
 import { restoreSuggestions } from './suggestion-history';
 
 const suggestion: Suggestion = {
   id: 'suggestion-1',
+  kind: 'craft_suggestion',
   source: 'local-craft',
   sourceNumber: 1,
   sourceKind: 'local',
+  target: textTarget('main', 1, 4, 'word'),
+  behaviourId: 'craft-input',
+  events: [],
   anchor: { from: 1, to: 4, text: 'word' },
   type: 'annotation',
   payload: { comment: 'Check it.' },

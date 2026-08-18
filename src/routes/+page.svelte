@@ -3,8 +3,10 @@
   import EditorShell from '$lib/editor/EditorShell.svelte';
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
-  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type Suggestion, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type WritingBrief } from '$lib/domain';
+  import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
+  import { settings as providerSettings } from '$lib/state/settings.svelte';
   import type { ContextBucket, ContextScope } from '$lib/workspace/model';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
@@ -16,6 +18,10 @@
   let contextOpen = false;
   let ledgerOpen = false;
   let sourceLegendOpen = false;
+  let inputsOpen = false;
+  let displayedSourceStates: Record<string, SourceState> = { ...workspace.sourceStates };
+  let inputStateFilter = 'all';
+  let inputSearch = '';
   let briefDraft: WritingBrief = { ...workspace.brief };
   let sentinelInstruction = '';
   let editTimer: ReturnType<typeof setTimeout> | null = null;
@@ -42,11 +48,16 @@
 
   $: activeSuggestion = workspace.suggestions.find((suggestion) => suggestion.id === workspace.activeSuggestionId) ?? null;
   $: selectedPrompt = workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0];
+  $: managedInputs = workspace.inputs
+    .filter((input) => inputStateFilter === 'all' || input.state === inputStateFilter)
+    .filter((input) => !inputSearch.trim() || `${input.payload.comment} ${input.source} ${input.category} ${input.state}`.toLowerCase().includes(inputSearch.trim().toLowerCase()))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
   onMount(() => {
     void workspace.initialize().then(() => {
       briefDraft = { ...workspace.brief };
       sentinelInstruction = workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.instruction ?? '';
+      displayedSourceStates = { ...workspace.sourceStates };
       workspaceReady = true;
       displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
       refreshLiveSuggestions();
@@ -97,7 +108,7 @@
 
   function refreshLiveSuggestions(): void {
     const seen = new Set<string>();
-    liveSuggestions = workspace.mode === 'drafting' ? [] : workspace.suggestions
+    liveSuggestions = workspace.suggestions
       .filter((suggestion) => suggestion.state === 'pending')
       .filter((suggestion) => workspace.categoryVisibility[suggestion.category])
       .filter((suggestion) => workspace.sourceStates[suggestion.source] === 'visible')
@@ -110,6 +121,7 @@
       .sort((a, b) => a.order - b.order)
       .slice(0, workspace.densityCap);
     queuedCount = Math.max(0, workspace.suggestions.filter((suggestion) => suggestion.state === 'pending').length - liveSuggestions.length);
+    if (editorReady) void tick().then(() => editor?.syncAttachments(liveSuggestions, workspace.formats));
   }
 
   function showNotice(message: string): void {
@@ -127,22 +139,31 @@
     workspace.notice = null;
   }
 
-  async function changeMode(mode: 'drafting' | 'revising'): Promise<void> {
-    const change = workspace.setMode(mode);
-    refreshLiveSuggestions();
-    await change;
-    await tick();
-    layoutCards();
-  }
-
   function changeCategory(category: (typeof categories)[number]): void {
     workspace.toggleCategory(category);
     refreshLiveSuggestions();
   }
 
   async function changeSource(sourceId: string): Promise<void> {
+    if (sourceId === 'openrouter' && $providerSettings.sourceAvailability.openrouter?.available !== true) {
+      providerSettings.openOpenRouter();
+      return;
+    }
     await workspace.cycleSource(sourceId);
+    displayedSourceStates = { ...workspace.sourceStates };
     refreshLiveSuggestions();
+  }
+
+  async function saveOpenRouter(): Promise<void> {
+    try {
+      const configured = await providerSettings.saveOpenRouter();
+      workspace.enableConfiguredSource('openrouter');
+      displayedSourceStates = { ...workspace.sourceStates };
+      workspace.notice = `OpenRouter ${configured.model ?? $providerSettings.openRouterModel} was saved locally and is now visible.`;
+      refreshLiveSuggestions();
+    } catch (error) {
+      workspace.lastError = $providerSettings.error ?? (error instanceof Error ? error.message : 'OpenRouter configuration failed');
+    }
   }
 
   async function changePause(): Promise<void> {
@@ -168,8 +189,14 @@
       void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
       refreshLiveSuggestions();
     }
-    scheduleDocumentSave(detail.text, detail.origin ? 'Accepted revision' : 'Editing session');
-    if (detail.origin) return;
+    const origin = detail.origin as { kind?: string } | undefined;
+    const saveReason = origin?.kind === 'workspace_history'
+      ? 'Undo or redo'
+      : origin?.kind === 'input_acceptance'
+        ? 'Accepted revision'
+        : 'Editing session';
+    scheduleDocumentSave(detail.text, saveReason);
+    if (origin && origin.kind !== 'human') return;
     const now = Date.now();
     if (!editSession.started) editSession.started = now;
     editSession.characters += detail.characters;
@@ -181,7 +208,52 @@
       editSession = { started: 0, characters: 0, text: '' };
     }, 1600);
     if (scanTimer) clearTimeout(scanTimer);
-    if (workspace.mode === 'revising' && !workspace.paused) scanTimer = setTimeout(() => void runSentinels(), 5000);
+    if (!workspace.paused) scanTimer = setTimeout(() => void runSentinels(), 5000);
+  }
+
+  function undoWorkspace(): void {
+    const snapshot = workspace.undoWorkspace();
+    if (!snapshot || !editor) return;
+    editor.restoreSnapshot(snapshot, 'undo');
+    refreshLiveSuggestions();
+  }
+
+  function redoWorkspace(): void {
+    const snapshot = workspace.redoWorkspace();
+    if (!snapshot || !editor) return;
+    editor.restoreSnapshot(snapshot, 'redo');
+    refreshLiveSuggestions();
+  }
+
+  function strikeSelection(): void {
+    const snapshot = editor?.getSnapshot();
+    if (snapshot) workspace.setEditorReady(snapshot);
+    const removing = workspace.selectionHasStrikethrough(selection.from, selection.to);
+    if (workspace.toggleSelectionStrikethrough(selection.from, selection.to, selection.text)) {
+      refreshLiveSuggestions();
+      showNotice(removing ? 'Strikethrough removed from selection.' : 'Selection struck through.');
+    }
+  }
+
+  function strikeWork(): void {
+    const snapshot = editor?.getSnapshot();
+    if (snapshot) workspace.setEditorReady(snapshot);
+    const removing = workspace.workHasStrikethrough;
+    if (workspace.toggleWorkStrikethrough()) {
+      refreshLiveSuggestions();
+      showNotice(removing ? 'Work strikethrough removed.' : 'Work struck through.');
+    } else showNotice('The editor is still opening.');
+  }
+
+  function openInputs(): void {
+    inputStateFilter = 'all';
+    inputSearch = '';
+    inputsOpen = true;
+  }
+
+  async function setManagedInputState(input: Suggestion, state: 'pending' | 'rejected'): Promise<void> {
+    await workspace.setInputState(input.id, state, state === 'pending' ? 'Reopen input' : 'Dismiss input');
+    refreshLiveSuggestions();
   }
 
   function scheduleDocumentSave(text: string, reason: string): void {
@@ -211,9 +283,9 @@
       const relative = editor.getRelativeAnchor(suggestion.anchor.from, suggestion.anchor.to);
       workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
     }
-    if (workspace.mode === 'drafting') showNotice(valid.size
-      ? `${valid.size} new ${valid.size === 1 ? 'note' : 'notes'} added.`
-      : 'Craft pass complete; no new notes.');
+    showNotice(valid.size
+      ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added.`
+      : 'Craft pass complete; no new inputs.');
     refreshLiveSuggestions();
     await tick();
     layoutCards();
@@ -228,12 +300,9 @@
       const relative = editor.getRelativeAnchor(suggestion.anchor.from, suggestion.anchor.to);
       workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
     }
-    if (workspace.mode === 'drafting') await changeMode('revising');
-    else {
-      refreshLiveSuggestions();
-      await tick();
-      layoutCards();
-    }
+    refreshLiveSuggestions();
+    await tick();
+    layoutCards();
     if (incoming[0]) void activateCard(incoming[0].id);
   }
 
@@ -295,7 +364,7 @@
     if (!undoDismiss) return;
     clearTimeout(undoDismiss.timer);
     const restored = undoDismiss.suggestion;
-    workspace.suggestions = workspace.suggestions.map((item) => item.id === restored.id ? { ...item, state: 'pending' } : item);
+    await workspace.setInputState(restored.id, 'pending', 'Undo input dismissal');
     refreshLiveSuggestions();
     undoDismiss = null;
     await workspace.log('dismiss_undone', { restored: true }, restored.id);
@@ -303,7 +372,7 @@
 
   function handleReviewKeys(event: KeyboardEvent): void {
     const target = event.target as HTMLElement;
-    if (target.matches('input, textarea, select') || target.isContentEditable || workspace.mode !== 'revising' || !liveSuggestions.length) return;
+    if (target.matches('input, textarea, select') || target.isContentEditable || !liveSuggestions.length) return;
     const list = liveSuggestions;
     let index = list.findIndex((suggestion) => suggestion.id === workspace.activeSuggestionId);
     if (event.key === 'Tab') {
@@ -446,23 +515,20 @@
 
 <svelte:head><title>Margin Note — writing support</title><meta name="description" content="A meta-first creative writing support workbench." /></svelte:head>
 
-<div class="app-shell" class:revising={workspace.mode === 'revising'}>
+<div class="app-shell">
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
-    <div class="mode-switch" aria-label="Writing mode">
-      <button class:active={workspace.mode === 'drafting'} on:click={() => changeMode('drafting')}>Drafting</button>
-      <button class:active={workspace.mode === 'revising'} on:click={() => changeMode('revising')}>Revising {#if workspace.pendingCount}<span>{workspace.pendingCount}</span>{/if}</button>
-    </div>
     <div class="top-actions">
       <button class:paused={isPaused} on:click={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
       <button on:click={openContext}>Context <span>{workspace.currentContext.length}</span></button>
+      <button on:click={openInputs}>Inputs <span>{workspace.inputs.length}</span></button>
       <button on:click={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
       <button on:click={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
     </div>
   </header>
 
-    <nav class="filterbar" class:mode-hidden={workspace.mode !== 'revising'} aria-label="Suggestion filters">
+    <nav class="filterbar" aria-label="Input filters">
       <span class="filter-label">Show</span>
       {#each categories as category}
         <button class:off={!workspace.categoryVisibility[category]} style={`--category:${`var(--cat-${category})`}`} on:click={() => changeCategory(category)}>
@@ -493,6 +559,11 @@
             <button on:click={forkBranch}>Fork from here</button>
           </div>
           <div><span>{wordCount(documentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button on:click={exportMarkdown}>Export .md</button></div>
+          <div class="document-tools">
+            <button disabled={!workspace.undoStack.length} on:click={undoWorkspace}>Undo</button>
+            <button disabled={!workspace.redoStack.length} on:click={redoWorkspace}>Redo</button>
+            <button on:click={strikeWork}>{workspace.workHasStrikethrough ? 'Remove work strikethrough' : 'Strike work'}</button>
+          </div>
         </div>
 
         <div class="editor-wrap">
@@ -505,14 +576,19 @@
                 branchId={workspace.branchId}
                 initialContent={workspace.currentDocument.content}
                 suggestions={liveSuggestions}
+                formats={workspace.formats}
+                attachmentRevision={workspace.workspaceRevision}
                 activeSuggestionId={workspace.activeSuggestionId}
                 preview={workspace.preview}
                 paused={isPaused}
                 onTextChange={textChanged}
+                onEditorReady={(snapshot) => workspace.setEditorReady(snapshot)}
+                onEditorTransaction={(detail) => workspace.recordEditorTransaction(detail)}
+                onUndoRequest={undoWorkspace}
+                onRedoRequest={redoWorkspace}
                 onSelectionChange={(detail) => selection = detail}
                 onSuggestionActivate={activateFromEditor}
                 onSuggestionHover={(id) => workspace.activate(id)}
-                onUndoAcceptance={(origin) => workspace.log('reverted', { source: origin.source }, origin.suggestionId)}
               />
             {/key}
           {/if}
@@ -524,6 +600,7 @@
               <button type="button" on:mousedown|preventDefault on:click={() => runSelection('cadence')}>Vary cadence</button>
               <button type="button" on:mousedown|preventDefault on:click={() => runSelection('distance')}>More distant</button>
               <button type="button" on:mousedown|preventDefault on:click={() => runSelection('synonyms')}>Synonyms</button>
+              <button type="button" on:mousedown|preventDefault on:click={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
             </div>
           {/if}
         </div>
@@ -532,26 +609,32 @@
           <div class="source-heading"><span>Sources</span><button on:click={() => sourceLegendOpen = !sourceLegendOpen}>L/A key</button></div>
           <div class="source-buttons">
             {#each sourceCatalog as source}
-              {@const state = workspace.sourceStates[source.id]}
-              <button class:invisible={state === 'invisible'} class:off={state === 'off'} on:click={() => changeSource(source.id)} title={`${source.label}: ${state}`}>
-                <span class="state-icon">{state === 'visible' ? '◉' : state === 'invisible' ? '⊘' : '○'}</span>
+              {@const state = displayedSourceStates[source.id]}
+              {@const availability = $providerSettings.sourceAvailability[source.id]}
+              {@const unavailable = availability?.available !== true}
+              <button class:invisible={state === 'invisible'} class:off={state === 'off'} class:unavailable on:click={() => changeSource(source.id)} title={unavailable ? availability.reason : `${source.label}: ${state}${availability?.model ? ` · ${availability.model}` : ''}`}>
+                <span class="state-icon">{unavailable ? '!' : state === 'visible' ? '◉' : state === 'invisible' ? '⊘' : '○'}</span>
                 <b>{source.kind === 'local' ? 'L' : 'A'}{source.number}</b>
                 <span>{source.label}</span>
-                <small>{state}</small>
+                <small>{unavailable ? 'not configured' : state}</small>
               </button>
             {/each}
           </div>
           <div class="source-summary">
             <span>Session spend <strong>${workspace.costUsd.toFixed(4)}</strong> <em>includes invisible</em></span>
+            {#if $providerSettings.sourceAvailability.openrouter?.credentialHint}
+              <span class="provider-identity">{$providerSettings.sourceAvailability.openrouter.credentialHint} · {$providerSettings.sourceAvailability.openrouter.model}</span>
+            {/if}
+            <button class="provider-config" on:click={() => providerSettings.openOpenRouter()}>{$providerSettings.sourceAvailability.openrouter?.available === true ? 'OpenRouter settings' : 'Configure OpenRouter'}</button>
             <button class="scan" disabled={workspace.generating || workspace.paused} on:click={runSentinels}>{workspace.generating ? 'Reading…' : 'Run craft pass'}</button>
           </div>
           {#if sourceLegendOpen}<p class="legend"><b>L</b> local, offline craft tool · <b>A</b> AI or scripted model · source number identifies provenance without assigning it a hue. Click rapidly: visible → invisible → off.</p>{/if}
         </div>
       </div>
 
-        <aside class:tray={workspace.surface === 'tray'} class:mode-hidden={workspace.mode !== 'revising'}>
+        <aside class:tray={workspace.surface === 'tray'}>
           <header>
-            <div><span>{workspace.surface === 'docked' ? 'Margin' : 'Triage tray'}</span><strong>{liveSuggestions.length} live</strong></div>
+            <div><span>{workspace.surface === 'docked' ? 'Inputs' : 'Input tray'}</span><strong>{liveSuggestions.length} live</strong></div>
             {#if queuedCount}<small>+{queuedCount} queued by density cap</small>{/if}
           </header>
           <div
@@ -561,7 +644,7 @@
             style={workspace.surface === 'docked' ? `min-height:max(68vh, ${cardsHeight}px)` : ''}
           >
             {#if !liveSuggestions.length}
-              <div class="empty-notes"><span>✓</span><p>No visible notes.</p><small>Run a craft pass, change filters, or bring an invisible source back.</small></div>
+              <div class="empty-notes"><span>✓</span><p>No visible inputs.</p><small>Run a craft pass, change filters, or bring an invisible source back.</small></div>
             {/if}
             {#each liveSuggestions as suggestion}
               <div
@@ -588,12 +671,6 @@
           </div>
           {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>E</kbd> accept/edit · <kbd>X</kbd> reject</p>{/if}
         </aside>
-        <aside class="drafting-aside" class:mode-hidden={workspace.mode === 'revising'} aria-live="polite">
-          <span class="quiet-count">{workspace.pendingCount}</span>
-          <p>{workspace.pendingCount === 1 ? 'note is' : 'notes are'} waiting quietly.</p>
-          <button on:click={() => changeMode('revising')}>Open revision margin</button>
-          <small>Drafting mode keeps decorations hidden and analysis out of your way.</small>
-        </aside>
     </section>
 
     {#if ledgerOpen}<div class="ledger-panel"><LedgerTail events={workspace.ledger} costUsd={workspace.costUsd} /></div>{/if}
@@ -603,6 +680,58 @@
   {#if workspace.notice}<button class="notice" on:click={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
   {#if workspace.lastError}<button class="error" on:click={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
   {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button on:click={undoDragDismiss}>Undo</button></div>{/if}
+
+  {#if $providerSettings.openRouterDialogOpen}
+    <div class="modal-backdrop" role="presentation" on:click={() => providerSettings.closeOpenRouter()}>
+      <div class="settings provider-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="provider-title" on:click|stopPropagation on:keydown|stopPropagation>
+        <header><div><small>AI source A3</small><h2 id="provider-title">OpenRouter</h2></div><button on:click={() => providerSettings.closeOpenRouter()}>×</button></header>
+        <p class="provider-intro">The key and model are saved in the local server's ignored provider-settings file, readable only by your operating-system user. They are not written to the work, browser storage, or event ledger.</p>
+        <label>OpenRouter API key {#if $providerSettings.sourceAvailability.openrouter?.credentialHint}<small>Saved as {$providerSettings.sourceAvailability.openrouter.credentialHint}; leave blank to keep it</small>{/if}<input type="password" autocomplete="off" bind:value={$providerSettings.openRouterKey} placeholder={$providerSettings.sourceAvailability.openrouter?.credentialHint ?? 'sk-or-…'} /></label>
+        <label>OpenRouter model ID<input bind:value={$providerSettings.openRouterModel} placeholder="anthropic/claude-fable-5" /></label>
+        <footer><p>The masked key confirms which credential is active without exposing it.</p><button on:click={() => providerSettings.closeOpenRouter()}>Cancel</button><button class="primary" disabled={$providerSettings.savingProvider || !providerSettings.canSaveOpenRouter()} on:click={saveOpenRouter}>{$providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
+      </div>
+    </div>
+  {/if}
+
+  {#if inputsOpen}
+    <div class="modal-backdrop" role="presentation" on:click={() => inputsOpen = false}>
+      <div class="input-manager" role="dialog" tabindex="-1" aria-modal="true" aria-label="Manage inputs" on:click|stopPropagation on:keydown|stopPropagation>
+        <header>
+          <div><small>Workspace</small><h2>Inputs</h2></div>
+          <button class="close" on:click={() => inputsOpen = false}>×</button>
+        </header>
+        <div class="input-controls">
+          <input aria-label="Search inputs" placeholder="Search inputs" bind:value={inputSearch} />
+          <select aria-label="Filter input state" bind:value={inputStateFilter}>
+            <option value="all">All states</option>
+            <option value="pending">Pending</option>
+            <option value="accepted">Accepted</option>
+            <option value="rejected">Rejected</option>
+            <option value="target_changed">Target changed</option>
+            <option value="target_removed">Target removed</option>
+            <option value="stale">Stale</option>
+          </select>
+        </div>
+        <p class="input-summary">{managedInputs.length} of {workspace.inputs.length} inputs</p>
+        <div class="input-list">
+          {#if !managedInputs.length}<p class="input-empty">No inputs match this view.</p>{/if}
+          {#each managedInputs as input}
+            <article>
+              <header><strong>{categoryMeta[input.category].label}</strong><span class="state state-{input.state}">{input.state.replaceAll('_', ' ')}</span></header>
+              <p>{input.payload.comment}</p>
+              <small>{input.sourceKind === 'local' ? 'Local' : 'AI'} · {input.source} · {targetLabel(input.target)}</small>
+              {#if input.events.length}<small>{input.events.length} target {input.events.length === 1 ? 'event' : 'events'} recorded</small>{/if}
+              <footer>
+                {#if input.target.targets.length}<button on:click={() => { editor.focusSuggestion(input); inputsOpen = false; }}>Locate</button>{/if}
+                {#if input.state !== 'pending' && input.target.targets.length}<button on:click={() => setManagedInputState(input, 'pending')}>Reopen</button>{/if}
+                {#if input.state === 'pending'}<button on:click={() => setManagedInputState(input, 'rejected')}>Dismiss</button>{/if}
+              </footer>
+            </article>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if settingsOpen}
     <div class="modal-backdrop" role="presentation" on:click={() => settingsOpen = false}>
@@ -669,15 +798,11 @@
 
 <style>
   .app-shell { min-height: 100vh; }
-  .topbar { position: sticky; z-index: 30; top: 0; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; min-height: 58px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 91%, transparent); backdrop-filter: blur(14px); }
+  .topbar { position: sticky; z-index: 30; top: 0; display: grid; grid-template-columns: 1fr auto; align-items: center; min-height: 58px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 91%, transparent); backdrop-filter: blur(14px); }
   .brand { display: flex; align-items: baseline; gap: 8px; text-decoration: none; }
   .brand > span { color: var(--accent); font: 700 25px/1 var(--font-reading); }
   .brand strong { font: 700 14px/1 var(--font-ui); letter-spacing: -.02em; }
   .brand small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .09em; }
-  .mode-switch { display: flex; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper-deep); }
-  .mode-switch button { border: 0; border-radius: 999px; background: transparent; color: var(--muted); padding: 7px 14px; font-size: 11px; font-weight: 700; letter-spacing: .03em; cursor: pointer; }
-  .mode-switch button.active { background: var(--paper); color: var(--ink); box-shadow: 0 1px 5px rgb(40 34 26 / .12); }
-  .mode-switch button span { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin-left: 5px; border-radius: 9px; background: var(--accent); color: white; font-size: 9px; }
   .top-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
   .top-actions button, .top-actions a { border: 0; background: transparent; color: var(--ink-soft); padding: 8px 9px; border-radius: 3px; text-decoration: none; font-size: 11px; cursor: pointer; }
   .top-actions button:hover, .top-actions a:hover { background: var(--paper-deep); color: var(--ink); }
@@ -702,8 +827,10 @@
   .document-selectors { min-width: 0; flex-wrap: wrap; }
   .document-selectors > span { color: var(--line-strong); }
   .document-meta select, .document-meta button { border: 0; background: transparent; color: var(--muted); padding: 4px; font-size: 10px; cursor: pointer; }
+  .document-meta button:disabled { opacity: .35; cursor: default; }
   .document-meta select { color: var(--ink-soft); font-weight: 600; }
   .document-meta button:hover { color: var(--accent); }
+  .document-tools { padding-left: 6px; border-left: 1px solid var(--line); }
   .editor-wrap { position: relative; }
   .editor-loading { display: grid; place-items: center; min-height: 68vh; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); font: 12px/1.5 var(--font-ui); }
   .selection-menu { position: sticky; z-index: 12; bottom: 22px; display: flex; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 40px); margin: -58px auto 17px; padding: 5px; border: 1px solid #34322e; border-radius: 4px; background: #282723; color: #f7f3e9; box-shadow: 0 10px 30px rgb(0 0 0 / .2); }
@@ -726,11 +853,6 @@
   .empty-notes small { max-width: 230px; font: 10px/1.5 var(--font-ui); }
   .key-help { color: var(--muted); font: 9px/1.6 var(--font-ui); text-align: center; }
   kbd { display: inline-block; min-width: 18px; padding: 1px 4px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 3px; background: var(--paper); font: 8px/1.4 var(--font-mono); }
-  .drafting-aside { align-self: start; margin-top: 22vh; text-align: center; color: var(--muted); }
-  .quiet-count { display: grid; place-items: center; width: 60px; height: 60px; margin: auto; border: 1px solid var(--line); border-radius: 50%; background: color-mix(in srgb, var(--paper) 70%, transparent); color: var(--accent); font: 500 25px/1 var(--font-reading); }
-  .drafting-aside p { color: var(--ink-soft); font: 14px/1.4 var(--font-reading); }
-  .drafting-aside button { border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
-  .drafting-aside small { display: block; max-width: 240px; margin: 12px auto; font: 10px/1.5 var(--font-ui); }
   .source-dock { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 11px; }
   .source-heading, .source-summary { display: flex; align-items: center; justify-content: space-between; }
   .source-heading span { color: var(--muted); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .1em; }
@@ -744,9 +866,12 @@
   .source-buttons button.invisible { border-style: dashed; opacity: .58; }
   .source-buttons button.invisible .state-icon, .source-buttons button.invisible small { color: #887b61; }
   .source-buttons button.off { background: transparent; opacity: .42; filter: grayscale(1); }
+  .source-buttons button.unavailable { border-style: dotted; opacity: .66; filter: grayscale(.65); }
+  .source-buttons button.unavailable .state-icon, .source-buttons button.unavailable small { color: var(--reject); }
   .source-summary { color: var(--muted); font-size: 9px; }
   .source-summary strong { color: var(--ink-soft); }
   .source-summary em { font-style: normal; opacity: .7; }
+  .provider-config { margin-left: auto; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 10px; font: 700 9px/1 var(--font-ui); cursor: pointer; }
   .scan { border: 0; border-radius: 3px; background: var(--accent); color: white; padding: 8px 12px; font: 700 9px/1 var(--font-ui); cursor: pointer; }
   .scan:disabled { opacity: .45; cursor: wait; }
   .legend { max-width: 680px; color: var(--muted); font: 9px/1.5 var(--font-ui); }
@@ -758,6 +883,25 @@
   .undo-toast { position: fixed; z-index: 61; left: 50%; bottom: 22px; transform: translateX(-50%); display: flex; align-items: center; gap: 18px; border-radius: 3px; background: #282723; color: white; padding: 10px 13px; box-shadow: 0 10px 30px rgb(0 0 0 / .2); font-size: 10px; }
   .undo-toast button { border: 0; background: transparent; color: #8cd5bc; font-weight: 700; cursor: pointer; }
   .modal-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 22px; background: rgb(34 31 27 / .38); backdrop-filter: blur(3px); }
+  .input-manager { width: min(820px, 100%); max-height: calc(100vh - 44px); overflow: hidden; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 5px; background: var(--paper); box-shadow: 0 30px 80px rgb(26 22 17 / .22); padding: 24px; }
+  .input-manager > header, .input-list article > header, .input-list article > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .input-manager h2 { margin: 3px 0 0; font: 500 24px/1.2 var(--font-reading); }
+  .input-manager header small { color: var(--muted); font: 600 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
+  .input-manager .close { border: 0; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
+  .input-controls { display: grid; grid-template-columns: 1fr 190px; gap: 9px; margin-top: 18px; }
+  .input-controls input, .input-controls select { width: 100%; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink); padding: 9px 10px; outline: none; font-size: 11px; }
+  .input-summary { margin: 10px 0; color: var(--muted); font-size: 9px; }
+  .input-list { overflow: auto; display: grid; gap: 8px; padding-right: 4px; }
+  .input-list article { border: 1px solid var(--line); border-radius: 4px; background: #fffefa; padding: 12px; }
+  .input-list article strong { font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
+  .input-list article p { margin: 9px 0; color: var(--ink-soft); font: 12px/1.45 var(--font-ui); }
+  .input-list article small { display: block; margin-top: 4px; color: var(--muted); font: 9px/1.4 var(--font-ui); }
+  .input-list article footer { justify-content: flex-end; margin-top: 9px; }
+  .input-list article footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 6px 9px; font-size: 9px; cursor: pointer; }
+  .state { border-radius: 999px; background: var(--paper-deep); color: var(--muted); padding: 4px 7px; font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
+  .state-pending { background: var(--accent-soft); color: var(--accent); }
+  .state-target_changed, .state-target_removed { background: #f5dfdb; color: var(--reject); }
+  .input-empty { padding: 48px 20px; text-align: center; color: var(--muted); }
   .settings { width: min(720px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); box-shadow: 0 30px 80px rgb(26 22 17 / .22); padding: 25px; }
   .settings > header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 20px; }
   .settings h2 { margin: 3px 0 0; font: 500 24px/1.2 var(--font-reading); }
@@ -772,6 +916,10 @@
   .settings footer p { flex: 1; margin: 0; color: var(--muted); font: 9px/1.5 var(--font-ui); }
   .settings footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
   .settings footer .primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .settings footer button:disabled { opacity: .45; cursor: default; }
+  .provider-settings { width: min(560px, 100%); }
+  .provider-intro { margin: -6px 0 18px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
+  .provider-identity { color: var(--muted); font: 9px/1.2 var(--font-mono); }
   .context-settings { width: min(840px, 100%); }
   .context-intro { margin: -8px 0 20px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
   .context-list { display: grid; gap: 14px; }
@@ -792,15 +940,13 @@
     aside { padding-top: 8px; }
     .cards.docked { display: grid; gap: 10px; min-height: 0; padding-top: 12px; }
     .cards.docked .card-slot { position: static; }
-    .drafting-aside { margin: 20px 0; }
     .brand small { display: none; }
     .filterbar { overflow-x: auto; }
   }
   @media (max-width: 680px) {
     .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
-    .mode-switch { order: 3; grid-column: 1 / -1; justify-self: center; margin: 5px; }
     .top-actions button:nth-last-child(n+3), .top-actions a { display: none; }
-    .filterbar { top: 99px; }
+    .filterbar { top: 58px; }
     main { width: calc(100% - 20px); padding-top: 18px; }
     .form-grid { grid-template-columns: 1fr; }
     .context-fields { grid-template-columns: 1fr; }

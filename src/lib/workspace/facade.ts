@@ -3,6 +3,7 @@ import type {
   GenerationRequest,
   JudgmentPair,
   LedgerEvent,
+  SourceAvailability,
   Suggestion,
   TaskPrompt,
   WritingBrief
@@ -12,6 +13,7 @@ import type {
   ContextBucketRevision,
   ContextScope,
   DocumentRevision,
+  ExtensionData,
   PersistentWorkspace,
   WorkspaceDocument,
   WorkspaceProject
@@ -31,6 +33,7 @@ export interface WorkspaceBootstrap {
   persistent: PersistentWorkspace;
   activeProjectId: string;
   activeDocumentId: string;
+  sourceAvailability: Record<string, SourceAvailability>;
 }
 
 export interface SuggestionResult {
@@ -105,7 +108,7 @@ export class WorkspaceFacade {
     const activeDocument = projectDocuments.find((document) => document.id === preferred?.documentId) ?? projectDocuments[0];
     if (!activeDocument) throw new Error('Project has no document');
     const [settings, eventFeed] = await Promise.all([
-      this.get<{ brief: WritingBrief; prompts: TaskPrompt[] }>('/api/settings'),
+      this.get<{ brief: WritingBrief; prompts: TaskPrompt[]; sourceAvailability?: Record<string, SourceAvailability> }>('/api/settings'),
       this.get<{ events: Required<LedgerEvent>[]; stats: LedgerStats }>(`/api/events?history=suggestions&branch=${encodeURIComponent(activeDocument.id)}`)
     ]);
     return {
@@ -122,7 +125,13 @@ export class WorkspaceFacade {
       stats: eventFeed.stats,
       persistent,
       activeProjectId: activeProject.id,
-      activeDocumentId: activeDocument.id
+      activeDocumentId: activeDocument.id,
+      sourceAvailability: settings.sourceAvailability ?? {
+        'local-craft': { available: true },
+        'fake-sentinel': { available: true },
+        openrouter: { available: false, reason: 'OpenRouter availability was not reported.' },
+        ollama: { available: false, reason: 'Ollama availability was not reported.' }
+      }
     };
   }
 
@@ -154,7 +163,7 @@ export class WorkspaceFacade {
     return result.document;
   }
 
-  async saveDocument(input: { id: string; title?: string; content?: string; createdBy?: string; reason?: string }): Promise<WorkspaceDocument> {
+  async saveDocument(input: { id: string; title?: string; content?: string; extensions?: ExtensionData; createdBy?: string; reason?: string }): Promise<WorkspaceDocument> {
     const result = await this.post<{ document: WorkspaceDocument }>('/api/workspace', { action: 'save_document', input });
     return result.document;
   }
@@ -221,6 +230,16 @@ export class WorkspaceFacade {
 
   async savePrompt(value: TaskPrompt, sessionId: string, branchId: string): Promise<void> {
     await this.post('/api/settings', { kind: 'prompt', value, sessionId, branchId });
+  }
+
+  async configureOpenRouter(key: string, model: string): Promise<Record<string, SourceAvailability>> {
+    const result = await this.post<{ sourceAvailability: Record<string, SourceAvailability> }>('/api/settings', {
+      kind: 'provider',
+      source: 'openrouter',
+      key,
+      model
+    });
+    return result.sourceAvailability;
   }
 
   async createBranch(branch: Branch, sessionId: string): Promise<Branch[]> {

@@ -38,6 +38,7 @@ export interface DocumentRevision {
   number: number;
   title: string;
   content: string;
+  extensions: ExtensionData;
   createdAt: string;
   createdBy?: string;
   reason?: string;

@@ -166,16 +166,30 @@ input and target records win, and indexes are rebuilt.
 
 ## Compatibility with the current POC
 
-The current `src/lib/workspace/facade.ts` is an HTTP-oriented first slice. It already
-keeps routes and response handling out of Svelte components, but it does not yet
-implement this complete contract:
+The current `src/lib/workspace/facade.ts` is an HTTP-oriented first slice. It keeps
+routes and response handling out of Svelte components and now persists the POC domain
+payload—inputs, formats, behaviour profiles, and workspace revision—in the active
+document's `extensions.margin_note` data and immutable document versions.
 
-- it loads several collections rather than one full domain snapshot;
-- live manuscript edits remain primarily in Yjs/IndexedDB;
-- suggestion state is reconstructed from ledger events;
-- undo is text-oriented rather than a complete domain transaction;
+The Svelte workspace owns active undo/redo and transforms attachment targets for text
+edits.
+
+Provider settings use a parallel boundary: a Svelte writable settings store owns the
+live form, validation, availability, model, and masked credential identity. The façade
+transports settings requests and responses, while raw credentials remain behind the
+server boundary and outside workspace and document state.
+
+The remaining differences from this complete contract are:
+
+- it loads several collections rather than one normalised aggregate snapshot;
+- manuscript content is still mirrored through Yjs/IndexedDB as well as durable
+  document versions;
+- older documents may fall back to reconstructing inputs from ledger events before
+  their first extension-backed save;
+- active history uses full in-memory snapshots and is not durable across reloads;
 - generation and persistence methods share one class;
-- subscriptions and a transaction outbox are not implemented.
+- idempotent transaction commits, an outbox, subscriptions, conflicts, and remote
+  transaction reconciliation are not implemented.
 
 These are migration facts, not reasons to expose the current implementation as the
 long-term interface.

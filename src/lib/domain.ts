@@ -1,12 +1,22 @@
+import { textTarget, type TargetSet } from '$lib/workspace/attachments';
+
 export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
 export type Category = (typeof categories)[number];
 
-export const suggestionStates = ['pending', 'accepted', 'rejected', 'superseded', 'stale', 'hidden'] as const;
+export const suggestionStates = ['pending', 'accepted', 'rejected', 'superseded', 'stale', 'hidden', 'target_changed', 'target_removed'] as const;
 export type SuggestionState = (typeof suggestionStates)[number];
 export type SuggestionType = 'replacement' | 'insertion' | 'annotation';
 export type SourceKind = 'local' | 'ai';
 export type SourceState = 'visible' | 'invisible' | 'off';
 export type WritingMode = 'drafting' | 'revising';
+
+export interface SourceAvailability {
+  available: boolean;
+  model?: string;
+  reason?: string;
+  credentialHint?: string;
+  persistence?: 'local_file' | 'environment';
+}
 
 export interface RelativeAnchor {
   from: number;
@@ -34,11 +44,24 @@ export interface Provenance {
   costUsd?: number;
 }
 
-export interface Suggestion {
+export interface InputEvent {
+  type: 'target_changed' | 'target_removed' | 'reattached';
+  revision: number;
+  transactionId: string;
+  previousTarget?: TargetSet;
+  previousExcerpt?: string;
+}
+
+export interface InputRecord {
   id: string;
+  kind: string;
   source: string;
   sourceNumber: number;
   sourceKind: SourceKind;
+  target: TargetSet;
+  scope?: TargetSet;
+  behaviourId: string;
+  events: InputEvent[];
   anchor: RelativeAnchor;
   type: SuggestionType;
   payload: { text?: string; comment: string };
@@ -49,6 +72,20 @@ export interface Suggestion {
   order: number;
   createdAt: string;
   provenance: Provenance;
+}
+
+/** Compatibility name while the first POC UI still calls craft inputs suggestions. */
+export type Suggestion = InputRecord;
+
+export function normalizeInputRecord(input: Suggestion, nodeId: string): Suggestion {
+  const legacy = input as Suggestion & Partial<Pick<Suggestion, 'kind' | 'target' | 'behaviourId' | 'events'>>;
+  return {
+    ...input,
+    kind: legacy.kind ?? 'craft_suggestion',
+    target: legacy.target ?? textTarget(nodeId, input.anchor.from, input.anchor.to, input.anchor.text),
+    behaviourId: legacy.behaviourId ?? 'craft-input',
+    events: legacy.events ?? []
+  };
 }
 
 export const eventTypes = [
@@ -181,7 +218,17 @@ export function reconcileSuggestionAnchors(
       expired.push(suggestion);
       return { ...suggestion, state: 'stale' as const };
     }
-    const rebased = { ...suggestion, anchor: { ...suggestion.anchor, from: current.from, to: current.to } };
+    let updatedTextTarget = false;
+    const targets = suggestion.target.targets.map((target) => {
+      if (updatedTextTarget || target.type !== 'text') return target;
+      updatedTextTarget = true;
+      return { ...target, start: current.from, end: current.to };
+    });
+    const rebased = {
+      ...suggestion,
+      target: { ...suggestion.target, targets },
+      anchor: { ...suggestion.anchor, from: current.from, to: current.to }
+    };
     if (current.text === suggestion.anchor.text) return rebased;
     expired.push(suggestion);
     return { ...rebased, state: 'stale' as const };

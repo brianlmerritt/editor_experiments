@@ -12,6 +12,12 @@ const brief: WritingBrief = {
   canon: 'The moon is dark.'
 };
 const prompts: TaskPrompt[] = [{ id: 'review', name: 'Review', version: 1, instruction: 'Review it.' }];
+const sourceAvailability = {
+  'local-craft': { available: true },
+  'fake-sentinel': { available: true },
+  openrouter: { available: false, reason: 'Configure OpenRouter.' },
+  ollama: { available: false, reason: 'Configure Ollama.' }
+};
 const branches: Branch[] = [{ id: 'main', name: 'Main draft', createdAt: '2026-08-17T00:00:00Z', wordCount: 10, lastEdited: '2026-08-17T00:00:00Z' }];
 const events: Required<LedgerEvent>[] = [{ id: 1, timestamp: '2026-08-17T00:00:00Z', type: 'session_started', sessionId: 'session', branchId: 'main', suggestionId: '', payload: {} }];
 const persistent: PersistentWorkspace = {
@@ -29,7 +35,7 @@ describe('WorkspaceFacade', () => {
     const fetcher = vi.fn<FetchLike>(async (input) => {
       const path = String(input);
       if (path === '/api/workspace') return json(persistent);
-      if (path === '/api/settings') return json({ brief, prompts });
+      if (path === '/api/settings') return json({ brief, prompts, sourceAvailability });
       if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25 } });
       return json({ error: 'unexpected path' }, 404);
     });
@@ -44,7 +50,8 @@ describe('WorkspaceFacade', () => {
       stats: { events: 1, costUsd: 0.25 },
       persistent,
       activeProjectId: 'project',
-      activeDocumentId: 'main'
+      activeDocumentId: 'main',
+      sourceAvailability
     });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
@@ -70,6 +77,23 @@ describe('WorkspaceFacade', () => {
     }, controller.signal);
 
     expect(result).toEqual({ suggestions: [], errors: [] });
+  });
+
+  it('sends OpenRouter credentials only to the provider settings endpoint', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      expect(String(input)).toBe('/api/settings');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        kind: 'provider',
+        source: 'openrouter',
+        key: 'secret-key',
+        model: 'provider/model'
+      });
+      return json({ sourceAvailability: { openrouter: { available: true, model: 'provider/model' } } });
+    });
+
+    const result = await new WorkspaceFacade(fetcher).configureOpenRouter('secret-key', 'provider/model');
+
+    expect(result.openrouter).toEqual({ available: true, model: 'provider/model' });
   });
 
   it('surfaces a server error instead of leaking a JSON parsing failure', async () => {

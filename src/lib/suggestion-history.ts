@@ -1,4 +1,4 @@
-import { coalesceDuplicateSuggestions, type LedgerEvent, type Suggestion, type SuggestionState } from '$lib/domain';
+import { coalesceDuplicateSuggestions, normalizeInputRecord, type LedgerEvent, type Suggestion, type SuggestionState } from '$lib/domain';
 
 const stateEvents = new Map<LedgerEvent['type'], SuggestionState>([
   ['accepted_via_tick', 'accepted'],
@@ -26,10 +26,10 @@ export function restoreSuggestions(events: Required<LedgerEvent>[]): Suggestion[
     if (suggestions.has(event.suggestionId)) continue;
     const suggestion = (event.payload as { suggestion?: Suggestion }).suggestion;
     if (!suggestion) continue;
-    suggestions.set(event.suggestionId, {
+    suggestions.set(event.suggestionId, normalizeInputRecord({
       ...suggestion,
       state: states.get(event.suggestionId) ?? suggestion.state
-    });
+    }, event.branchId));
   }
 
   const restored = [...suggestions.values()].sort((left, right) => left.order - right.order);

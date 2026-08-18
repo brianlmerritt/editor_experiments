@@ -3,6 +3,7 @@ import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 import { ySyncPluginKey, relativePositionToAbsolutePosition } from 'y-prosemirror';
 import * as Y from 'yjs';
 import type { Suggestion } from '$lib/domain';
+import type { FormatAttachment } from '$lib/workspace/attachments';
 import { planDocumentDeletion } from './deletion';
 
 export const suggestionPluginKey = new PluginKey<SuggestionPluginState>('margin-note-suggestions');
@@ -10,6 +11,8 @@ export const suggestionPluginMeta = 'margin-note:update-suggestions';
 
 export interface SuggestionPluginState {
   suggestions: Suggestion[];
+  formats: FormatAttachment[];
+  documentId: string;
   activeId: string | null;
   preview: { suggestionId: string; text: string } | null;
 }
@@ -20,10 +23,11 @@ export interface SuggestionPluginOptions {
 }
 
 function resolvedRange(state: Parameters<typeof ySyncPluginKey.getState>[0], suggestion: Suggestion): { from: number; to: number } | null {
-  let from = suggestion.anchor.from;
-  let to = suggestion.anchor.to;
+  const domainTarget = suggestion.target.targets.find((target) => target.type === 'text');
+  let from = domainTarget?.type === 'text' ? domainTarget.start : suggestion.anchor.from;
+  let to = domainTarget?.type === 'text' ? domainTarget.end : suggestion.anchor.to;
   const sync = ySyncPluginKey.getState(state);
-  if (suggestion.anchor.start && suggestion.anchor.end && sync?.binding) {
+  if (!domainTarget && suggestion.anchor.start && suggestion.anchor.end && sync?.binding) {
     const start = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.start), sync.binding.mapping);
     const end = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.end), sync.binding.mapping);
     if (start != null && end != null) {
@@ -36,8 +40,68 @@ function resolvedRange(state: Parameters<typeof ySyncPluginKey.getState>[0], sug
   return { from, to };
 }
 
+interface FormatRange { from: number; to: number }
+
+function mergeRanges(ranges: FormatRange[]): FormatRange[] {
+  const sorted = ranges.filter((range) => range.from < range.to).sort((left, right) => left.from - right.from || left.to - right.to);
+  const merged: FormatRange[] = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (previous && range.from <= previous.to) previous.to = Math.max(previous.to, range.to);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+function subtractRange(ranges: FormatRange[], removed: FormatRange): FormatRange[] {
+  return ranges.flatMap((range) => {
+    if (removed.to <= range.from || removed.from >= range.to) return [range];
+    const pieces: FormatRange[] = [];
+    if (range.from < removed.from) pieces.push({ from: range.from, to: removed.from });
+    if (range.to > removed.to) pieces.push({ from: removed.to, to: range.to });
+    return pieces;
+  });
+}
+
+function targetRanges(state: Parameters<typeof ySyncPluginKey.getState>[0], format: FormatAttachment, documentId: string): FormatRange[] {
+  const ranges: FormatRange[] = [];
+  for (const target of format.target.targets) {
+    if (target.type === 'text' && target.nodeId === documentId) {
+      const from = Math.max(0, Math.min(target.start, state.doc.content.size));
+      const to = Math.max(from, Math.min(target.end, state.doc.content.size));
+      if (from < to) ranges.push({ from, to });
+    }
+    if (target.type === 'node' && target.nodeId === documentId) {
+      state.doc.descendants((node, position) => {
+        if (node.isTextblock && node.content.size) ranges.push({ from: position + 1, to: position + node.nodeSize - 1 });
+        return true;
+      });
+    }
+  }
+  return ranges;
+}
+
+function effectiveStrikethroughRanges(state: Parameters<typeof ySyncPluginKey.getState>[0], formats: FormatAttachment[], documentId: string): FormatRange[] {
+  let effective: FormatRange[] = [];
+  const ordered = formats
+    .map((format, index) => ({ format, index }))
+    .filter(({ format }) => format.properties.strikethrough !== undefined)
+    .sort((left, right) => left.format.priority - right.format.priority
+      || left.format.createdAtRevision - right.format.createdAtRevision
+      || left.index - right.index);
+  for (const { format } of ordered) {
+    const ranges = targetRanges(state, format, documentId);
+    if (format.properties.strikethrough) effective = mergeRanges([...effective, ...ranges]);
+    else for (const range of ranges) effective = subtractRange(effective, range);
+  }
+  return effective;
+}
+
 function buildDecorations(state: Parameters<typeof ySyncPluginKey.getState>[0], pluginState: SuggestionPluginState): DecorationSet {
   const decorations: Decoration[] = [];
+  for (const range of effectiveStrikethroughRanges(state, pluginState.formats, pluginState.documentId)) {
+    decorations.push(Decoration.inline(range.from, range.to, { class: 'mn-format-strikethrough' }, { formatId: 'effective-strikethrough' }));
+  }
   for (const suggestion of pluginState.suggestions) {
     const range = resolvedRange(state, suggestion);
     if (!range) continue;
@@ -75,7 +139,7 @@ export function suggestionPlugin(options: SuggestionPluginOptions): Plugin<Sugge
   return new Plugin<SuggestionPluginState>({
     key: suggestionPluginKey,
     state: {
-      init: () => ({ suggestions: [], activeId: null, preview: null }),
+      init: () => ({ suggestions: [], formats: [], documentId: '', activeId: null, preview: null }),
       apply(transaction, previous) {
         const update = transaction.getMeta(suggestionPluginMeta) as Partial<SuggestionPluginState> | undefined;
         if (update) return { ...previous, ...update };
@@ -85,7 +149,7 @@ export function suggestionPlugin(options: SuggestionPluginOptions): Plugin<Sugge
     },
     props: {
       decorations(state) {
-        return buildDecorations(state, suggestionPluginKey.getState(state) ?? { suggestions: [], activeId: null, preview: null });
+        return buildDecorations(state, suggestionPluginKey.getState(state) ?? { suggestions: [], formats: [], documentId: '', activeId: null, preview: null });
       },
       handleClick(view: EditorView, position: number, event: MouseEvent) {
         const target = event.target as HTMLElement;

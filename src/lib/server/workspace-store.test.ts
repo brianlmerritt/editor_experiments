@@ -39,6 +39,21 @@ describe('WorkspaceRepository', () => {
     expect(repository.documentRevisions('main').map((revision) => revision.number)).toEqual([3, 2, 1]);
   });
 
+  it('versions attachment state with the document instead of losing it on restore', () => {
+    repository.workspace();
+    const edited = repository.saveDocument({
+      id: 'main',
+      extensions: { margin_note: { revision: 2, formats: [{ id: 'format-1' }] } },
+      createdBy: 'writer'
+    });
+    const initial = repository.documentRevisions('main').at(-1)!;
+    const restored = repository.restoreDocument('main', initial.id, 'writer');
+
+    expect(edited.extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
+    expect(repository.documentRevisions('main')[1].extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
+    expect(restored.extensions).toEqual({});
+  });
+
   it('versions freely named project and document context without imposing a schema', () => {
     const workspace = repository.workspace();
     const projectId = workspace.projects[0].id;

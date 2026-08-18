@@ -1,21 +1,33 @@
-import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, reconcileSuggestionAnchors as reconcileAnchors, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, normalizeInputRecord, reconcileSuggestionAnchors as reconcileAnchors, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { restoreSuggestions } from '$lib/suggestion-history';
 import { workspaceFacade, type MarkdownExport, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
+import { defaultAttachmentBehaviours, sameTarget, selectionHasStrikethrough, textTarget, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
+import { applyAttachmentChanges } from '$lib/workspace/mutations';
+import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
+import { settings, type SettingsStore } from '$lib/state/settings.svelte';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
+const attachmentBehaviourVersion = 2;
 
 export class WorkspaceState {
   sessionId = $state('session_pending');
   projectId = $state('project_default');
   branchId = $state('main');
-  mode = $state<WritingMode>('drafting');
+  // Kept in provider requests for backward compatibility; the UI is one continuous workflow.
+  mode = $state<WritingMode>('revising');
   paused = $state(false);
   surface = $state<'docked' | 'tray'>('docked');
   activeSuggestionId = $state<string | null>(null);
   preview = $state<{ suggestionId: string; text: string } | null>(null);
-  suggestions = $state<Suggestion[]>([]);
+  inputs = $state<Suggestion[]>([]);
+  formats = $state<FormatAttachment[]>([]);
+  behaviours = $state<Record<string, AttachmentBehaviour>>({ ...defaultAttachmentBehaviours });
+  workspaceRevision = $state(0);
+  documentSnapshot = $state<EditorDocumentSnapshot | null>(null);
+  undoStack = $state<WorkspaceHistoryEntry[]>([]);
+  redoStack = $state<WorkspaceHistoryEntry[]>([]);
   ledger = $state<Required<LedgerEvent>[]>([]);
   brief = $state<WritingBrief>(defaultBrief);
   prompts = $state<TaskPrompt[]>([defaultPrompt]);
@@ -36,14 +48,22 @@ export class WorkspaceState {
   private documentSave: Promise<void> = Promise.resolve();
   private initialized = false;
 
-  constructor(private readonly facade: WorkspaceFacade = workspaceFacade) {}
+  constructor(
+    private readonly facade: WorkspaceFacade = workspaceFacade,
+    private readonly settingsState: SettingsStore = settings
+  ) {}
+
+  get suggestions(): Suggestion[] { return this.inputs; }
+  set suggestions(value: Suggestion[]) { this.inputs = value; }
+
+  get canUndo(): boolean { return this.undoStack.length > 0; }
+  get canRedo(): boolean { return this.redoStack.length > 0; }
 
   get pendingCount(): number {
     return this.suggestions.filter((suggestion) => suggestion.state === 'pending' || suggestion.state === 'hidden').length;
   }
 
   get visibleSuggestions(): Suggestion[] {
-    if (this.mode === 'drafting') return [];
     return this.suggestions
       .filter((suggestion) => suggestion.state === 'pending')
       .filter((suggestion) => this.categoryVisibility[suggestion.category])
@@ -88,7 +108,9 @@ export class WorkspaceState {
       this.branchId = loaded.activeDocumentId;
       this.branches = loaded.branches;
       this.ledger = loaded.events;
-      this.suggestions = restoreSuggestions(loaded.events);
+      this.settingsState.load(loaded.sourceAvailability);
+      for (const source of sourceCatalog) if (!this.settingsState.sourceAvailable(source.id)) this.sourceStates[source.id] = 'off';
+      this.loadDocumentDomain(this.currentDocument, loaded.events);
       this.costUsd = loaded.stats.costUsd;
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('margin-note:project', this.projectId);
@@ -102,6 +124,143 @@ export class WorkspaceState {
     } finally {
       this.loading = false;
     }
+  }
+
+  setEditorReady(snapshot: EditorDocumentSnapshot): void {
+    this.documentSnapshot = cloneHistorySnapshot({
+      document: snapshot,
+      inputs: [],
+      formats: [],
+      revision: this.workspaceRevision
+    }).document;
+  }
+
+  recordEditorTransaction(detail: EditorTransactionDetail): void {
+    this.documentSnapshot = detail.after;
+    if (detail.origin.kind === 'workspace_history') return;
+
+    const transactionId = makeId('transaction');
+    const before = this.historySnapshot(detail.before);
+    const transformed = applyAttachmentChanges({
+      inputs: this.inputs,
+      formats: this.formats,
+      behaviours: this.behaviours,
+      changes: detail.changes,
+      revision: this.workspaceRevision,
+      transactionId,
+      acceptedInputId: detail.origin.kind === 'input_acceptance' ? detail.origin.inputId : undefined
+    });
+    this.inputs = transformed.inputs;
+    this.formats = transformed.formats;
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(detail.after);
+    const acceptance = detail.origin.kind === 'input_acceptance';
+    this.pushHistory({
+      id: transactionId,
+      source: acceptance ? 'ai' : 'human',
+      label: acceptance ? 'Accept input revision' : 'Edit text',
+      before,
+      after,
+      createdAt: Date.now(),
+      group: acceptance ? undefined : 'typing'
+    });
+  }
+
+  undoWorkspace(): EditorDocumentSnapshot | null {
+    const entry = this.undoStack.at(-1);
+    if (!entry) return null;
+    this.undoStack = this.undoStack.slice(0, -1);
+    this.redoStack = [...this.redoStack, entry];
+    this.restoreHistoryState(entry.before);
+    void this.persistDomainState('Undo workspace change');
+    return entry.before.document;
+  }
+
+  redoWorkspace(): EditorDocumentSnapshot | null {
+    const entry = this.redoStack.at(-1);
+    if (!entry) return null;
+    this.redoStack = this.redoStack.slice(0, -1);
+    this.undoStack = [...this.undoStack, entry];
+    this.restoreHistoryState(entry.after);
+    void this.persistDomainState('Redo workspace change');
+    return entry.after.document;
+  }
+
+  private setStrikethrough(target: TargetSet, value: boolean, label: string): boolean {
+    if (!this.documentSnapshot) return false;
+    const before = this.historySnapshot(this.documentSnapshot);
+    const matching = this.formats.filter((format) => format.properties.strikethrough !== undefined && sameTarget(format.target, target));
+    const existing = matching
+      .sort((left, right) => right.priority - left.priority || right.createdAtRevision - left.createdAtRevision)[0];
+    const priority = Math.max(10, ...this.formats.map((format) => format.priority + 1));
+    if (existing) {
+      this.formats = [
+        ...this.formats.filter((format) => !matching.some((item) => item.id === format.id)),
+        {
+          ...existing,
+          properties: { ...existing.properties, strikethrough: value },
+          priority,
+          createdAtRevision: this.workspaceRevision
+        }
+      ];
+    } else {
+      this.formats = [...this.formats, {
+        id: makeId('format'),
+        target,
+        properties: { strikethrough: value },
+        behaviourId: 'format-default',
+        priority,
+        createdAtRevision: this.workspaceRevision
+      }];
+    }
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(this.documentSnapshot);
+    this.pushHistory({
+      id: makeId('transaction'),
+      source: 'format',
+      label,
+      before,
+      after,
+      createdAt: Date.now()
+    });
+    void this.persistDomainState(label);
+    return true;
+  }
+
+  toggleSelectionStrikethrough(from: number, to: number, selectedText: string): boolean {
+    if (from >= to) return false;
+    return this.setStrikethrough(
+      textTarget(this.branchId, from, to, selectedText),
+      !this.selectionHasStrikethrough(from, to),
+      'Toggle selection strikethrough'
+    );
+  }
+
+  toggleWorkStrikethrough(): boolean {
+    const target: TargetSet = {
+      mode: 'live',
+      targets: [{ type: 'node', nodeId: this.branchId, includeDescendants: true }]
+    };
+    return this.setStrikethrough(target, !this.workHasStrikethrough, 'Toggle work strikethrough');
+  }
+
+  selectionHasStrikethrough(from: number, to: number): boolean {
+    return from < to && selectionHasStrikethrough(this.formats, this.branchId, from, to);
+  }
+
+  get workHasStrikethrough(): boolean {
+    return selectionHasStrikethrough(this.formats, this.branchId, 0, Number.MAX_SAFE_INTEGER);
+  }
+
+  async setInputState(id: string, state: SuggestionState, label: string): Promise<void> {
+    const record = this.inputs.find((item) => item.id === id);
+    if (!record || record.state === state || !this.documentSnapshot) return;
+    const before = this.historySnapshot(this.documentSnapshot);
+    this.inputs = this.inputs.map((item) => item.id === id ? { ...item, state } : item);
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(this.documentSnapshot);
+    this.pushHistory({ id: makeId('transaction'), source: 'input', label, before, after, createdAt: Date.now() });
+    await this.persistDomainState(label);
   }
 
   async log(type: LedgerEvent['type'], payload: Record<string, unknown>, suggestionId?: string): Promise<void> {
@@ -138,6 +297,12 @@ export class WorkspaceState {
   }
 
   async cycleSource(sourceId: string): Promise<void> {
+    const availability = this.settingsState.availability(sourceId);
+    if (!this.sourceAvailable(sourceId)) {
+      this.sourceStates[sourceId] = 'off';
+      this.notice = availability.reason ?? `${sourceId} is not configured.`;
+      return;
+    }
     const now = Date.now();
     const previous = this.sourceStates[sourceId] ?? 'visible';
     const elapsed = now - (this.sourceClickAt[sourceId] ?? 0);
@@ -156,6 +321,15 @@ export class WorkspaceState {
       this.suggestions = this.suggestions.map((suggestion) => suggestion.source === sourceId && suggestion.state === 'hidden' ? { ...suggestion, state: 'pending' } : suggestion);
     }
     await this.log('source_state_changed', { source: sourceId, from: previous, to: next, dwellMs: elapsed });
+  }
+
+  enableConfiguredSource(sourceId: string): void {
+    if (!this.settingsState.sourceAvailable(sourceId)) return;
+    this.sourceStates[sourceId] = 'visible';
+  }
+
+  sourceAvailable(sourceId: string): boolean {
+    return this.settingsState.sourceAvailable(sourceId);
   }
 
   toggleCategory(category: Category): void {
@@ -222,7 +396,7 @@ export class WorkspaceState {
   async resolveSuggestion(id: string, state: 'accepted' | 'rejected' | 'stale', eventType: LedgerEvent['type'], payload: Record<string, unknown> = {}): Promise<void> {
     const suggestion = this.suggestions.find((item) => item.id === id);
     if (!suggestion) return;
-    this.suggestions = this.suggestions.map((item) => item.id === id ? { ...item, state } : item);
+    await this.setInputState(id, state, `Set input ${state}`);
     if (this.activeSuggestionId === id) this.activeSuggestionId = null;
     await this.log(eventType, { category: suggestion.category, source: suggestion.source, ...payload }, id);
   }
@@ -294,7 +468,10 @@ export class WorkspaceState {
     const data = await this.facade.suggestionHistory(id);
     this.ledger = data.events;
     this.costUsd = data.stats.costUsd;
-    this.suggestions = restoreSuggestions(data.events);
+    this.loadDocumentDomain(this.currentDocument, data.events);
+    this.documentSnapshot = null;
+    this.undoStack = [];
+    this.redoStack = [];
     await this.log('branch_switched', { from: previous, to: id });
   }
 
@@ -342,7 +519,13 @@ export class WorkspaceState {
   async saveDocumentContent(content: string, reason = 'Editing session'): Promise<void> {
     const documentId = this.branchId;
     this.documentSave = this.documentSave.then(async () => {
-      const document = await this.facade.saveDocument({ id: documentId, content, createdBy: this.sessionId, reason });
+      const document = await this.facade.saveDocument({
+        id: documentId,
+        content,
+        extensions: this.domainExtensions(),
+        createdBy: this.sessionId,
+        reason
+      });
       this.documents = this.documents.map((item) => item.id === document.id ? document : item);
       this.refreshBranches();
     }).catch((error) => {
@@ -395,8 +578,88 @@ export class WorkspaceState {
       }));
   }
 
+  private historySnapshot(document: EditorDocumentSnapshot): WorkspaceHistorySnapshot {
+    return cloneHistorySnapshot({
+      document,
+      inputs: this.inputs,
+      formats: this.formats,
+      revision: this.workspaceRevision
+    });
+  }
+
+  private pushHistory(entry: WorkspaceHistoryEntry): void {
+    const previous = this.undoStack.at(-1);
+    if (entry.group === 'typing' && previous?.group === 'typing' && entry.createdAt - previous.createdAt <= 1200) {
+      this.undoStack = [...this.undoStack.slice(0, -1), {
+        ...previous,
+        after: entry.after,
+        createdAt: entry.createdAt
+      }];
+    } else this.undoStack = [...this.undoStack, entry].slice(-100);
+    this.redoStack = [];
+  }
+
+  private restoreHistoryState(snapshot: WorkspaceHistorySnapshot): void {
+    const restored = cloneHistorySnapshot(snapshot);
+    this.inputs = restored.inputs;
+    this.formats = restored.formats;
+    this.workspaceRevision = restored.revision;
+    this.documentSnapshot = restored.document;
+    this.activeSuggestionId = null;
+    this.preview = null;
+  }
+
+  private loadDocumentDomain(document: WorkspaceDocument | null, events: Required<LedgerEvent>[]): void {
+    const stored = document?.extensions.margin_note;
+    const value = stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? stored as Record<string, unknown>
+      : null;
+    const persistedInputs = Array.isArray(value?.inputs) ? value.inputs as Suggestion[] : null;
+    this.inputs = (persistedInputs ?? restoreSuggestions(events)).map((input) => normalizeInputRecord(input, document?.id ?? this.branchId));
+    this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
+    const storedBehaviours = value?.behaviours && typeof value.behaviours === 'object' && !Array.isArray(value.behaviours)
+      ? value.behaviours as Record<string, AttachmentBehaviour>
+      : {};
+    this.behaviours = { ...defaultAttachmentBehaviours, ...storedBehaviours };
+    if (typeof value?.behaviourVersion !== 'number' || value.behaviourVersion < attachmentBehaviourVersion) {
+      this.behaviours['format-default'] = { ...defaultAttachmentBehaviours['format-default'] };
+    }
+    this.workspaceRevision = typeof value?.revision === 'number' ? value.revision : document?.revision ?? 0;
+  }
+
+  private domainExtensions(): WorkspaceDocument['extensions'] {
+    const current = this.currentDocument?.extensions ?? {};
+    return {
+      ...current,
+      margin_note: JSON.parse(JSON.stringify({
+        revision: this.workspaceRevision,
+        behaviourVersion: attachmentBehaviourVersion,
+        inputs: this.inputs,
+        formats: this.formats,
+        behaviours: this.behaviours
+      }))
+    } as WorkspaceDocument['extensions'];
+  }
+
+  private async persistDomainState(reason: string): Promise<void> {
+    const documentId = this.branchId;
+    this.documentSave = this.documentSave.then(async () => {
+      const document = await this.facade.saveDocument({
+        id: documentId,
+        extensions: this.domainExtensions(),
+        createdBy: this.sessionId,
+        reason
+      });
+      this.documents = this.documents.map((item) => item.id === document.id ? document : item);
+      this.refreshBranches();
+    }).catch((error) => {
+      this.lastError = error instanceof Error ? error.message : 'Workspace state save failed';
+    });
+    await this.documentSave;
+  }
+
   private async coalesceSuggestions(items: Suggestion[]): Promise<void> {
-    const coalesced = coalesceDuplicateSuggestions(items);
+    const coalesced = coalesceDuplicateSuggestions(items.map((item) => normalizeInputRecord(item, this.branchId)));
     this.suggestions = coalesced.suggestions;
     for (const { duplicate, canonical } of coalesced.suppressed) {
       await this.log('duplicate_suppressed', {
@@ -406,6 +669,7 @@ export class WorkspaceState {
         anchor: [duplicate.anchor.from, duplicate.anchor.to]
       }, duplicate.id);
     }
+    await this.persistDomainState('Update inputs');
   }
 }
 

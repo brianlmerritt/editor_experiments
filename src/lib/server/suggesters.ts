@@ -1,6 +1,8 @@
 import { env } from '$env/dynamic/private';
-import type { Category, GenerationRequest, Suggestion, SuggestionVariant } from '$lib/domain';
+import type { Category, GenerationRequest, SourceAvailability, Suggestion, SuggestionVariant } from '$lib/domain';
 import { makeId } from '$lib/domain';
+import { textTarget } from '$lib/workspace/attachments';
+import { maskCredential, readStoredOpenRouterSettings, writeStoredOpenRouterSettings } from '$lib/server/provider-settings';
 
 interface DraftSuggestion {
   from: number;
@@ -13,6 +15,92 @@ interface DraftSuggestion {
   confidence: number;
 }
 
+interface ConfiguredProvider {
+  id: 'openrouter' | 'ollama';
+  number: number;
+  baseUrl: string;
+  key?: string;
+  model: string;
+  persistence?: SourceAvailability['persistence'];
+}
+
+interface RuntimeProviderSettings {
+  openrouter?: { key: string; model: string; persistence?: SourceAvailability['persistence'] };
+  ollama?: { model: string; baseUrl?: string };
+}
+
+const runtimeProviders = globalThis as typeof globalThis & {
+  __marginNoteProviderSettings?: RuntimeProviderSettings;
+};
+
+function runtimeProviderSettings(): RuntimeProviderSettings {
+  runtimeProviders.__marginNoteProviderSettings ??= {};
+  return runtimeProviders.__marginNoteProviderSettings;
+}
+
+export function configureSuggestionProvider(
+  input: { source: 'openrouter'; key?: string; model: string },
+  options: { persist?: boolean } = {}
+): void {
+  const stored = readStoredOpenRouterSettings();
+  const key = input.key?.trim() || stored.key || env.OPENROUTER_API_KEY;
+  const model = input.model.trim();
+  if (!key || !model) throw new Error('OpenRouter requires both an API key and a model.');
+  const persist = options.persist !== false;
+  if (persist) writeStoredOpenRouterSettings({ key, model });
+  runtimeProviderSettings().openrouter = {
+    key,
+    model,
+    persistence: persist || stored.key ? 'local_file' : 'environment'
+  };
+}
+
+function configuredProviders(): ConfiguredProvider[] {
+  const runtime = runtimeProviderSettings();
+  const stored = readStoredOpenRouterSettings();
+  const openrouterKey = runtime.openrouter?.key || stored.key || env.OPENROUTER_API_KEY;
+  const openrouterModel = runtime.openrouter?.model || stored.model || env.OPENROUTER_MODEL;
+  const openrouterPersistence = runtime.openrouter?.persistence || (stored.key ? 'local_file' : env.OPENROUTER_API_KEY ? 'environment' : undefined);
+  const ollamaModel = runtime.ollama?.model || env.OLLAMA_MODEL;
+  const ollamaBaseUrl = runtime.ollama?.baseUrl || env.OLLAMA_BASE_URL;
+  const providers: ConfiguredProvider[] = [];
+  if (openrouterKey && openrouterModel) {
+    providers.push({
+      id: 'openrouter',
+      number: 3,
+      baseUrl: 'https://openrouter.ai/api/v1',
+      key: openrouterKey,
+      model: openrouterModel,
+      persistence: openrouterPersistence
+    });
+  }
+  if (ollamaModel) {
+    providers.push({ id: 'ollama', number: 4, baseUrl: ollamaBaseUrl ?? 'http://127.0.0.1:11434/v1', model: ollamaModel });
+  }
+  return providers;
+}
+
+export function suggestionSourceAvailability(): Record<string, SourceAvailability> {
+  const providers = configuredProviders();
+  const openrouter = providers.find((provider) => provider.id === 'openrouter');
+  const ollama = providers.find((provider) => provider.id === 'ollama');
+  return {
+    'local-craft': { available: true },
+    'fake-sentinel': { available: true },
+    openrouter: openrouter
+      ? {
+          available: true,
+          model: openrouter.model,
+          credentialHint: maskCredential(openrouter.key ?? ''),
+          persistence: openrouter.persistence
+        }
+      : { available: false, reason: 'Configure OpenRouter here or set OPENROUTER_API_KEY and OPENROUTER_MODEL.' },
+    ollama: ollama
+      ? { available: true, model: ollama.model }
+      : { available: false, reason: 'Set OLLAMA_MODEL, then restart the app.' }
+  };
+}
+
 function suggestionFromDraft(draft: DraftSuggestion, request: GenerationRequest, source: string, sourceNumber: number, sourceKind: 'local' | 'ai', latencyMs: number, costUsd = 0): Suggestion {
   const id = makeId('sg');
   const anchorText = request.text.slice(draft.from - request.from, draft.to - request.from);
@@ -22,9 +110,13 @@ function suggestionFromDraft(draft: DraftSuggestion, request: GenerationRequest,
   const type = draft.type === 'replacement' && !variants.length ? 'annotation' : draft.type;
   return {
     id,
+    kind: 'craft_suggestion',
     source,
     sourceNumber,
     sourceKind,
+    target: textTarget(request.branchId, draft.from, draft.to, anchorText),
+    behaviourId: 'craft-input',
+    events: [],
     anchor: { from: draft.from, to: draft.to, text: anchorText },
     type,
     payload: { text: variants[0]?.text, comment: draft.comment },
@@ -225,6 +317,93 @@ function assemblePrompt(request: GenerationRequest): string {
   return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. For a replacement, provide two or three distinct alternatives in variants; none may equal the selected source text. If there is no useful change, return an annotation or no suggestion instead of a no-op replacement.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nCONTEXT BUCKETS\n${context || 'None'}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
 }
 
+function balancedJsonCandidates(content: string): string[] {
+  const candidates: string[] = [];
+  for (let start = 0; start < content.length; start += 1) {
+    if (content[start] !== '{' && content[start] !== '[') continue;
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < content.length; index += 1) {
+      const character = content[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === '{' || character === '[') stack.push(character);
+      else if (character === '}' || character === ']') {
+        const expected = character === '}' ? '{' : '[';
+        if (stack.pop() !== expected) break;
+        if (!stack.length) {
+          candidates.push(content.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
+function parseProviderJson(content: string): unknown {
+  const trimmed = content.trim().replace(/^\uFEFF/, '');
+  const fenced = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1].trim());
+  const candidates = [...new Set([trimmed, ...fenced, ...balancedJsonCandidates(trimmed)])];
+  for (const candidate of candidates) {
+    for (const value of [candidate, candidate.replace(/,\s*([}\]])/g, '$1')]) {
+      try {
+        return JSON.parse(value) as unknown;
+      } catch {
+        // Try the next locally recoverable representation.
+      }
+    }
+  }
+  throw new Error('Provider returned invalid JSON after fenced-block and surrounding-text recovery.');
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function parseProviderSuggestions(content: string): Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> {
+  const parsed = parseProviderJson(content);
+  const rawSuggestions = Array.isArray(parsed) ? parsed : record(parsed) && Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
+  const valid = rawSuggestions.flatMap((value) => {
+    if (!record(value)) return [];
+    const from = value.from;
+    const to = value.to;
+    const type = value.type;
+    const category = value.category;
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return [];
+    if (type !== 'annotation' && type !== 'replacement' && type !== 'insertion') return [];
+    if (category !== 'pov' && category !== 'tense' && category !== 'canon' && category !== 'cadence' && category !== 'diction' && category !== 'distance') return [];
+    const variants = Array.isArray(value.variants)
+      ? [...new Set(value.variants.filter((variant): variant is string => typeof variant === 'string'))]
+      : undefined;
+    const replacement = typeof value.replacement === 'string' ? value.replacement : variants?.[0];
+    const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
+      ? Math.max(0, Math.min(1, value.confidence))
+      : 0.7;
+    return [{
+      from: from as number,
+      to: to as number,
+      type: type as Suggestion['type'],
+      category: category as Category,
+      comment: typeof value.comment === 'string' ? value.comment : 'AI craft suggestion.',
+      replacement,
+      variants,
+      confidence
+    }];
+  });
+  if (rawSuggestions.length && !valid.length) throw new Error('Provider JSON contained suggestions, but none matched the required suggestion schema.');
+  return valid;
+}
+
 async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number }> {
   const started = performance.now();
   const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -234,28 +413,29 @@ async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: 
   });
   if (!response.ok) throw new Error(`Provider returned ${response.status}`);
   const data = await response.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
-  const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? '{"suggestions":[]}') as { suggestions?: Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> };
-  const drafts = (parsed.suggestions ?? []).map((item) => ({ ...item, from: request.from + item.from, to: request.from + item.to })).filter((item) => item.to >= item.from && item.from >= request.from && item.to <= request.from + request.text.length);
+  const parsed = parseProviderSuggestions(data.choices?.[0]?.message?.content ?? '{"suggestions":[]}');
+  const drafts = parsed.map((item) => ({ ...item, from: request.from + item.from, to: request.from + item.to })).filter((item) => item.to >= item.from && item.from >= request.from && item.to <= request.from + request.text.length);
   return { drafts, latencyMs: performance.now() - started, inputTokens: data.usage?.prompt_tokens, outputTokens: data.usage?.completion_tokens };
 }
 
 export async function generateSuggestions(request: GenerationRequest): Promise<{ suggestions: Suggestion[]; errors: { source: string; message: string }[] }> {
   const suggestions: Suggestion[] = [];
   const errors: { source: string; message: string }[] = [];
+  const providers = configuredProviders();
+  const activeProviders = providers.filter((provider) => request.sourceStates[provider.id] !== 'off');
+  const selectionRequest = request.prompt.id !== 'sentinel';
   if (request.sourceStates['local-craft'] !== 'off') {
     const started = performance.now();
     const drafts = localChecks(request);
     const latency = performance.now() - started;
     suggestions.push(...drafts.map((draft) => suggestionFromDraft(draft, request, 'local-craft', 1, 'local', latency)));
   }
-  if (request.sourceStates['fake-sentinel'] !== 'off') {
+  // Selection replay is a deterministic fallback. When a real provider is active,
+  // do not obscure its result with a scripted "no safe alternative" annotation.
+  if (request.sourceStates['fake-sentinel'] !== 'off' && !(selectionRequest && activeProviders.length)) {
     await new Promise((resolve) => setTimeout(resolve, 280));
     suggestions.push(...scriptedChecks(request).map((draft) => suggestionFromDraft(draft, request, 'fake-sentinel', 2, 'ai', 280, 0.00002)));
   }
-  const providers = [
-    env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL ? { id: 'openrouter', number: 3, baseUrl: 'https://openrouter.ai/api/v1', key: env.OPENROUTER_API_KEY, model: env.OPENROUTER_MODEL } : null,
-    env.OLLAMA_MODEL ? { id: 'ollama', number: 4, baseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434/v1', key: undefined, model: env.OLLAMA_MODEL } : null
-  ].filter(Boolean) as { id: string; number: number; baseUrl: string; key?: string; model: string }[];
   for (const provider of providers) {
     if (request.sourceStates[provider.id] === 'off') continue;
     try {
@@ -269,6 +449,12 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
       }));
     } catch (error) {
       errors.push({ source: provider.id, message: error instanceof Error ? error.message : 'Provider failed' });
+    }
+  }
+  const availability = suggestionSourceAvailability();
+  for (const source of ['openrouter', 'ollama'] as const) {
+    if (request.sourceStates[source] !== 'off' && !availability[source].available) {
+      errors.push({ source, message: availability[source].reason ?? 'Source is not configured.' });
     }
   }
   return { suggestions, errors };

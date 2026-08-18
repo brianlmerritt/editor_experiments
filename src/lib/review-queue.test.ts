@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LedgerEvent, Suggestion, WritingBrief } from '$lib/domain';
+import { textTarget } from '$lib/workspace/attachments';
 import { buildReviewQueue } from './review-queue';
 
 const brief: WritingBrief = { version: 1, form: 'fiction', pov: 'third person', tense: 'past', distance: 'close', canon: '' };
@@ -7,9 +8,13 @@ const brief: WritingBrief = { version: 1, form: 'fiction', pov: 'third person', 
 function suggestion(id: string): Suggestion {
   return {
     id,
+    kind: 'craft_suggestion',
     source: 'fake-sentinel',
     sourceNumber: 2,
     sourceKind: 'ai',
+    target: textTarget('main', 1, 8, 'noticed'),
+    behaviourId: 'craft-input',
+    events: [],
     anchor: { from: 1, to: 8, text: 'noticed' },
     type: 'replacement',
     payload: { text: 'saw', comment: 'Try alternatives.' },

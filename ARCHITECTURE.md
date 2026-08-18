@@ -26,6 +26,9 @@ its formatting, its inputs, and undo/redo.
 7. Behaviour such as what happens to an attachment when its target is edited is
    explicit workspace state, interpreted by one domain reducer. It is not scattered
    through Svelte components or editor plugins.
+8. Writing, reviewing, and revising are one continuous workflow. Interruption is
+   controlled with Pause, input visibility, source state, filters, and density—not a
+   global drafting/reviewing mode that hides part of the workspace.
 
 ## Authority and boundaries
 
@@ -297,37 +300,50 @@ past version.
 
 ## Persistence and implementation status
 
-The current POC predates this model. It presently uses ProseMirror, Yjs relative
-positions, IndexedDB, SQLite snapshots, suggestion decorations, and a ledger. Those
-components are valid possible implementations behind the editor and façade, but their
-current schemas are not the target domain contract.
+The first vertical slice is implemented. The Svelte workspace now owns inputs,
+formats, behaviour profiles, document snapshots, and the active undo/redo stacks.
+A separate Svelte writable settings store owns live provider configuration state and
+masked provider identity; the façade transports changes, while the server-side secret
+adapter owns durable credential storage.
+Existing suggestions are normalised as one input kind. Text edits, accepted revisions,
+input state changes, and strikethrough formatting enter the same history path; text and
+attachments are restored together by undo/redo.
 
-In particular, the existing Yjs text undo manager restores prose without restoring the
-complete suggestion/input lifecycle. That is an identified limitation, not the desired
-architecture. The regression expectations are recorded in
-[CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md).
+Inputs and formats use the shared `ContentTarget` transformer. Complete target
+deletion retains a craft input in `target_removed` state with a lifecycle event;
+format ranges shrink, split, or disappear according to their behaviour profile. The
+input manager exposes pending and historical states rather than leaving them only in
+the margin.
 
-Migration should proceed as tested vertical slices rather than a rewrite:
+The document's `extensions.margin_note` payload stores the current inputs, formats,
+behaviours, and workspace revision in durable document versions. Yjs and IndexedDB
+remain editor persistence adapters during the experiment, but Yjs undo no longer owns
+the user-facing history.
 
-1. Introduce shared content targets and state-held behaviour profiles for existing
-   suggestions, now treated as one input kind.
-2. Route accepted revisions and target reconciliation through atomic workspace
-   transactions with complete undo/redo.
-3. Add format attachments using the same target transformer.
-4. Add input management views and scoped context records.
-5. Add or replace persistence and collaboration drivers behind the façade only when a
-   real workflow requires them.
+This remains a proof of concept rather than the completed model above. In particular,
+the active document is still a single ProseMirror text tree rather than stable,
+user-defined structural nodes; history stores complete snapshots instead of compact
+forward and inverse patches; current session undo is not restored after reload; and
+collaborative transaction reconciliation is not implemented. Regression evidence and
+the exact next cases are recorded in [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md).
 
 ## Intentionally deferred
 
 - choosing Yjs, another CRDT, or operational transformation as the collaboration
   implementation;
 - a runtime third-party plugin system;
+- choosing a permanent extension/plugin contract before real add-ons prove its shape;
 - a graph database or ontology;
 - OKF, Obsidian, TEI, JSON-LD, or another canonical interchange standard;
 - formal temporal reasoning;
 - automatic schema migration for arbitrary add-on data;
 - multi-work or portfolio management.
+
+Before designing that extension contract, compare Scrivener's binder, document
+templates, labels/status/custom metadata, snapshots, editor layouts, and compile model.
+The goal is to learn from its separation of project structure, writing presentation,
+and published output without copying its storage model or making Scrivener a runtime
+dependency.
 
 Markdown, DOCX, EPUB, and other exports are projections. They are not the canonical
 workspace state.
