@@ -1,5 +1,12 @@
 # Writing Support Tool — POC Specification
 
+> **Historical POC plan.** This file records the assumptions used to build the first
+> experiment. Several decisions—especially event-log authority, Yjs-owned anchors,
+> text-only undo, and project structure—have been superseded by
+> [ARCHITECTURE.md](./ARCHITECTURE.md) and [FACADE_V1.md](./FACADE_V1.md). Retain this
+> file as implementation history; do not treat conflicting passages as current
+> architecture.
+
 A meta-first creative writing support tool. Multiple AI and local suggesters propose
 edits and observations against a live draft; every interaction is captured in an
 append-only ledger; a judging layer scores outcomes. The ledger and its analysis are

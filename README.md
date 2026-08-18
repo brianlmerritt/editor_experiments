@@ -1,12 +1,13 @@
 # Margin Note
 
-Margin Note is a meta-first creative writing support POC. The live draft uses local
-Yjs persistence and is also saved as immutable SQLite document versions. Suggestions
-are ProseMirror decorations that never mutate it, and every meaningful interaction is
-appended to a SQLite ledger.
+Margin Note is a meta-first creative writing support POC. The current implementation
+uses local Yjs persistence, immutable SQLite document versions, ProseMirror suggestion
+decorations, and a SQLite event ledger. These are current implementation choices, not
+the application source of truth: the intended architecture makes the Svelte workspace
+state authoritative and keeps persistence and collaboration behind a façade.
 
-The deliberately small façade and adaptable Codex direction are described in
-[ARCHITECTURE.md](./ARCHITECTURE.md).
+The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
+deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
 
 ## Run it
 

@@ -2,6 +2,11 @@
 
 Date: 17 August 2026
 
+This records observed POC behaviour and regression evidence. It is not the source of
+architectural decisions. The authoritative target model is
+[ARCHITECTURE.md](./ARCHITECTURE.md), and persistence responsibilities are specified in
+[FACADE_V1.md](./FACADE_V1.md).
+
 ## Workflows exercised
 
 - Entered and replaced prose in the rendered ProseMirror editor.
@@ -33,11 +38,53 @@ Date: 17 August 2026
 - `npm run check`: 0 errors and 0 warnings.
 - `npm run build`: passed.
 
+## Follow-up findings after the initial pass
+
+- Dismissing every visible note suppressed it only while the surrounding positions
+  remained stable. Inserting a title before the prose caused previously dismissed
+  notes to return. Position-bearing fingerprints are therefore not a durable substitute
+  for stable targets plus explicit input lifecycle state.
+- Editing and accepting suggestions exposed two histories: Yjs could undo prose while
+  the suggestion lifecycle remained resolved. Text history and input history must be
+  one atomic domain transaction.
+- Complete target deletion currently tends to make an annotation stale or remove its
+  visible card. The target architecture instead makes removal, detachment, or a state
+  transition an explicit stored behaviour.
+
 ## Remaining limitations
 
 - The bundled offline selection suggester is deliberately small. Unknown wording yields an annotation; richer contextual rewrites require an enabled AI source.
 - “More distant” is only a word-level replay in the bundled sentinel, not a full narrative-distance rewrite.
 - A multi-sentence selection is currently reduced to its first sentence by the scripted replay. This should be made explicit or expanded before treating passage-wide selection actions as production-ready.
 - Hover preview has no keyboard or touch equivalent and could not be conclusively exercised with the current browser automation surface.
-- Undo restores prose, but does not reopen an accepted suggestion card as pending. A writer can rerun a general craft pass, but an identical accepted selection suggestion may remain coalesced as already resolved.
+- Undo restores prose, but does not reopen an accepted suggestion card as pending. This
+  is now an architectural defect rather than an accepted limitation: undo/redo must
+  restore prose, formatting, input state, targets, invalidation state, and selection as
+  one semantic transaction.
 - Drag-to-dismiss and its five-second undo toast were not exercised in this pass; ordinary reject was verified.
+
+## Required target and undo regression coverage
+
+The next architecture slice is not complete until automated or browser tests cover:
+
+1. Accept an input-proposed replacement, undo it, and verify both the original prose
+   and pending input return; redo restores the accepted prose and accepted input state.
+2. Delete part of an input target and verify the stored behaviour shrinks, splits, or
+   detaches it without creating a duplicate input.
+3. Delete an input's complete target and verify the configured removal, detachment, or
+   state transition plus its system event; undo restores the exact prior target and
+   state.
+4. Insert a title or paragraph before existing inputs and verify targets move without
+   dismissed or resolved inputs reappearing.
+5. Delete or replace part of a formatted span and verify the format shrinks, splits,
+   merges, or disappears correctly; undo restores text and formatting together.
+6. Apply a format to a paragraph, chapter subtree, and whole work; verify precedence,
+   future-content behaviour for live targets, and one-step undo/redo.
+7. Split, merge, move, copy, and delete nodes while testing both format and input
+   behaviour profiles.
+8. Verify typing bursts, paste, IME composition, AI acceptance, and chapter formatting
+   form natural atomic undo units and restore the caret or selection where practical.
+9. Verify a text change invalidates only dependent reviews, while format-only and
+   context-only changes trigger their respective typed cascades.
+10. Reload with queued or persisted transactions and verify current input states and
+    targets are reconstructed without duplicate notes.

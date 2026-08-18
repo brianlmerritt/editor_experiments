@@ -1,117 +1,333 @@
-# Architecture boundary
+# Margin Note architecture
 
-Margin Note is still an experiment. The architecture should make the next experiment
-cheap, not predict the final product.
+This document is the authority for Margin Note's intended application architecture.
+It describes the direction of the experiment, not a claim that every part is already
+implemented. Where the original POC plan conflicts with this document, this document
+wins.
 
-## Current decision
+Margin Note remains an experiment. The architecture should keep the next experiment
+cheap while protecting the things a writer must be able to trust: the current work,
+its formatting, its inputs, and undo/redo.
 
-The application has three boundaries:
+## Current decisions
+
+1. Margin Note works on **one work at a time**. It is not a multi-project manager.
+2. The Svelte workspace state is the authoritative live application state.
+3. The rendered editor, ProseMirror, Yjs, IndexedDB, SQLite, and exported files are
+   adapters, persistence mechanisms, or projections. None defines the domain model.
+4. The façade hydrates, persists, synchronises, and exports workspace state. It is not
+   the source of truth. Its v1 boundary is specified in
+   [FACADE_V1.md](./FACADE_V1.md).
+5. Formats and inputs use the same content-target system. They have different payloads
+   and lifecycle behaviours, not different anchoring technologies.
+6. Every accepted mutation is an atomic transaction. Undo/redo reverses or reapplies
+   the complete transaction, including text, formatting, input state, targets, and
+   selection.
+7. Behaviour such as what happens to an attachment when its target is edited is
+   explicit workspace state, interpreted by one domain reducer. It is not scattered
+   through Svelte components or editor plugins.
+
+## Authority and boundaries
 
 ```text
-Svelte pages
-  -> WorkspaceState (reactive writing behaviour)
-    -> WorkspaceFacade (persistence and service operations)
-      -> current HTTP API, SQLite ledger, and provider adapters
+Svelte pages and editor UI
+  -> workspace commands
+    -> WorkspaceState + domain reducer       AUTHORITATIVE LIVE STATE
+      -> derived views and editor projection
+      -> transaction outbox
+        -> WorkspaceFacade                   BOUNDARY, NOT AUTHORITY
+          -> browser persistence
+          -> optional collaboration driver
+          -> durable snapshots / server storage
+          -> import and export
 
-Svelte pages
-  -> EditorShell (neutral editor commands and callbacks)
-    -> ProseMirror, Yjs, and IndexedDB
+Remote or restored data
+  -> WorkspaceFacade
+    -> normalised workspace transaction or snapshot
+      -> WorkspaceState + domain reducer
 ```
 
-Pages must not call workspace API routes directly. `WorkspaceState` must not know API
-response envelopes. The façade owns those details and accepts an injected transport so
-it can be tested or replaced.
+`EditorShell` adapts the active rich-text editor. It reports commands, selections, and
+editor transactions in domain terms and renders the state it receives. ProseMirror and
+Yjs types stay inside their implementations.
 
-`EditorShell` is the technology adapter for the active text editor. Its public API uses
-plain text, positions, suggestions, and callbacks. ProseMirror and Yjs types stay inside
-the editor implementation and its plugins.
+After initial hydration, pages and editor plugins must not independently mutate a
+second copy of manuscript, format, or input state. UI-only state such as hover,
+selection handles, open panels, and filters may live separately.
 
-This is not a promise that every dependency can be swapped without work. It keeps the
-work local: changing an API or storage system should affect the façade, while changing
-the rich-text engine should affect the editor adapter.
+## Minimal workspace aggregate
 
-## Adaptable project and Codex model
+The domain needs a small set of primitives:
 
-The minimum shared vocabulary lives in `src/lib/workspace/model.ts`:
+1. **Content node** — a stable structural unit.
+2. **Content target** — a text selection, node, node range, or union of those.
+3. **Format** — presentation attached to content targets.
+4. **Input** — human, AI, or system material attached or applicable to content.
+5. **Behaviour** — stored rules for transforming an attachment when content changes.
+6. **Transaction** — one reversible semantic change.
 
-- **Project** — stable identity and project-wide extension data.
-- **Container** — an ordered, nestable bucket.
-- **Document** — a titled text leaf with an optional descriptive role.
-- **Revision** — a preserved document snapshot with authorship and reason.
-- **Context bucket** — freely named project- or document-scoped knowledge with its own
-  revision history.
+Conceptually:
 
-The manuscript and Codex use the same neutral document/context primitives. `scene`,
-`chapter`, `character`, `research`, and `narrative_rules` are optional roles, not
-required folder names or hard-coded node kinds.
-
-Every project and node has a stable ID. Renaming, moving, or reordering does not change
-identity. Extension data is JSON-compatible and namespaced by convention:
-
-```yaml
-extensions:
-  narration:
-    tense: past
-    focalization: limited
-  timeline:
-    story_day: 3
+```ts
+interface WorkspaceState {
+  work: WorkIdentity;
+  revision: number;
+  nodes: Record<NodeId, ContentNode>;
+  formats: Record<FormatId, FormatAttachment>;
+  inputs: Record<InputId, InputRecord>;
+  behaviours: Record<BehaviourId, AttachmentBehaviour>;
+  undo: HistoryEntry[];
+  redo: HistoryEntry[];
+  sync: SyncState;
+}
 ```
 
-The core must preserve extension data it does not understand.
+This is one coordinated writable aggregate. Read-only derived views and indexes may
+expose the current scene, visible inputs, effective formatting, or stale reviews, but
+they are disposable and must not become competing sources of truth.
 
-## Add-ons
+## Adaptable work structure
 
-For now an add-on is application code that:
+Each content node has a stable ID, a freely named type, an optional parent, ordered
+children, revision counters, and JSON-compatible extension data:
 
-1. reads neutral projects, containers, and documents through the façade;
-2. stores optional data under its own extension key;
-3. contributes commands, context, or a view without changing the core node model.
+```ts
+interface ContentNode {
+  id: NodeId;
+  type: string;
+  parentId: NodeId | null;
+  childIds: NodeId[];
+  text?: string;
+  contentRevision: number;
+  formatRevision: number;
+  extensions: Record<string, JsonValue>;
+}
+```
 
-There is deliberately no runtime plugin loader, schema registry, or public plugin API
-yet. We will extract a stable add-on interface only after two real add-ons need the
-same seam.
+`chapter`, `scene`, `section`, `paragraph`, `character`, `research`, and
+`narrative_rules` are optional types or roles, not a compulsory hierarchy. Renaming,
+moving, or reordering a node does not change its identity. The core preserves extension
+data it does not understand.
 
-## Mutation
+The Codex remains adaptable: freely named records and buckets can be added without
+changing the content model. A specialised add-on is justified only after a real
+workflow needs behaviour beyond an ordinary scoped input.
 
-Mutation follows four rules:
+## Content targets
 
-1. IDs remain stable.
-2. Each accepted save advances the document revision.
-3. The previous content can be recovered from a revision snapshot or ledger event.
-4. Derived indexes and views are disposable; source documents and revisions are not.
+Formats and inputs share this addressing vocabulary:
 
-Structured story time, character belief, and reader disclosure remain ordinary Codex
-content until an experiment demonstrates that machine-queryable temporal state improves
-editing enough to justify a timeline add-on.
+```ts
+type ContentTarget =
+  | { type: 'text'; nodeId: NodeId; start: number; end: number }
+  | { type: 'node'; nodeId: NodeId; includeDescendants: boolean }
+  | { type: 'nodeRange'; fromNodeId: NodeId; toNodeId: NodeId };
+
+interface TargetSet {
+  mode: 'snapshot' | 'live';
+  targets: ContentTarget[];
+}
+```
+
+A target set can describe one word, several paragraphs, a scene, scenes 1–3 plus 5
+and 8, a chapter subtree, or the whole work. The UI may display ordinal scene numbers,
+but state stores stable node IDs.
+
+`snapshot` means the content selected at the time of attachment. `live` means a
+structural scope whose later descendants may also be included. Directly formatting a
+selection is normally snapshot-based; applying a chapter style is normally live.
+
+Targets store current positions plus enough original evidence—source revision,
+quotation, nearby context, and optionally a hash—to explain or recover a detached
+target. Hashes validate identity and aid recovery; they are not the primary address.
+
+## Formats
+
+A format is an attachment whose payload affects presentation or export:
+
+```ts
+interface FormatAttachment {
+  id: FormatId;
+  target: TargetSet;
+  properties: FormatProperties;
+  behaviourId: BehaviourId;
+  priority: number;
+}
+```
+
+Formats may target character ranges, blocks, chapters, or the entire work. A whole chapter
+or work may therefore be struck through. More specific formatting can override an
+ancestor format; explicit `false` or `unset` values must be representable. Effective
+formatting is derived from all applicable formats in a deterministic priority order.
+
+Deleting text removes that text and therefore its current formatting. Remaining
+format spans may shrink, split, merge, or disappear. Normalisation may combine
+adjacent spans with identical effective properties. The inverse transaction retains
+the deleted text and its formats so undo can restore them exactly.
+
+## Inputs
+
+**Input** is the user-facing term for material brought to bear on the work. It includes
+human comments, AI findings, rewrite suggestions, todos, questions, instructions,
+decisions, character states, continuity facts, research, and foreshadowing.
+
+```ts
+interface InputRecord {
+  id: InputId;
+  kind: string;
+  anchors: TargetSet;
+  scope?: TargetSet;
+  content: JsonValue;
+  source: InputSource;
+  state: string;
+  behaviourId: BehaviourId;
+  events: InputEvent[];
+  createdAtRevision: number;
+  updatedAtRevision: number;
+}
+```
+
+An **anchor** says where an input is visibly attached or discussed. A **scope** says
+where it applies. A character version may be anchored to a character record while its
+scope covers scenes 1–3, 5, and 8. A foreshadowing input may have one setup anchor and
+several payoff anchors.
+
+Inputs are expected to outnumber formats and need first-class management outside the
+margin. Derived views should support filtering and grouping by target, scope, kind,
+state, source, author/model, priority, tag, assignee, creation revision, and whether
+the target remains attached. These indexes are projections of `inputs`, never the
+canonical records.
+
+## State-held attachment behaviour
+
+The reducer implements a small finite vocabulary of target transformations. Workspace
+state chooses which behaviour applies through named profiles, with an optional
+per-attachment override:
+
+```ts
+interface AttachmentBehaviour {
+  id: BehaviourId;
+  insertionAtStart: 'include' | 'exclude';
+  insertionAtEnd: 'include' | 'exclude';
+  insertionInside: 'include' | 'exclude';
+  partialDeletion: 'shrink' | 'split' | 'detach';
+  completeDeletion: 'remove' | 'detach' | 'change_state';
+  deletedState?: string;
+  copy: 'copy' | 'reference' | 'omit';
+  move: 'follow';
+}
+```
+
+This avoids both extremes: attachment behaviour is not an invisible hard-coded rule,
+but it is also not arbitrary executable code stored in the document.
+
+When an input's complete target is deleted, its behaviour may remove it, detach it, or
+move it to a state such as `target_removed`. A surviving input records a system event
+containing the deleting transaction, prior target, and previous excerpt. It can then be
+reattached, addressed, dismissed, or explicitly deleted.
+
+The same transformation engine handles insertion affinity, partial deletion,
+paragraph split/merge, structural movement, copying, and complete node deletion.
+
+## Transactions and change awareness
+
+All mutation enters through workspace commands and becomes one atomic transaction:
+
+```ts
+interface Transaction {
+  id: TransactionId;
+  actorId: string;
+  source: 'human' | 'ai' | 'remote' | 'import' | 'system';
+  beforeRevision: number;
+  afterRevision: number;
+  forward: Patch[];
+  inverse: Patch[];
+  affected: AffectedContent[];
+  selectionBefore?: EditorSelection;
+  selectionAfter?: EditorSelection;
+  undoGroup?: string;
+}
+```
+
+For a text edit, the reducer performs one semantic operation:
+
+1. Apply the content change.
+2. Transform every intersecting format and input target using its stored behaviour.
+3. Record input lifecycle events and state transitions.
+4. Normalise format spans.
+5. Mark dependent reviews or other derived inputs stale according to typed affected
+   content.
+6. Advance revisions and record forward and inverse patches.
+7. Add one undo entry, clear redo after a divergent edit, queue persistence, and
+   update the rendered projection.
+
+The affected-content record identifies changed nodes and before/after ranges, hashes,
+and change kind (`text`, `format`, `structure`, `input`, or `context`). It is the unit
+used to trigger review and cascading work. Permanent IDs or hashes for every word are
+not required.
+
+Reviews and generated inputs record their source revision and dependencies. A text
+change can stale prose and continuity reviews without invalidating unrelated layout
+work; a format-only change can invalidate layout checks without rerunning character
+analysis; a character-state change can invalidate checks for the scenes in its scope.
+
+## Undo, redo, and durable history
+
+Undo/redo is a domain function, not merely browser, ProseMirror, or Yjs text history.
+One semantic user action must restore or reapply all coordinated state:
+
+- manuscript content and structure;
+- formatting and normalised spans;
+- input targets, states, and lifecycle events;
+- invalidation state;
+- selection and caret where practical.
+
+Typing bursts, paste, accepting an AI revision, or formatting a chapter should each be
+natural single undo units. IME composition must remain atomic. Undo applies stored
+inverse patches; it must not rerun target policies and hope to reconstruct the previous
+state. Redo applies the recorded forward patches.
+
+In a collaborative implementation, local undo normally affects only the local actor's
+transactions. Remote transactions enter through the same reducer and are not inserted
+into another writer's undo stack.
+
+Immediate undo/redo and durable version history are separate capabilities. The former
+supports editing; the latter supports recovery, audit, comparison, and reopening a
+past version.
+
+## Persistence and implementation status
+
+The current POC predates this model. It presently uses ProseMirror, Yjs relative
+positions, IndexedDB, SQLite snapshots, suggestion decorations, and a ledger. Those
+components are valid possible implementations behind the editor and façade, but their
+current schemas are not the target domain contract.
+
+In particular, the existing Yjs text undo manager restores prose without restoring the
+complete suggestion/input lifecycle. That is an identified limitation, not the desired
+architecture. The regression expectations are recorded in
+[CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md).
+
+Migration should proceed as tested vertical slices rather than a rewrite:
+
+1. Introduce shared content targets and state-held behaviour profiles for existing
+   suggestions, now treated as one input kind.
+2. Route accepted revisions and target reconciliation through atomic workspace
+   transactions with complete undo/redo.
+3. Add format attachments using the same target transformer.
+4. Add input management views and scoped context records.
+5. Add or replace persistence and collaboration drivers behind the façade only when a
+   real workflow requires them.
 
 ## Intentionally deferred
 
-- OKF, Obsidian, TEI, JSON-LD, or another interchange contract
-- alternate production storage adapters
-- a graph database or ontology
-- a runtime third-party plugin system
-- formal temporal reasoning
-- automatic schema migration for arbitrary add-on data
+- choosing Yjs, another CRDT, or operational transformation as the collaboration
+  implementation;
+- a runtime third-party plugin system;
+- a graph database or ontology;
+- OKF, Obsidian, TEI, JSON-LD, or another canonical interchange standard;
+- formal temporal reasoning;
+- automatic schema migration for arbitrary add-on data;
+- multi-work or portfolio management.
 
-Markdown export remains an interchange convenience. It is not yet the canonical
-workspace store.
-
-## Implemented persistence slice
-
-Projects, documents, immutable document revisions, and independently versioned context
-buckets are stored in SQLite behind `WorkspaceFacade`. The existing branch-per-Y.Doc
-editing model maps each branch to a durable document, preserving ledger identities.
-Browser Yjs persistence remains the live editing and local-recovery layer; debounced
-plain-text snapshots provide durable server-side versions.
-
-The first project receives a project-scoped `narrative_rules` context bucket. Writers
-may add any other project- or document-scoped buckets without registering a schema.
-Active buckets are included in provider craft requests.
-
-Containers, moving documents, and a specialised scene/chapter hierarchy remain
-deferred until a real workflow proves they are necessary.
-
-## Next vertical slice
-
-Use the context façade in one focused AI revision flow: selection, compiled active
-context, alternatives with provenance, and acceptance into the next document version.
+Markdown, DOCX, EPUB, and other exports are projections. They are not the canonical
+workspace state.

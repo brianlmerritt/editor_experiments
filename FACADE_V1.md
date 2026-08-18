@@ -1,0 +1,190 @@
+# Workspace façade v1
+
+This document specifies the intended v1 boundary between the authoritative Svelte
+workspace state and persistence, collaboration, service, import, and export
+implementations. The domain model and transaction semantics are defined in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
+## Purpose
+
+The façade exists so Svelte pages and domain state do not depend on:
+
+- HTTP routes or response envelopes;
+- IndexedDB object stores;
+- Yjs documents or relative-position types;
+- SQLite tables;
+- filesystem or cloud APIs;
+- provider-specific generation requests;
+- export-library details.
+
+The façade is not a repository-shaped source of domain truth. It hydrates the Svelte
+state and durably records transactions and snapshots produced by that state.
+
+## Authority rule
+
+During an active session:
+
+```text
+WorkspaceState is authoritative.
+The editor DOM is a projection.
+The façade carries state across process and device boundaries.
+Persistence is the durable record from which a new WorkspaceState is hydrated.
+```
+
+After hydration, a driver must not mutate an independent manuscript and later replace
+the Svelte state without expressing the change as a normalised snapshot or
+transaction.
+
+Yjs may merge concurrent operations and IndexedDB may journal them, but those types
+and storage decisions remain behind the boundary. A different driver must be possible
+without changing Svelte components or the public content-target model.
+
+## Minimum public responsibilities
+
+The eventual façade should cover five operations:
+
+```ts
+interface WorkspaceFacade {
+  load(preferred?: LoadPreference): Promise<WorkspaceSnapshot>;
+  commit(transaction: Transaction): Promise<CommitReceipt>;
+  checkpoint(snapshot: WorkspaceSnapshot): Promise<CheckpointReceipt>;
+  subscribe(listener: (change: RemoteWorkspaceChange) => void): Unsubscribe;
+  export(request: ExportRequest): Promise<ExportArtifact>;
+}
+```
+
+The exact TypeScript names may change during implementation. The responsibility split
+must not.
+
+### `load`
+
+Returns one active work as a domain snapshot: nodes, formats, inputs, behaviour
+profiles, revision metadata, and durable history required to resume safely.
+
+Loading may combine browser recovery, a server checkpoint, and later transactions.
+That reconciliation occurs behind the façade. The result contains domain types, not
+Yjs, database, or HTTP types.
+
+### `commit`
+
+Durably records a transaction already accepted by `WorkspaceState`. The Svelte state
+may update optimistically, while its outbox retains unacknowledged transactions and
+exposes dirty/error state.
+
+The transaction ID makes commit idempotent. Retrying must not apply the same semantic
+change twice. A receipt acknowledges durable revision information; it does not return
+a replacement document model.
+
+### `checkpoint`
+
+Stores a compact snapshot so load need not replay an unlimited transaction stream.
+Checkpointing does not create a second authority and does not replace immediate
+undo/redo history accidentally.
+
+### `subscribe`
+
+Delivers remote, restored, or externally imported changes in a normalised form that
+can enter the same workspace reducer as local actions. Presence, cursors, and transient
+awareness are separate UI data and do not mutate the durable work.
+
+The first implementation may return a no-op unsubscribe function while collaboration
+is absent.
+
+### `export`
+
+Projects current workspace state into Markdown, DOCX, EPUB, or another requested
+format. Unsupported inputs and formatting must be reported or intentionally omitted;
+an export must never silently become the source of truth.
+
+## Services that produce inputs
+
+AI and local analysis produce `InputRecord` proposals. Provider-specific transport may
+remain reachable through a façade or an adjacent `InputService`, but provider responses
+must be normalised before entering `WorkspaceState`:
+
+```ts
+interface InputService {
+  request(request: InputRequest, signal?: AbortSignal): Promise<InputProposal[]>;
+}
+```
+
+An AI provider never writes to the manuscript directly. Accepting a proposed revision
+creates an ordinary workspace transaction with provenance linking it to the input.
+
+Keeping this service logically separate prevents generation concerns from expanding
+the persistence contract. The existing `WorkspaceFacade` class may continue to host
+both responsibilities during the POC while callers depend only on the narrow methods
+they need.
+
+## Persistence timing and failure
+
+Svelte updates are immediate. Persistence may be batched, but a local durable journal
+should be written promptly enough that a closed tab does not routinely lose work.
+
+The state exposes at least:
+
+- clean or dirty;
+- queued transaction count;
+- last durable revision;
+- retrying or failed;
+- conflict requiring attention.
+
+On failure, the façade must not roll the workspace back silently. It retains the
+outbox, reports the failure, and retries or asks the writer to resolve a genuine
+conflict.
+
+## Transactions, undo, and the façade
+
+The domain reducer creates forward and inverse patches and owns the active undo/redo
+stacks. The façade persists accepted transactions and, where configured, enough recent
+history to resume after a crash.
+
+Calling undo creates or applies a domain reversal and then commits the resulting state
+change through the same boundary. A text-only Yjs undo that leaves input state behind
+does not satisfy this contract.
+
+For collaboration, the driver may use a CRDT-specific undo implementation internally,
+but the observable result must still be a complete domain transaction affecting text,
+formats, inputs, targets, and selection consistently.
+
+## Target ownership
+
+`WorkspaceState` owns `ContentTarget` values and their behaviour profiles. A façade
+driver may maintain private relative positions or database indexes to help persist and
+merge them. Those private representations must not become the only recoverable form of
+an anchor.
+
+When external or concurrent changes arrive, the façade supplies enough normalised
+information for the workspace reducer to transform targets deterministically. Original
+quotation and revision evidence are preserved for recovery and explanation.
+
+## Derived indexes
+
+Indexes such as inputs by node, state, kind, source, or assignee may be stored for
+performance. They are disposable. On disagreement, the canonical Svelte snapshot's
+input and target records win, and indexes are rebuilt.
+
+## Compatibility with the current POC
+
+The current `src/lib/workspace/facade.ts` is an HTTP-oriented first slice. It already
+keeps routes and response handling out of Svelte components, but it does not yet
+implement this complete contract:
+
+- it loads several collections rather than one full domain snapshot;
+- live manuscript edits remain primarily in Yjs/IndexedDB;
+- suggestion state is reconstructed from ledger events;
+- undo is text-oriented rather than a complete domain transaction;
+- generation and persistence methods share one class;
+- subscriptions and a transaction outbox are not implemented.
+
+These are migration facts, not reasons to expose the current implementation as the
+long-term interface.
+
+## Explicit non-goals for v1
+
+- abstracting every third-party library behind its own interface;
+- supporting multiple simultaneously open works;
+- selecting a permanent collaboration engine;
+- promising lossless representation in every export format;
+- adding a runtime plugin system;
+- retaining an unlimited keystroke-level event stream.
