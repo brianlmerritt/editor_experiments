@@ -13,13 +13,19 @@ architectural decisions. The authoritative target model is
 - Clicked inside an underlined word and inserted characters without replacing the whole word.
 - Selected a word and ran Heighten, Synonyms, More distant, and one-word Vary cadence requests.
 - Selected a sentence and ran Vary cadence.
-- Selected an alternative, accepted it, used accept-and-edit, rejected a note, and undid prose edits.
+- Applied an alternative directly, used accept-and-edit, rejected a note, and undid prose edits.
 - Configured OpenRouter from the Sources bar, restarted the local server, and verified
   that the provider and masked `sk-or******456` credential returned without exposing
   the entered key to the page or workspace payload.
-- Verified the dedicated Svelte writable settings store opens the provider dialog,
+- Verified the dedicated Svelte 5 Rune settings state opens the provider dialog,
   validates the explicitly named fields, updates A3 to visible, and reactively renders
   the returned masked identity after saving.
+- Migrated all Svelte components from mixed legacy reactivity to `$props`, `$state`,
+  `$derived`, `$effect`, snippets, and current event attributes. A policy regression
+  test rejects reintroduction of the mechanically detectable legacy forms.
+- Verified **Save provider** remains actionable even when browser/password-manager
+  autofill has not emitted Svelte input events; submission reads the actual form and
+  shows an explicit missing-field message when necessary.
 - Used the card keyboard flow to select variant 2 and accept it.
 - Re-ran craft passes after edits, rejection, and undo, then checked live-card counts for duplicates and stale anchors.
 - Inspected the docked margin with several cards of different heights.
@@ -49,6 +55,16 @@ architectural decisions. The authoritative target model is
     from code fences or surrounding explanation, removes trailing commas, validates
     each suggestion's required schema, clamps confidence, and applies passage bounds
     before creating inputs. A raw `JSON.parse` no longer discards these responses.
+12. **Sequential revision accepts could replace stale numeric positions.** Live Yjs
+    relative ranges now take precedence over persisted numeric targets. Provider calls
+    capture the requested range before dispatch, safely rebase across edits elsewhere,
+    and discard the response if its own passage changed while the model was working.
+13. **Choosing an alternative required a second tick.** Clicking an alternative now
+    applies that exact alternative immediately. The redundant acceptance tick has been
+    removed; accept-and-edit remains available as a separate action.
+14. **Selecting provider-setting text could dismiss the dialog.** The OpenRouter
+    backdrop no longer closes the dialog. Only Cancel or the explicit close button can
+    abandon the form.
 
 ## Verification evidence
 
@@ -57,7 +73,7 @@ architectural decisions. The authoritative target model is
 - Accept-and-edit: the accepted word `saw` was selected and could be overtyped with `glimpsed`.
 - Cadence: `Mara noticed the clock, and she stopped.` produced `Mara noticed the clock. And she stopped.` and `Mara noticed the clock — and she stopped.`
 - Duplicate control: two consecutive craft passes left exactly one `felt` note, one adverb note, and one POV note. A rejected `felt` note did not return on the next pass.
-- Automated tests: 12 files passed, 60 tests passed.
+- Automated tests: 15 files passed, 67 tests passed.
 - `npm run check`: 0 errors and 0 warnings.
 - `npm run build`: passed.
 
@@ -81,7 +97,7 @@ architectural decisions. The authoritative target model is
   store test.
 - Architecture-slice automated tests cover format boundary inheritance, reversible
   true/false strikethrough overrides, target mutation, and durable restore.
-- Full automated suite: 12 files passed, 60 tests passed.
+- Full automated suite: 15 files passed, 67 tests passed.
 - `npm run check`: 0 errors and 0 warnings.
 - `npm run build`: passed.
 

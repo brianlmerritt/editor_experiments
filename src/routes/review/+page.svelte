@@ -3,28 +3,29 @@
   import { categoryMeta, categories, makeId, type Category, type JudgmentPair } from '$lib/domain';
   import { workspaceFacade } from '$lib/workspace/facade';
 
-  let pairs: JudgmentPair[] = [];
-  let index = 0;
-  let reason = '';
-  let loading = true;
-  let completed = 0;
-  let sessionId = 'judge_pending';
-  let branchId = 'main';
-  let refreshing = false;
-  let loadError = '';
-  let lastRefreshed = '';
-  let presentedPairId = '';
-  let presentation: { left: JudgmentPair['left']; right: JudgmentPair['right']; swapped: boolean } | null = null;
+  let pairs = $state<JudgmentPair[]>([]);
+  let index = $state(0);
+  let reason = $state('');
+  let loading = $state(true);
+  let completed = $state(0);
+  let sessionId = $state('judge_pending');
+  let branchId = $state('main');
+  let refreshing = $state(false);
+  let loadError = $state('');
+  let lastRefreshed = $state('');
+  let presentedPairId = $state('');
+  let presentation = $state<{ left: JudgmentPair['left']; right: JudgmentPair['right']; swapped: boolean } | null>(null);
 
-  $: pair = pairs[index];
-  $: if (pair && pair.id !== presentedPairId) {
-    presentation = randomize(pair);
-    presentedPairId = pair.id;
-  }
-  $: if (!pair) {
-    presentation = null;
-    presentedPairId = '';
-  }
+  let pair = $derived(pairs[index]);
+  $effect(() => {
+    if (pair && pair.id !== presentedPairId) {
+      presentation = randomize(pair);
+      presentedPairId = pair.id;
+    } else if (!pair) {
+      presentation = null;
+      presentedPairId = '';
+    }
+  });
 
   onMount(() => {
     sessionId = localStorage.getItem('margin-note:session') ?? makeId('judge');
@@ -103,7 +104,7 @@
 <main>
   <section class="purpose">
     <div><b>What this does</b><p>Compare an unresolved suggestion with the original wording, without source labels, to measure suggestion quality. Choosing A or B records a research judgment; it does not alter the draft.</p></div>
-    <div class="refresh"><small>{lastRefreshed ? `Current session and branch · refreshed ${lastRefreshed}` : 'Current session and branch'}</small><button disabled={refreshing} on:click={() => refreshPairs()}>{refreshing ? 'Refreshing…' : 'Refresh queue'}</button></div>
+    <div class="refresh"><small>{lastRefreshed ? `Current session and branch · refreshed ${lastRefreshed}` : 'Current session and branch'}</small><button disabled={refreshing} onclick={() => refreshPairs()}>{refreshing ? 'Refreshing…' : 'Refresh queue'}</button></div>
   </section>
   {#if loadError}<p class="load-error">{loadError}</p>{/if}
   {#if loading}
@@ -124,8 +125,8 @@
       <div class="review-tools">
         <span class="category cat-{pair.category}"><i>{categoryMeta[pair.category].icon}</i>{categoryMeta[pair.category].label}</span>
         <nav aria-label="Comparison navigation">
-          <button disabled={index === 0} on:click={() => navigate(-1)}>← Previous</button>
-          <button disabled={index === pairs.length - 1} on:click={() => navigate(1)}>Next →</button>
+          <button disabled={index === 0} onclick={() => navigate(-1)}>← Previous</button>
+          <button disabled={index === pairs.length - 1} onclick={() => navigate(1)}>Next →</button>
         </nav>
       </div>
     </section>
@@ -140,13 +141,13 @@
     </section>
 
     <section class="comparison">
-      <button on:click={() => choose('left')}>
+      <button onclick={() => choose('left')}>
         <header><span>A</span><small>Choose passage A</small></header>
         <p>{presentation.left.text || '— deletion —'}</p>
         <footer>Prefer A <kbd>←</kbd></footer>
       </button>
       <div class="or">or</div>
-      <button on:click={() => choose('right')}>
+      <button onclick={() => choose('right')}>
         <header><span>B</span><small>Choose passage B</small></header>
         <p>{presentation.right.text || '— deletion —'}</p>
         <footer>Prefer B <kbd>→</kbd></footer>
@@ -155,7 +156,7 @@
 
     <section class="reason">
       <label for="reason">Optional one-line reason <span>qualitative gold</span></label>
-      <input id="reason" bind:value={reason} placeholder="A keeps the viewpoint closer without over-explaining…" on:keydown={(event) => { if (event.key === 'ArrowLeft' && event.metaKey) void choose('left'); if (event.key === 'ArrowRight' && event.metaKey) void choose('right'); }} />
+      <input id="reason" bind:value={reason} placeholder="A keeps the viewpoint closer without over-explaining…" onkeydown={(event) => { if (event.key === 'ArrowLeft' && event.metaKey) void choose('left'); if (event.key === 'ArrowRight' && event.metaKey) void choose('right'); }} />
     </section>
 
     <section class="rubric">

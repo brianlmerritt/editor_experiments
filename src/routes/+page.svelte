@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import EditorShell from '$lib/editor/EditorShell.svelte';
+  import { rebaseResponseRange, type TrackedRequestRange } from '$lib/editor/request-anchor';
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type WritingBrief } from '$lib/domain';
@@ -11,47 +12,46 @@
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
-  let editor: EditorShell;
-  let selection = { from: 1, to: 1, text: '' };
-  let selectedVariants: Record<string, number> = {};
-  let settingsOpen = false;
-  let contextOpen = false;
-  let ledgerOpen = false;
-  let sourceLegendOpen = false;
-  let inputsOpen = false;
-  let displayedSourceStates: Record<string, SourceState> = { ...workspace.sourceStates };
-  let inputStateFilter = 'all';
-  let inputSearch = '';
-  let briefDraft: WritingBrief = { ...workspace.brief };
-  let sentinelInstruction = '';
+  let editor = $state<EditorShell | null>(null);
+  let selection = $state({ from: 1, to: 1, text: '' });
+  let selectedVariants = $state<Record<string, number>>({});
+  let settingsOpen = $state(false);
+  let contextOpen = $state(false);
+  let ledgerOpen = $state(false);
+  let sourceLegendOpen = $state(false);
+  let inputsOpen = $state(false);
+  let displayedSourceStates = $state<Record<string, SourceState>>({ ...workspace.sourceStates });
+  let inputStateFilter = $state('all');
+  let inputSearch = $state('');
+  let briefDraft = $state<WritingBrief>({ ...workspace.brief });
+  let sentinelInstruction = $state('');
   let editTimer: ReturnType<typeof setTimeout> | null = null;
   let documentSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let editSession = { started: 0, characters: 0, text: '' };
-  let editorReady = false;
-  let workspaceReady = false;
-  let displayedDocumentRevision = 1;
-  let documentSaving = false;
-  let documentText = '';
-  let cardTops: Record<string, number> = {};
-  let cardsHeight = 0;
-  let cardsElement: HTMLDivElement;
-  let undoDismiss: { suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null = null;
-  let liveSuggestions: Suggestion[] = [];
-  let queuedCount = 0;
-  let isPaused = false;
-  let contextDrafts: Record<string, ContextDraft> = {};
-  let newContextTitle = '';
-  let newContextRole = '';
-  let newContextScope: ContextScope = 'project';
+  let editorReady = $state(false);
+  let workspaceReady = $state(false);
+  let displayedDocumentRevision = $state(1);
+  let documentSaving = $state(false);
+  let documentText = $state('');
+  let cardTops = $state<Record<string, number>>({});
+  let cardsHeight = $state(0);
+  let cardsElement = $state<HTMLDivElement>();
+  let undoDismiss = $state<{ suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null>(null);
+  let liveSuggestions = $state<Suggestion[]>([]);
+  let queuedCount = $state(0);
+  let isPaused = $state(false);
+  let contextDrafts = $state<Record<string, ContextDraft>>({});
+  let newContextTitle = $state('');
+  let newContextRole = $state('');
+  let newContextScope = $state<ContextScope>('project');
 
-  $: activeSuggestion = workspace.suggestions.find((suggestion) => suggestion.id === workspace.activeSuggestionId) ?? null;
-  $: selectedPrompt = workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0];
-  $: managedInputs = workspace.inputs
+  let selectedPrompt = $derived(workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0]);
+  let managedInputs = $derived.by(() => workspace.inputs
     .filter((input) => inputStateFilter === 'all' || input.state === inputStateFilter)
     .filter((input) => !inputSearch.trim() || `${input.payload.comment} ${input.source} ${input.category} ${input.state}`.toLowerCase().includes(inputSearch.trim().toLowerCase()))
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
 
   onMount(() => {
     void workspace.initialize().then(() => {
@@ -78,7 +78,9 @@
     };
   });
 
-  $: if (liveSuggestions.length && editorReady) void tick().then(layoutCards);
+  $effect(() => {
+    if (liveSuggestions.length && editorReady) void tick().then(layoutCards);
+  });
 
   function layoutCards(): void {
     if (!editor || !cardsElement || workspace.surface !== 'docked') return;
@@ -144,8 +146,11 @@
     refreshLiveSuggestions();
   }
 
+  function preventDefault(event: Event): void { event.preventDefault(); }
+  function stopPropagation(event: Event): void { event.stopPropagation(); }
+
   async function changeSource(sourceId: string): Promise<void> {
-    if (sourceId === 'openrouter' && $providerSettings.sourceAvailability.openrouter?.available !== true) {
+    if (sourceId === 'openrouter' && providerSettings.sourceAvailability.openrouter?.available !== true) {
       providerSettings.openOpenRouter();
       return;
     }
@@ -154,15 +159,19 @@
     refreshLiveSuggestions();
   }
 
-  async function saveOpenRouter(): Promise<void> {
+  async function saveOpenRouter(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    const key = String(form.get('openrouter-key') ?? '');
+    const model = String(form.get('openrouter-model') ?? '');
     try {
-      const configured = await providerSettings.saveOpenRouter();
+      const configured = await providerSettings.saveOpenRouter({ key, model });
       workspace.enableConfiguredSource('openrouter');
       displayedSourceStates = { ...workspace.sourceStates };
-      workspace.notice = `OpenRouter ${configured.model ?? $providerSettings.openRouterModel} was saved locally and is now visible.`;
+      workspace.notice = `OpenRouter ${configured.model ?? providerSettings.openRouterModel} was saved locally and is now visible.`;
       refreshLiveSuggestions();
     } catch (error) {
-      workspace.lastError = $providerSettings.error ?? (error instanceof Error ? error.message : 'OpenRouter configuration failed');
+      workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'OpenRouter configuration failed');
     }
   }
 
@@ -177,7 +186,8 @@
     if (!editorReady) {
       editorReady = true;
       if (editor) {
-        void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
+        const currentEditor = editor;
+        void workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
         refreshLiveSuggestions();
       }
       if (workspace.currentDocument && detail.text !== workspace.currentDocument.content) {
@@ -186,7 +196,8 @@
       return;
     }
     if (editor) {
-      void workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
+      const currentEditor = editor;
+      void workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
       refreshLiveSuggestions();
     }
     const origin = detail.origin as { kind?: string } | undefined;
@@ -268,42 +279,94 @@
   }
 
   async function runSentinels(): Promise<void> {
-    if (!editor || !selectedPrompt || workspace.paused) return;
-    await workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
-    const paragraphs = editor.getParagraphs();
-    const results = await Promise.all(paragraphs.map((paragraph) => workspace.requestSuggestions({ ...paragraph, prompt: selectedPrompt }, `${workspace.branchId}:${paragraph.from}:${paragraph.to}`)));
-    const incoming = results.flat();
+    const currentEditor = editor;
+    if (!currentEditor || !selectedPrompt || workspace.paused) return;
+    await workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
+    const requests = currentEditor.getParagraphs().map((paragraph) => ({
+      paragraph,
+      tracked: { ...paragraph, ...currentEditor.getRelativeAnchor(paragraph.from, paragraph.to) } satisfies TrackedRequestRange
+    }));
+    const results = await Promise.all(requests.map(({ paragraph }) => workspace.requestSuggestions({ ...paragraph, prompt: selectedPrompt }, `${workspace.branchId}:${paragraph.from}:${paragraph.to}`)));
     const valid = new Set<string>();
-    for (const suggestion of incoming) {
-      if (editor.getTextBetween(suggestion.anchor.from, suggestion.anchor.to) !== suggestion.anchor.text) {
-        void workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', { expected: suggestion.anchor.text });
-        continue;
-      }
-      valid.add(suggestion.id);
-      const relative = editor.getRelativeAnchor(suggestion.anchor.from, suggestion.anchor.to);
-      workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
+    let discarded = 0;
+    for (let index = 0; index < requests.length; index += 1) {
+      const result = await anchorProviderResponses(currentEditor, results[index], requests[index].tracked);
+      const anchored = result.anchored;
+      discarded += result.discarded;
+      for (const suggestion of anchored) valid.add(suggestion.id);
     }
-    showNotice(valid.size
-      ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added.`
-      : 'Craft pass complete; no new inputs.');
+    showNotice(discarded
+      ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added; ${discarded} stale ${discarded === 1 ? 'response was' : 'responses were'} safely discarded.`
+      : valid.size
+        ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added.`
+        : 'Craft pass complete; no new inputs.');
     refreshLiveSuggestions();
     await tick();
     layoutCards();
   }
 
   async function runSelection(promptId: string): Promise<void> {
-    if (!selection.text.trim()) return;
-    await workspace.reconcileSuggestionAnchors((suggestion) => editor.resolveSuggestionAnchor(suggestion));
+    const currentEditor = editor;
+    if (!currentEditor || !selection.text.trim()) return;
+    await workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
+    const requested = {
+      ...selection,
+      ...currentEditor.getRelativeAnchor(selection.from, selection.to)
+    } satisfies TrackedRequestRange;
     const prompt = workspace.prompts.find((item) => item.id === promptId) ?? { id: promptId, name: promptId, version: 1, instruction: `Offer a ${promptId} revision.` };
     const incoming = await workspace.requestSuggestions({ text: selection.text, from: selection.from, to: selection.to, prompt }, `${workspace.branchId}:selection:${selection.from}:${selection.to}`);
-    for (const suggestion of incoming) {
-      const relative = editor.getRelativeAnchor(suggestion.anchor.from, suggestion.anchor.to);
-      workspace.suggestions = workspace.suggestions.map((item) => item.id === suggestion.id ? { ...item, anchor: { ...item.anchor, ...relative } } : item);
-    }
+    const result = await anchorProviderResponses(currentEditor, incoming, requested);
+    const anchored = result.anchored;
     refreshLiveSuggestions();
     await tick();
     layoutCards();
-    if (incoming[0]) void activateCard(incoming[0].id);
+    if (result.discarded) showNotice('The passage changed while the revision was being prepared, so the stale response was safely discarded.');
+    else if (anchored[0]) void activateCard(anchored[0].id);
+  }
+
+  async function anchorProviderResponses(
+    currentEditor: EditorShell,
+    incoming: Suggestion[],
+    requested: TrackedRequestRange
+  ): Promise<{ anchored: Suggestion[]; discarded: number }> {
+    const resolved = currentEditor.resolveRelativeAnchor(requested.start, requested.end);
+    const anchored: Suggestion[] = [];
+    let discarded = 0;
+    for (const suggestion of incoming) {
+      const range = resolved && rebaseResponseRange(
+        suggestion,
+        requested,
+        resolved,
+        (from, to) => currentEditor.getTextBetween(from, to)
+      );
+      if (!range) {
+        discarded += 1;
+        await workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', {
+          reason: resolved ? 'response_no_longer_matches_document' : 'request_anchor_no_longer_resolves'
+        });
+        continue;
+      }
+      const relative = currentEditor.getRelativeAnchor(range.from, range.to);
+      workspace.suggestions = workspace.suggestions.map((item) => {
+        if (item.id !== suggestion.id) return item;
+        let targetUpdated = false;
+        const targets = item.target.targets.map((target) => {
+          if (targetUpdated || target.type !== 'text') return target;
+          targetUpdated = true;
+          return { ...target, start: range.from, end: range.to };
+        });
+        return {
+          ...item,
+          target: { ...item.target, targets },
+          anchor: { ...item.anchor, from: range.from, to: range.to, ...relative }
+        };
+      });
+      anchored.push({
+        ...suggestion,
+        anchor: { ...suggestion.anchor, from: range.from, to: range.to, ...relative }
+      });
+    }
+    return { anchored, discarded };
   }
 
   function activateFromEditor(id: string): void {
@@ -324,6 +387,8 @@
   }
 
   async function accept(suggestion: Suggestion, index: number, edit = false, viaKeyboard = false): Promise<void> {
+    const currentEditor = editor;
+    if (!currentEditor) return;
     const variants = suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
     const variant = variants[index];
     if (!variant) return;
@@ -334,7 +399,7 @@
       return;
     }
     workspace.clearPreview();
-    const result = editor.acceptSuggestion(suggestion, variant.text);
+    const result = currentEditor.acceptSuggestion(suggestion, variant.text);
     if (!result.ok) {
       await workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', { reason: result.reason });
       showNotice('That note expired because its text changed.');
@@ -345,8 +410,8 @@
     await workspace.supersedeSiblings(suggestion, variant.id);
     refreshLiveSuggestions();
     if (edit && result.from != null && result.to != null) {
-      if (variant.text) editor.selectRange(result.from, result.to);
-      else editor.focusAt(result.to);
+      if (variant.text) currentEditor.selectRange(result.from, result.to);
+      else currentEditor.focusAt(result.to);
     }
   }
 
@@ -503,6 +568,7 @@
   }
 
   async function exportMarkdown(): Promise<void> {
+    if (!editor) return;
     const result = await workspace.exportMarkdown(editor.getText(), workspace.branches.find((branch) => branch.id === workspace.branchId)?.name);
     const href = URL.createObjectURL(result.blob);
     const anchor = document.createElement('a');
@@ -519,26 +585,26 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
     <div class="top-actions">
-      <button class:paused={isPaused} on:click={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
-      <button on:click={openContext}>Context <span>{workspace.currentContext.length}</span></button>
-      <button on:click={openInputs}>Inputs <span>{workspace.inputs.length}</span></button>
-      <button on:click={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
+      <button class:paused={isPaused} onclick={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
+      <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
+      <button onclick={openInputs}>Inputs <span>{workspace.inputs.length}</span></button>
+      <button onclick={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
-      <button on:click={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
+      <button onclick={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
     </div>
   </header>
 
     <nav class="filterbar" aria-label="Input filters">
       <span class="filter-label">Show</span>
       {#each categories as category}
-        <button class:off={!workspace.categoryVisibility[category]} style={`--category:${`var(--cat-${category})`}`} on:click={() => changeCategory(category)}>
+        <button class:off={!workspace.categoryVisibility[category]} style={`--category:${`var(--cat-${category})`}`} onclick={() => changeCategory(category)}>
           <i>{categoryMeta[category].icon}</i>{categoryMeta[category].label}
         </button>
       {/each}
-      <label>Density <input type="range" min="1" max="20" bind:value={workspace.densityCap} on:input={refreshLiveSuggestions} /><output>{workspace.densityCap}</output></label>
+      <label>Density <input type="range" min="1" max="20" bind:value={workspace.densityCap} oninput={refreshLiveSuggestions} /><output>{workspace.densityCap}</output></label>
       <span class="spacer"></span>
-      <button class:active={workspace.surface === 'docked'} on:click={() => workspace.surface = 'docked'}>Margin</button>
-      <button class:active={workspace.surface === 'tray'} on:click={() => workspace.surface = 'tray'}>Tray</button>
+      <button class:active={workspace.surface === 'docked'} onclick={() => workspace.surface = 'docked'}>Margin</button>
+      <button class:active={workspace.surface === 'tray'} onclick={() => workspace.surface = 'tray'}>Tray</button>
     </nav>
 
   <main>
@@ -546,23 +612,23 @@
       <div class="document-column">
         <div class="document-meta">
           <div class="document-selectors">
-            <select value={workspace.projectId} on:change={(event) => switchProject((event.currentTarget as HTMLSelectElement).value)} aria-label="Project">
+            <select value={workspace.projectId} onchange={(event) => switchProject((event.currentTarget as HTMLSelectElement).value)} aria-label="Project">
               {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
             </select>
-            <button on:click={createProject} title="Create project">+ Project</button>
+            <button onclick={createProject} title="Create project">+ Project</button>
             <span aria-hidden="true">/</span>
-            <select value={workspace.branchId} on:change={(event) => switchDocument((event.currentTarget as HTMLSelectElement).value)} aria-label="Document">
+            <select value={workspace.branchId} onchange={(event) => switchDocument((event.currentTarget as HTMLSelectElement).value)} aria-label="Document">
               {#each workspace.documents.filter((document) => document.projectId === workspace.projectId) as document}<option value={document.id}>{document.title} · {document.id === workspace.branchId ? wordCount(documentText) : wordCount(document.content)}w</option>{/each}
             </select>
-            <button on:click={createDocument} title="Create blank document">+ Document</button>
-            <button on:click={renameDocument}>Rename</button>
-            <button on:click={forkBranch}>Fork from here</button>
+            <button onclick={createDocument} title="Create blank document">+ Document</button>
+            <button onclick={renameDocument}>Rename</button>
+            <button onclick={forkBranch}>Fork from here</button>
           </div>
-          <div><span>{wordCount(documentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button on:click={exportMarkdown}>Export .md</button></div>
+          <div><span>{wordCount(documentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button onclick={exportMarkdown}>Export .md</button></div>
           <div class="document-tools">
-            <button disabled={!workspace.undoStack.length} on:click={undoWorkspace}>Undo</button>
-            <button disabled={!workspace.redoStack.length} on:click={redoWorkspace}>Redo</button>
-            <button on:click={strikeWork}>{workspace.workHasStrikethrough ? 'Remove work strikethrough' : 'Strike work'}</button>
+            <button disabled={!workspace.undoStack.length} onclick={undoWorkspace}>Undo</button>
+            <button disabled={!workspace.redoStack.length} onclick={redoWorkspace}>Redo</button>
+            <button onclick={strikeWork}>{workspace.workHasStrikethrough ? 'Remove work strikethrough' : 'Strike work'}</button>
           </div>
         </div>
 
@@ -596,23 +662,23 @@
           {#if selection.text && !workspace.paused}
             <div class="selection-menu">
               <span>{selection.text.split(/\s+/).length}w selected</span>
-              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('heighten')}>Heighten</button>
-              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('cadence')}>Vary cadence</button>
-              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('distance')}>More distant</button>
-              <button type="button" on:mousedown|preventDefault on:click={() => runSelection('synonyms')}>Synonyms</button>
-              <button type="button" on:mousedown|preventDefault on:click={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
+              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
+              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
+              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
+              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('synonyms')}>Synonyms</button>
+              <button type="button" onmousedown={preventDefault} onclick={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
             </div>
           {/if}
         </div>
 
         <div class="source-dock">
-          <div class="source-heading"><span>Sources</span><button on:click={() => sourceLegendOpen = !sourceLegendOpen}>L/A key</button></div>
+          <div class="source-heading"><span>Sources</span><button onclick={() => sourceLegendOpen = !sourceLegendOpen}>L/A key</button></div>
           <div class="source-buttons">
             {#each sourceCatalog as source}
               {@const state = displayedSourceStates[source.id]}
-              {@const availability = $providerSettings.sourceAvailability[source.id]}
+              {@const availability = providerSettings.sourceAvailability[source.id]}
               {@const unavailable = availability?.available !== true}
-              <button class:invisible={state === 'invisible'} class:off={state === 'off'} class:unavailable on:click={() => changeSource(source.id)} title={unavailable ? availability.reason : `${source.label}: ${state}${availability?.model ? ` · ${availability.model}` : ''}`}>
+              <button class:invisible={state === 'invisible'} class:off={state === 'off'} class:unavailable onclick={() => changeSource(source.id)} title={unavailable ? availability.reason : `${source.label}: ${state}${availability?.model ? ` · ${availability.model}` : ''}`}>
                 <span class="state-icon">{unavailable ? '!' : state === 'visible' ? '◉' : state === 'invisible' ? '⊘' : '○'}</span>
                 <b>{source.kind === 'local' ? 'L' : 'A'}{source.number}</b>
                 <span>{source.label}</span>
@@ -622,11 +688,11 @@
           </div>
           <div class="source-summary">
             <span>Session spend <strong>${workspace.costUsd.toFixed(4)}</strong> <em>includes invisible</em></span>
-            {#if $providerSettings.sourceAvailability.openrouter?.credentialHint}
-              <span class="provider-identity">{$providerSettings.sourceAvailability.openrouter.credentialHint} · {$providerSettings.sourceAvailability.openrouter.model}</span>
+            {#if providerSettings.sourceAvailability.openrouter?.credentialHint}
+              <span class="provider-identity">{providerSettings.sourceAvailability.openrouter.credentialHint} · {providerSettings.sourceAvailability.openrouter.model}</span>
             {/if}
-            <button class="provider-config" on:click={() => providerSettings.openOpenRouter()}>{$providerSettings.sourceAvailability.openrouter?.available === true ? 'OpenRouter settings' : 'Configure OpenRouter'}</button>
-            <button class="scan" disabled={workspace.generating || workspace.paused} on:click={runSentinels}>{workspace.generating ? 'Reading…' : 'Run craft pass'}</button>
+            <button class="provider-config" onclick={() => providerSettings.openOpenRouter()}>{providerSettings.sourceAvailability.openrouter?.available === true ? 'OpenRouter settings' : 'Configure OpenRouter'}</button>
+            <button class="scan" disabled={workspace.generating || workspace.paused} onclick={runSentinels}>{workspace.generating ? 'Reading…' : 'Run craft pass'}</button>
           </div>
           {#if sourceLegendOpen}<p class="legend"><b>L</b> local, offline craft tool · <b>A</b> AI or scripted model · source number identifies provenance without assigning it a hue. Click rapidly: visible → invisible → off.</p>{/if}
         </div>
@@ -677,28 +743,31 @@
   </main>
 
   <div class="pause-banner" class:mode-hidden={!isPaused}><b>Paused</b> — editing, dispatch timers, and provider spend are suspended.</div>
-  {#if workspace.notice}<button class="notice" on:click={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
-  {#if workspace.lastError}<button class="error" on:click={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
-  {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button on:click={undoDragDismiss}>Undo</button></div>{/if}
+  {#if workspace.notice}<button class="notice" onclick={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
+  {#if workspace.lastError}<button class="error" onclick={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
+  {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button onclick={undoDragDismiss}>Undo</button></div>{/if}
 
-  {#if $providerSettings.openRouterDialogOpen}
-    <div class="modal-backdrop" role="presentation" on:click={() => providerSettings.closeOpenRouter()}>
-      <div class="settings provider-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="provider-title" on:click|stopPropagation on:keydown|stopPropagation>
-        <header><div><small>AI source A3</small><h2 id="provider-title">OpenRouter</h2></div><button on:click={() => providerSettings.closeOpenRouter()}>×</button></header>
-        <p class="provider-intro">The key and model are saved in the local server's ignored provider-settings file, readable only by your operating-system user. They are not written to the work, browser storage, or event ledger.</p>
-        <label>OpenRouter API key {#if $providerSettings.sourceAvailability.openrouter?.credentialHint}<small>Saved as {$providerSettings.sourceAvailability.openrouter.credentialHint}; leave blank to keep it</small>{/if}<input type="password" autocomplete="off" bind:value={$providerSettings.openRouterKey} placeholder={$providerSettings.sourceAvailability.openrouter?.credentialHint ?? 'sk-or-…'} /></label>
-        <label>OpenRouter model ID<input bind:value={$providerSettings.openRouterModel} placeholder="anthropic/claude-fable-5" /></label>
-        <footer><p>The masked key confirms which credential is active without exposing it.</p><button on:click={() => providerSettings.closeOpenRouter()}>Cancel</button><button class="primary" disabled={$providerSettings.savingProvider || !providerSettings.canSaveOpenRouter()} on:click={saveOpenRouter}>{$providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
+  {#if providerSettings.openRouterDialogOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="settings provider-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="provider-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>AI source A3</small><h2 id="provider-title">OpenRouter</h2></div><button onclick={() => providerSettings.closeOpenRouter()}>×</button></header>
+        <form onsubmit={saveOpenRouter}>
+          <p class="provider-intro">The key and model are saved in the local server's ignored provider-settings file, readable only by your operating-system user. They are not written to the work, browser storage, or event ledger.</p>
+          <label>OpenRouter API key {#if providerSettings.sourceAvailability.openrouter?.credentialHint}<small>Saved as {providerSettings.sourceAvailability.openrouter.credentialHint}; leave blank to keep it</small>{/if}<input name="openrouter-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required={!providerSettings.sourceAvailability.openrouter?.available} bind:value={providerSettings.openRouterKey} placeholder={providerSettings.sourceAvailability.openrouter?.credentialHint ?? 'sk-or-…'} /></label>
+          <label>OpenRouter model ID<small>Exact OpenRouter model slug</small><input name="openrouter-model" required bind:value={providerSettings.openRouterModel} /></label>
+          {#if providerSettings.error}<p class="provider-error" role="alert">{providerSettings.error}</p>{/if}
+          <footer><p>The masked key confirms which credential is active without exposing it.</p><button type="button" onclick={() => providerSettings.closeOpenRouter()}>Cancel</button><button type="submit" class="primary" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
+        </form>
       </div>
     </div>
   {/if}
 
   {#if inputsOpen}
-    <div class="modal-backdrop" role="presentation" on:click={() => inputsOpen = false}>
-      <div class="input-manager" role="dialog" tabindex="-1" aria-modal="true" aria-label="Manage inputs" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="modal-backdrop" role="presentation" onclick={() => inputsOpen = false}>
+      <div class="input-manager" role="dialog" tabindex="-1" aria-modal="true" aria-label="Manage inputs" onclick={stopPropagation} onkeydown={stopPropagation}>
         <header>
           <div><small>Workspace</small><h2>Inputs</h2></div>
-          <button class="close" on:click={() => inputsOpen = false}>×</button>
+          <button class="close" onclick={() => inputsOpen = false}>×</button>
         </header>
         <div class="input-controls">
           <input aria-label="Search inputs" placeholder="Search inputs" bind:value={inputSearch} />
@@ -722,9 +791,9 @@
               <small>{input.sourceKind === 'local' ? 'Local' : 'AI'} · {input.source} · {targetLabel(input.target)}</small>
               {#if input.events.length}<small>{input.events.length} target {input.events.length === 1 ? 'event' : 'events'} recorded</small>{/if}
               <footer>
-                {#if input.target.targets.length}<button on:click={() => { editor.focusSuggestion(input); inputsOpen = false; }}>Locate</button>{/if}
-                {#if input.state !== 'pending' && input.target.targets.length}<button on:click={() => setManagedInputState(input, 'pending')}>Reopen</button>{/if}
-                {#if input.state === 'pending'}<button on:click={() => setManagedInputState(input, 'rejected')}>Dismiss</button>{/if}
+                {#if input.target.targets.length}<button onclick={() => { editor?.focusSuggestion(input); inputsOpen = false; }}>Locate</button>{/if}
+                {#if input.state !== 'pending' && input.target.targets.length}<button onclick={() => setManagedInputState(input, 'pending')}>Reopen</button>{/if}
+                {#if input.state === 'pending'}<button onclick={() => setManagedInputState(input, 'rejected')}>Dismiss</button>{/if}
               </footer>
             </article>
           {/each}
@@ -734,9 +803,9 @@
   {/if}
 
   {#if settingsOpen}
-    <div class="modal-backdrop" role="presentation" on:click={() => settingsOpen = false}>
-      <div class="settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="brief-title" on:click|stopPropagation on:keydown|stopPropagation>
-        <header><div><small>Shared model context</small><h2 id="brief-title">Writing brief <span>v{workspace.brief.version}</span></h2></div><button on:click={() => settingsOpen = false}>×</button></header>
+    <div class="modal-backdrop" role="presentation" onclick={() => settingsOpen = false}>
+      <div class="settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="brief-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>Shared model context</small><h2 id="brief-title">Writing brief <span>v{workspace.brief.version}</span></h2></div><button onclick={() => settingsOpen = false}>×</button></header>
         <div class="form-grid">
           <label>Form<select bind:value={briefDraft.form}><option value="fiction">Fiction</option><option value="non-fiction">Non-fiction</option></select></label>
           <label>Point of view<input bind:value={briefDraft.pov} /></label>
@@ -745,17 +814,17 @@
         </div>
         <label>Canon / background<textarea rows="7" bind:value={briefDraft.canon} placeholder="Characters, world rules, facts the suggesters must preserve…"></textarea><small>{briefDraft.canon.length} / 6000 characters sent in the POC</small></label>
         <label>Sentinel task prompt <span class="version">v{workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.version ?? 1}</span><textarea rows="5" bind:value={sentinelInstruction}></textarea></label>
-        <footer><p>Saving a material brief change expires live suggestions from older brief versions.</p><button on:click={() => settingsOpen = false}>Cancel</button><button class="primary" on:click={saveSettings}>Save new version</button></footer>
+        <footer><p>Saving a material brief change expires live suggestions from older brief versions.</p><button onclick={() => settingsOpen = false}>Cancel</button><button class="primary" onclick={saveSettings}>Save new version</button></footer>
       </div>
     </div>
   {/if}
 
   {#if contextOpen}
-    <div class="modal-backdrop" role="presentation" on:click={() => contextOpen = false}>
-      <div class="settings context-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="context-title" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="modal-backdrop" role="presentation" onclick={() => contextOpen = false}>
+      <div class="settings context-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="context-title" onclick={stopPropagation} onkeydown={stopPropagation}>
         <header>
           <div><small>Versioned project knowledge</small><h2 id="context-title">Context buckets</h2></div>
-          <button on:click={() => contextOpen = false}>×</button>
+          <button onclick={() => contextOpen = false}>×</button>
         </header>
         <p class="context-intro">Project buckets follow every document. Document buckets apply only to <strong>{workspace.currentDocument?.title}</strong>. Names and roles are descriptive, not a fixed schema.</p>
         <div class="context-list">
@@ -774,8 +843,8 @@
                 <label>Content<textarea rows={bucket.role === 'narrative_rules' ? 9 : 6} bind:value={draft.content}></textarea></label>
                 <footer>
                   <small>Saving creates a new version; earlier content remains recoverable.</small>
-                  {#if bucket.role !== 'narrative_rules'}<button class="danger" on:click={() => deleteContextBucket(bucket)}>Remove</button>{/if}
-                  <button class="primary" on:click={() => saveContextBucket(bucket)}>Save new version</button>
+                  {#if bucket.role !== 'narrative_rules'}<button class="danger" onclick={() => deleteContextBucket(bucket)}>Remove</button>{/if}
+                  <button class="primary" onclick={() => saveContextBucket(bucket)}>Save new version</button>
                 </footer>
               </article>
             {/if}
@@ -788,9 +857,9 @@
             <label>Optional role<input bind:value={newContextRole} placeholder="Free-form label" /></label>
           </div>
           <label>Scope<select bind:value={newContextScope}><option value="project">Entire project</option><option value="document">Current document only</option></select></label>
-          <button class="primary" disabled={!newContextTitle.trim()} on:click={addContextBucket}>Add empty bucket</button>
+          <button class="primary" disabled={!newContextTitle.trim()} onclick={addContextBucket}>Add empty bucket</button>
         </section>
-        <footer><p>Active buckets are included in AI craft requests. There is no required scene, chapter, character, or genre schema.</p><button on:click={() => contextOpen = false}>Done</button></footer>
+        <footer><p>Active buckets are included in AI craft requests. There is no required scene, chapter, character, or genre schema.</p><button onclick={() => contextOpen = false}>Done</button></footer>
       </div>
     </div>
   {/if}
@@ -912,13 +981,14 @@
   .settings input, .settings select, .settings textarea { width: 100%; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink); padding: 9px 10px; outline: none; font: 12px/1.45 var(--font-ui); resize: vertical; }
   .settings input:focus, .settings textarea:focus, .settings select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .settings label small, .version { justify-self: end; color: var(--muted); font-size: 8px; }
-  .settings > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .settings > footer, .settings form > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
   .settings footer p { flex: 1; margin: 0; color: var(--muted); font: 9px/1.5 var(--font-ui); }
   .settings footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
   .settings footer .primary { background: var(--accent); border-color: var(--accent); color: white; }
   .settings footer button:disabled { opacity: .45; cursor: default; }
   .provider-settings { width: min(560px, 100%); }
   .provider-intro { margin: -6px 0 18px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
+  .provider-error { margin: 8px 0 0; color: var(--reject); font: 600 10px/1.4 var(--font-ui); }
   .provider-identity { color: var(--muted); font: 9px/1.2 var(--font-mono); }
   .context-settings { width: min(840px, 100%); }
   .context-intro { margin: -8px 0 20px; color: var(--muted); font: 11px/1.6 var(--font-ui); }

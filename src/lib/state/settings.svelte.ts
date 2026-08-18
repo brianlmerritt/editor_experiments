@@ -1,4 +1,3 @@
-import { get, writable, type Writable } from 'svelte/store';
 import { sourceCatalog, type SourceAvailability } from '$lib/domain';
 import { workspaceFacade, type WorkspaceFacade } from '$lib/workspace/facade';
 
@@ -28,80 +27,73 @@ function initialSettings(): SettingsSnapshot {
   };
 }
 
-export interface SettingsStore extends Writable<SettingsSnapshot> {
-  load(sourceAvailability: Record<string, SourceAvailability>): void;
-  openOpenRouter(): void;
-  closeOpenRouter(): void;
-  saveOpenRouter(): Promise<SourceAvailability>;
-  sourceAvailable(sourceId: string): boolean;
-  canSaveOpenRouter(): boolean;
-  availability(sourceId: string): SourceAvailability;
-  openRouter(): SourceAvailability;
-}
-
-export function createSettingsStore(facade: WorkspaceFacade = workspaceFacade): SettingsStore {
-  const store = writable(initialSettings());
-  const openRouter = (): SourceAvailability => get(store).sourceAvailability.openrouter
+export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
+  let state = $state<SettingsSnapshot>(initialSettings());
+  const openRouter = (): SourceAvailability => state.sourceAvailability.openrouter
     ?? { available: false, reason: 'OpenRouter availability was not reported.' };
 
   return {
-    subscribe: store.subscribe,
-    set: store.set,
-    update: store.update,
-    load(sourceAvailability) {
-      store.update((state) => ({
-        ...state,
-        sourceAvailability: { ...unavailableSources(), ...sourceAvailability }
-      }));
+    get sourceAvailability() { return state.sourceAvailability; },
+    get openRouterDialogOpen() { return state.openRouterDialogOpen; },
+    get openRouterKey() { return state.openRouterKey; },
+    set openRouterKey(value: string) { state.openRouterKey = value; },
+    get openRouterModel() { return state.openRouterModel; },
+    set openRouterModel(value: string) { state.openRouterModel = value; },
+    get savingProvider() { return state.savingProvider; },
+    get error() { return state.error; },
+    load(sourceAvailability: Record<string, SourceAvailability>) {
+      state.sourceAvailability = { ...unavailableSources(), ...sourceAvailability };
     },
     openOpenRouter() {
-      store.update((state) => ({
-        ...state,
-        openRouterDialogOpen: true,
-        openRouterKey: '',
-        openRouterModel: openRouter().model ?? '',
-        error: null
-      }));
+      state.openRouterDialogOpen = true;
+      state.openRouterKey = '';
+      state.openRouterModel = openRouter().model ?? 'anthropic/claude-fable-5';
+      state.error = null;
     },
     closeOpenRouter() {
-      store.update((state) => ({ ...state, openRouterDialogOpen: false, openRouterKey: '', error: null }));
+      state.openRouterDialogOpen = false;
+      state.openRouterKey = '';
+      state.error = null;
     },
-    async saveOpenRouter() {
-      const current = get(store);
-      if (!this.canSaveOpenRouter()) throw new Error('Enter an OpenRouter API key and model.');
-      store.update((state) => ({ ...state, savingProvider: true, error: null }));
+    async saveOpenRouter(input?: { key: string; model: string }): Promise<SourceAvailability> {
+      const key = (input?.key ?? state.openRouterKey).trim();
+      const model = (input?.model ?? state.openRouterModel).trim();
+      state.openRouterKey = key;
+      state.openRouterModel = model;
+      const keyMissing = !key && !openRouter().available;
+      if (keyMissing || !model) {
+        state.error = keyMissing && !model
+          ? 'The form submitted neither an OpenRouter API key nor a model ID.'
+          : keyMissing
+            ? 'The form submitted no OpenRouter API key.'
+            : 'The form submitted no OpenRouter model ID.';
+        throw new Error(state.error);
+      }
+      state.savingProvider = true;
+      state.error = null;
       try {
-        const availability = await facade.configureOpenRouter(current.openRouterKey, current.openRouterModel);
-        const configured = availability.openrouter ?? { available: false, reason: 'OpenRouter configuration was not returned.' };
-        store.update((state) => ({
-          ...state,
-          sourceAvailability: { ...state.sourceAvailability, ...availability },
-          openRouterDialogOpen: false,
-          openRouterKey: ''
-        }));
+        const availability = await facade.configureOpenRouter(key, model);
+        state.sourceAvailability = { ...state.sourceAvailability, ...availability };
+        const configured = openRouter();
+        state.openRouterDialogOpen = false;
+        state.openRouterKey = '';
         return configured;
       } catch (error) {
-        store.update((state) => ({
-          ...state,
-          error: error instanceof Error ? error.message : 'OpenRouter configuration failed'
-        }));
+        state.error = error instanceof Error ? error.message : 'OpenRouter configuration failed';
         throw error;
       } finally {
-        store.update((state) => ({ ...state, savingProvider: false }));
+        state.savingProvider = false;
       }
     },
-    sourceAvailable(sourceId) {
-      return get(store).sourceAvailability[sourceId]?.available !== false;
+    sourceAvailable(sourceId: string): boolean {
+      return state.sourceAvailability[sourceId]?.available !== false;
     },
-    canSaveOpenRouter() {
-      const state = get(store);
-      return Boolean(state.openRouterModel.trim()) && (Boolean(state.openRouterKey.trim()) || openRouter().available);
-    },
-    availability(sourceId) {
-      return get(store).sourceAvailability[sourceId] ?? { available: false, reason: 'Source availability was not reported.' };
+    availability(sourceId: string): SourceAvailability {
+      return state.sourceAvailability[sourceId] ?? { available: false, reason: 'Source availability was not reported.' };
     },
     openRouter
   };
 }
 
-export const settings = createSettingsStore();
+export type SettingsState = ReturnType<typeof createSettingsState>;
+export const settings = createSettingsState();

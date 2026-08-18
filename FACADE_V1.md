@@ -174,7 +174,7 @@ document's `extensions.margin_note` data and immutable document versions.
 The Svelte workspace owns active undo/redo and transforms attachment targets for text
 edits.
 
-Provider settings use a parallel boundary: a Svelte writable settings store owns the
+Provider settings use a parallel boundary: a Svelte 5 Rune settings state owns the
 live form, validation, availability, model, and masked credential identity. The façade
 transports settings requests and responses, while raw credentials remain behind the
 server boundary and outside workspace and document state.

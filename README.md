@@ -43,7 +43,7 @@ The implemented architecture slice provides:
   modes; Pause, source visibility, filters, density, and the input surface control
   interruption instead;
 - Svelte-owned live input, format, behaviour, revision, and undo/redo state;
-- a dedicated Svelte writable settings store for provider availability, masked
+- a dedicated Svelte 5 Rune settings state for provider availability, masked
   credentials, model selection, validation, dialog state, and saving state;
 - a shared content-target transformer for inputs and formats;
 - atomic acceptance and undo/redo of prose plus input lifecycle state;
@@ -56,6 +56,10 @@ It does not yet provide stable user-defined chapter/scene nodes, rich format/sty
 precedence, durable session history, collaboration reconciliation, typed dependency
 cascades, or a third-party plugin runtime. See [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md)
 for verified workflows and the concrete remaining cases.
+
+All application reactivity must follow [SVELTE_POLICY.md](./SVELTE_POLICY.md): Svelte
+5 Runes, `$props`, snippets, and current event attributes, with a regression test that
+rejects legacy reactive syntax.
 
 ## Optional providers
 

@@ -22,19 +22,26 @@ export interface SuggestionPluginOptions {
   onHover?: (id: string | null) => void;
 }
 
-function resolvedRange(state: Parameters<typeof ySyncPluginKey.getState>[0], suggestion: Suggestion): { from: number; to: number } | null {
+export function preferredSuggestionRange(
+  suggestion: Suggestion,
+  relativeRange: { from: number; to: number } | null
+): { from: number; to: number } {
   const domainTarget = suggestion.target.targets.find((target) => target.type === 'text');
-  let from = domainTarget?.type === 'text' ? domainTarget.start : suggestion.anchor.from;
-  let to = domainTarget?.type === 'text' ? domainTarget.end : suggestion.anchor.to;
+  return relativeRange ?? {
+    from: domainTarget?.type === 'text' ? domainTarget.start : suggestion.anchor.from,
+    to: domainTarget?.type === 'text' ? domainTarget.end : suggestion.anchor.to
+  };
+}
+
+function resolvedRange(state: Parameters<typeof ySyncPluginKey.getState>[0], suggestion: Suggestion): { from: number; to: number } | null {
+  let relativeRange: { from: number; to: number } | null = null;
   const sync = ySyncPluginKey.getState(state);
-  if (!domainTarget && suggestion.anchor.start && suggestion.anchor.end && sync?.binding) {
+  if (suggestion.anchor.start && suggestion.anchor.end && sync?.binding) {
     const start = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.start), sync.binding.mapping);
     const end = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.end), sync.binding.mapping);
-    if (start != null && end != null) {
-      from = start;
-      to = end;
-    }
+    if (start != null && end != null) relativeRange = { from: start, to: end };
   }
+  const { from, to } = preferredSuggestionRange(suggestion, relativeRange);
   const max = state.doc.content.size;
   if (from < 0 || from > max || to < from || to > max) return null;
   return { from, to };

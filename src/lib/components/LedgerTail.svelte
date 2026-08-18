@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { LedgerEvent } from '$lib/domain';
-  export let events: Required<LedgerEvent>[] = [];
-  export let costUsd = 0;
+  let { events = [], costUsd = 0 }: { events?: Required<LedgerEvent>[]; costUsd?: number } = $props();
 </script>
 
 <section class="ledger">

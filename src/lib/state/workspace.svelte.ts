@@ -5,7 +5,7 @@ import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject }
 import { defaultAttachmentBehaviours, sameTarget, selectionHasStrikethrough, textTarget, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
-import { settings, type SettingsStore } from '$lib/state/settings.svelte';
+import { settings, type SettingsState } from '$lib/state/settings.svelte';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
@@ -50,7 +50,7 @@ export class WorkspaceState {
 
   constructor(
     private readonly facade: WorkspaceFacade = workspaceFacade,
-    private readonly settingsState: SettingsStore = settings
+    private readonly settingsState: SettingsState = settings
   ) {}
 
   get suggestions(): Suggestion[] { return this.inputs; }

@@ -1,26 +1,42 @@
 <script lang="ts">
   import { categoryMeta, type Suggestion } from '$lib/domain';
 
-  export let suggestion: Suggestion;
-  export let active = false;
-  export let tray = false;
-  export let selectedVariant = 0;
-  export let onActivate: () => void = () => {};
-  export let onSelectVariant: (index: number) => void = () => {};
-  export let onAccept: (index: number, edit: boolean) => void = () => {};
-  export let onReject: (viaDrag: boolean) => void = () => {};
-  export let onPreview: (text: string | null) => void = () => {};
-  export let onSourceHover: () => void = () => {};
-  export let onMove: (direction: -1 | 1) => void = () => {};
+  interface Props {
+    suggestion: Suggestion;
+    active?: boolean;
+    tray?: boolean;
+    selectedVariant?: number;
+    onActivate?: () => void;
+    onSelectVariant?: (index: number) => void;
+    onAccept?: (index: number, edit: boolean) => void;
+    onReject?: (viaDrag: boolean) => void;
+    onPreview?: (text: string | null) => void;
+    onSourceHover?: () => void;
+    onMove?: (direction: -1 | 1) => void;
+  }
 
-  let dragX = 0;
-  let dragging = false;
-  let startX = 0;
-  let startY = 0;
-  let axis: 'x' | 'y' | null = null;
+  let {
+    suggestion,
+    active = false,
+    tray = false,
+    selectedVariant = 0,
+    onActivate = () => {},
+    onSelectVariant = () => {},
+    onAccept = () => {},
+    onReject = () => {},
+    onPreview = () => {},
+    onSourceHover = () => {},
+    onMove = () => {}
+  }: Props = $props();
 
-  $: variants = suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
-  $: meta = categoryMeta[suggestion.category];
+  let dragX = $state(0);
+  let dragging = $state(false);
+  let startX = $state(0);
+  let startY = $state(0);
+  let axis = $state<'x' | 'y' | null>(null);
+
+  let variants = $derived(suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : []);
+  let meta = $derived(categoryMeta[suggestion.category]);
 
   function pointerDown(event: PointerEvent): void {
     if ((event.target as HTMLElement).closest('button')) return;
@@ -45,6 +61,9 @@
     dragX = 0;
     axis = null;
   }
+  function stopClick(action: () => void): (event: MouseEvent) => void {
+    return (event) => { event.stopPropagation(); action(); };
+  }
 </script>
 
 <article
@@ -54,10 +73,10 @@
   class:dragging
   tabindex="-1"
   style:transform={`translateX(${dragX}px)`}
-  on:pointerdown={pointerDown}
-  on:pointermove={pointerMove}
-  on:pointerup={pointerUp}
-  on:pointercancel={pointerUp}
+  onpointerdown={pointerDown}
+  onpointermove={pointerMove}
+  onpointerup={pointerUp}
+  onpointercancel={pointerUp}
 >
   <header>
     <span class="category"><span class="icon">{meta.icon}</span>{meta.label}</span>
@@ -70,9 +89,10 @@
         <button
           type="button"
           class:selected={selectedVariant === index}
-          on:click|stopPropagation={() => { onSelectVariant(index); onActivate(); }}
-          on:mouseenter={() => onPreview(variant.text)}
-          on:mouseleave={() => onPreview(null)}
+          title="Apply this alternative"
+          onclick={stopClick(() => { onSelectVariant(index); onAccept(index, false); })}
+          onmouseenter={() => onPreview(variant.text)}
+          onmouseleave={() => onPreview(null)}
         >
           <span>{index + 1}</span>
           <q>{variant.text || 'Delete this text'}</q>
@@ -83,25 +103,17 @@
   <footer>
     {#if tray}
       <span class="order-buttons">
-        <button type="button" aria-label="Move earlier" on:click|stopPropagation={() => onMove(-1)}>↑</button>
-        <button type="button" aria-label="Move later" on:click|stopPropagation={() => onMove(1)}>↓</button>
+        <button type="button" aria-label="Move earlier" onclick={stopClick(() => onMove(-1))}>↑</button>
+        <button type="button" aria-label="Move later" onclick={stopClick(() => onMove(1))}>↓</button>
       </span>
     {/if}
     <span class="decisions">
-      <button class="reject" type="button" title="Reject (X)" on:click|stopPropagation={() => onReject(false)}>×</button>
+      <button class="reject" type="button" title="Reject (X)" onclick={stopClick(() => onReject(false))}>×</button>
       {#if variants.length}
-        <button class="edit" type="button" title="Accept and edit (E)" on:click|stopPropagation={() => onAccept(selectedVariant, true)}>e</button>
-        <button
-          class="accept"
-          type="button"
-          title="Accept (Enter)"
-          on:click|stopPropagation={() => onAccept(selectedVariant, false)}
-          on:mouseenter={() => onPreview(variants[selectedVariant]?.text ?? '')}
-          on:mouseleave={() => onPreview(null)}
-        >✓</button>
+        <button class="edit" type="button" title="Accept and edit (E)" onclick={stopClick(() => onAccept(selectedVariant, true))}>e</button>
       {/if}
     </span>
-    <button type="button" class="source" title={`${suggestion.sourceKind === 'local' ? 'Local' : 'AI'} source ${suggestion.sourceNumber}: ${suggestion.source}`} on:mouseenter={onSourceHover} on:click|stopPropagation={onActivate}>
+    <button type="button" class="source" title={`${suggestion.sourceKind === 'local' ? 'Local' : 'AI'} source ${suggestion.sourceNumber}: ${suggestion.source}`} onmouseenter={onSourceHover} onclick={stopClick(onActivate)}>
       <b>{suggestion.sourceKind === 'local' ? 'L' : 'A'}</b>{suggestion.sourceNumber}
     </button>
   </footer>
@@ -127,7 +139,6 @@
   .decisions, .order-buttons { display: flex; gap: 4px; }
   footer button { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); font: 700 13px/1 var(--font-ui); cursor: pointer; }
   footer button:hover { background: var(--paper-deep); color: var(--ink); }
-  footer .accept { background: var(--accept); border-color: var(--accept); color: white; }
   footer .reject:hover { border-color: var(--reject); color: var(--reject); }
   footer .edit { font-style: italic; }
   footer .source { width: auto; height: auto; margin-left: auto; display: flex; align-items: baseline; gap: 2px; border: 0; color: var(--ink); font: 800 13px/1 var(--font-ui); padding: 3px 2px; }

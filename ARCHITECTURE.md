@@ -274,6 +274,14 @@ change can stale prose and continuity reviews without invalidating unrelated lay
 work; a format-only change can invalidate layout checks without rerunning character
 analysis; a character-state change can invalidate checks for the scenes in its scope.
 
+An asynchronous provider request captures a live editor range before dispatch. When
+the response arrives, that range is resolved against the current document. Edits
+before the range may move it, but any change within the requested passage invalidates
+the response. Accepted inputs prefer the editor's live relative range over persisted
+numeric coordinates and verify the anchored excerpt immediately before replacement.
+The provider therefore never applies a response to a merely similar or coincidentally
+located passage.
+
 ## Undo, redo, and durable history
 
 Undo/redo is a domain function, not merely browser, ProseMirror, or Yjs text history.
@@ -302,9 +310,16 @@ past version.
 
 The first vertical slice is implemented. The Svelte workspace now owns inputs,
 formats, behaviour profiles, document snapshots, and the active undo/redo stacks.
-A separate Svelte writable settings store owns live provider configuration state and
+A separate Svelte 5 Rune settings state owns live provider configuration state and
 masked provider identity; the façade transports changes, while the server-side secret
 adapter owns durable credential storage.
+
+Svelte 5 Runes are the sole application-reactivity model. Components use `$props`,
+`$state`, `$derived`, and `$effect`; shared reactive state lives in `.svelte.ts` Rune
+modules. Legacy `$:` declarations, `export let` props, writable-store application
+state, legacy slots, and `on:event` directives are not permitted. Plain variables are
+reserved for deliberately non-reactive lifecycle handles and local calculations. The
+enforced rules are recorded in [SVELTE_POLICY.md](./SVELTE_POLICY.md).
 Existing suggestions are normalised as one input kind. Text edits, accepted revisions,
 input state changes, and strikethrough formatting enter the same history path; text and
 attachments are restored together by undo/redo.

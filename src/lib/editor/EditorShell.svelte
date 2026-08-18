@@ -5,7 +5,7 @@
   import { schema } from 'prosemirror-schema-basic';
   import { keymap } from 'prosemirror-keymap';
   import { baseKeymap } from 'prosemirror-commands';
-  import { ySyncPlugin, ySyncPluginKey, absolutePositionToRelativePosition } from 'y-prosemirror';
+  import { ySyncPlugin, ySyncPluginKey, absolutePositionToRelativePosition, relativePositionToAbsolutePosition } from 'y-prosemirror';
   import { IndexeddbPersistence } from 'y-indexeddb';
   import * as Y from 'yjs';
   import type { Suggestion } from '$lib/domain';
@@ -14,33 +14,38 @@
   import { suggestionPlugin, pushSuggestionState, currentSuggestionRange } from './suggestion-plugin';
   import { planDocumentDeletion } from './deletion';
 
-  export let branchId = 'main';
-  export let initialContent = '';
-  export let suggestions: Suggestion[] = [];
-  export let formats: FormatAttachment[] = [];
-  export let attachmentRevision = 0;
-  export let activeSuggestionId: string | null = null;
-  export let preview: { suggestionId: string; text: string } | null = null;
-  export let paused = false;
-  export let onTextChange: (detail: { text: string; characters: number; origin?: EditorTransactionOrigin }) => void = () => {};
-  export let onEditorReady: (snapshot: EditorDocumentSnapshot) => void = () => {};
-  export let onEditorTransaction: (detail: EditorTransactionDetail) => void = () => {};
-  export let onUndoRequest: () => void = () => {};
-  export let onRedoRequest: () => void = () => {};
-  export let onSelectionChange: (detail: { from: number; to: number; text: string }) => void = () => {};
-  export let onSuggestionActivate: (id: string) => void = () => {};
-  export let onSuggestionHover: (id: string | null) => void = () => {};
+  interface Props {
+    branchId?: string;
+    initialContent?: string;
+    suggestions?: Suggestion[];
+    formats?: FormatAttachment[];
+    attachmentRevision?: number;
+    activeSuggestionId?: string | null;
+    preview?: { suggestionId: string; text: string } | null;
+    paused?: boolean;
+    onTextChange?: (detail: { text: string; characters: number; origin?: EditorTransactionOrigin }) => void;
+    onEditorReady?: (snapshot: EditorDocumentSnapshot) => void;
+    onEditorTransaction?: (detail: EditorTransactionDetail) => void;
+    onUndoRequest?: () => void;
+    onRedoRequest?: () => void;
+    onSelectionChange?: (detail: { from: number; to: number; text: string }) => void;
+    onSuggestionActivate?: (id: string) => void;
+    onSuggestionHover?: (id: string | null) => void;
+  }
 
-  let mount: HTMLDivElement;
-  let view: EditorView | null = null;
+  let {
+    branchId = 'main', initialContent = '', suggestions = [], formats = [], attachmentRevision = 0,
+    activeSuggestionId = null, preview = null, paused = false,
+    onTextChange = () => {}, onEditorReady = () => {}, onEditorTransaction = () => {},
+    onUndoRequest = () => {}, onRedoRequest = () => {}, onSelectionChange = () => {},
+    onSuggestionActivate = () => {}, onSuggestionHover = () => {}
+  }: Props = $props();
+
+  let mount = $state<HTMLDivElement | null>(null);
+  let view = $state<EditorView | null>(null);
   let ydoc: Y.Doc | null = null;
   let persistence: IndexeddbPersistence | null = null;
   let lastText = '';
-  let previousSuggestions = suggestions;
-  let previousFormats = formats;
-  let previousAttachmentRevision = attachmentRevision;
-  let previousActive = activeSuggestionId;
-  let previousPreview = preview;
 
   function plainText(): string {
     return view?.state.doc.textBetween(0, view.state.doc.content.size, '\n\n') ?? '';
@@ -146,16 +151,15 @@
     };
   });
 
-  $: if (view && (suggestions !== previousSuggestions || formats !== previousFormats || attachmentRevision !== previousAttachmentRevision || activeSuggestionId !== previousActive || preview !== previousPreview)) {
-    previousSuggestions = suggestions;
-    previousFormats = formats;
-    previousAttachmentRevision = attachmentRevision;
-    previousActive = activeSuggestionId;
-    previousPreview = preview;
+  $effect(() => {
+    if (!view) return;
+    void attachmentRevision;
     pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
-  }
+  });
 
-  $: if (view) view.setProps({ editable: () => !paused });
+  $effect(() => {
+    if (view) view.setProps({ editable: () => !paused });
+  });
 
   export function getText(): string { return plainText(); }
   export function getSnapshot(): EditorDocumentSnapshot | null { return view ? snapshot(view.state) : null; }
@@ -199,6 +203,18 @@
       start: Y.relativePositionToJSON(absolutePositionToRelativePosition(from, sync.type, sync.binding.mapping)),
       end: Y.relativePositionToJSON(absolutePositionToRelativePosition(to, sync.type, sync.binding.mapping))
     };
+  }
+  export function resolveRelativeAnchor(
+    start?: Record<string, unknown>,
+    end?: Record<string, unknown>
+  ): { from: number; to: number; text: string } | null {
+    if (!view || !start || !end) return null;
+    const sync = ySyncPluginKey.getState(view.state);
+    if (!sync?.binding) return null;
+    const from = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(start), sync.binding.mapping);
+    const to = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(end), sync.binding.mapping);
+    if (from == null || to == null || from < 0 || to < from || to > view.state.doc.content.size) return null;
+    return { from, to, text: view.state.doc.textBetween(from, to, '\n') };
   }
   export function acceptSuggestion(suggestion: Suggestion, text: string): { ok: boolean; reason?: string; from?: number; to?: number } {
     if (!view) return { ok: false, reason: 'Editor is not ready' };
@@ -280,7 +296,7 @@
 
 <div class="editor-frame" class:is-paused={paused}>
   <div class="paper-rule" aria-hidden="true"></div>
-  <div class="editor" role="presentation" bind:this={mount} on:mouseup={notifySelection} on:keyup={notifySelection}></div>
+  <div class="editor" role="presentation" bind:this={mount} onmouseup={notifySelection} onkeyup={notifySelection}></div>
 </div>
 
 <style>
