@@ -1,15 +1,16 @@
-import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, normalizeInputRecord, reconcileSuggestionAnchors as reconcileAnchors, type Branch, type Category, type GenerationRequest, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
-import { restoreSuggestions } from '$lib/suggestion-history';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { workspaceFacade, type MarkdownExport, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
-import { defaultAttachmentBehaviours, sameTarget, selectionHasStrikethrough, textTarget, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
+import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
+import { documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
 const attachmentBehaviourVersion = 2;
+const authorityVersion = 2;
 
 export class WorkspaceState {
   sessionId = $state('session_pending');
@@ -23,6 +24,7 @@ export class WorkspaceState {
   preview = $state<{ suggestionId: string; text: string } | null>(null);
   inputs = $state<Suggestion[]>([]);
   formats = $state<FormatAttachment[]>([]);
+  runs = $state<CraftRun[]>([]);
   behaviours = $state<Record<string, AttachmentBehaviour>>({ ...defaultAttachmentBehaviours });
   workspaceRevision = $state(0);
   documentSnapshot = $state<EditorDocumentSnapshot | null>(null);
@@ -45,6 +47,7 @@ export class WorkspaceState {
   lastError = $state<string | null>(null);
   sourceClickAt = $state<Record<string, number>>({});
   private dispatches = new Map<string, AbortController>();
+  private dispatchRunIds = new Map<string, string>();
   private documentSave: Promise<void> = Promise.resolve();
   private initialized = false;
 
@@ -110,7 +113,11 @@ export class WorkspaceState {
       this.ledger = loaded.events;
       this.settingsState.load(loaded.sourceAvailability);
       for (const source of sourceCatalog) if (!this.settingsState.sourceAvailable(source.id)) this.sourceStates[source.id] = 'off';
-      this.loadDocumentDomain(this.currentDocument, loaded.events);
+      const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
+      if (migratedLegacyInputs) {
+        this.notice = `${migratedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
+        await this.persistDomainState('Archive legacy input targets');
+      }
       this.costUsd = loaded.stats.costUsd;
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('margin-note:project', this.projectId);
@@ -135,9 +142,9 @@ export class WorkspaceState {
     }).document;
   }
 
-  recordEditorTransaction(detail: EditorTransactionDetail): void {
-    this.documentSnapshot = detail.after;
-    if (detail.origin.kind === 'workspace_history') return;
+  recordEditorTransaction(detail: EditorTransactionDetail): { suggestions: Suggestion[]; formats: FormatAttachment[] } {
+    this.setCanonicalDocument(detail.after);
+    if (detail.origin.kind === 'workspace_history') return { suggestions: this.visibleSuggestions, formats: this.formats };
 
     const transactionId = makeId('transaction');
     const before = this.historySnapshot(detail.before);
@@ -152,6 +159,14 @@ export class WorkspaceState {
     });
     this.inputs = transformed.inputs;
     this.formats = transformed.formats;
+    this.runs = this.runs.map((run) => {
+      if (run.documentId !== this.branchId || (run.state !== 'queued' && run.state !== 'running')) return run;
+      const transformedRun = transformTargetSet(run.target, detail.changes, defaultAttachmentBehaviours['craft-input']);
+      if (transformedRun.change === 'changed' || transformedRun.change === 'removed' || transformedRun.change === 'detached') {
+        return { ...run, target: transformedRun.target, state: 'discarded' as const, completedAt: new Date().toISOString() };
+      }
+      return { ...run, target: transformedRun.target };
+    });
     this.workspaceRevision += 1;
     const after = this.historySnapshot(detail.after);
     const acceptance = detail.origin.kind === 'input_acceptance';
@@ -164,6 +179,7 @@ export class WorkspaceState {
       createdAt: Date.now(),
       group: acceptance ? undefined : 'typing'
     });
+    return { suggestions: this.visibleSuggestions, formats: this.formats };
   }
 
   undoWorkspace(): EditorDocumentSnapshot | null {
@@ -228,7 +244,10 @@ export class WorkspaceState {
   }
 
   toggleSelectionStrikethrough(from: number, to: number, selectedText: string): boolean {
-    if (from >= to) return false;
+    if (from >= to || !this.documentSnapshot || documentTextBetween(this.documentSnapshot, from, to) !== selectedText) {
+      this.notice = 'The selection changed. Select it again before formatting.';
+      return false;
+    }
     return this.setStrikethrough(
       textTarget(this.branchId, from, to, selectedText),
       !this.selectionHasStrikethrough(from, to),
@@ -336,13 +355,56 @@ export class WorkspaceState {
     this.categoryVisibility[category] = !this.categoryVisibility[category];
   }
 
-  async requestSuggestions(input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>, rangeKey = 'document'): Promise<Suggestion[]> {
+  async runCraftPass(prompt: TaskPrompt): Promise<Suggestion[]> {
+    if (!this.documentSnapshot) return [];
+    const ranges = documentCraftParagraphs(this.documentSnapshot);
+    const results = await Promise.all(ranges.map((range) => this.requestInputRun(
+      { ...range, prompt },
+      `${this.branchId}:paragraph:${range.from}:${range.to}`
+    )));
+    return results.flat();
+  }
+
+  async runSelectionPass(range: DocumentRange, prompt: TaskPrompt): Promise<Suggestion[]> {
+    if (!this.documentSnapshot) return [];
+    const canonicalText = documentTextBetween(this.documentSnapshot, range.from, range.to);
+    if (canonicalText !== range.text) {
+      this.notice = 'The selection changed before the run began. Select it again.';
+      return [];
+    }
+    return this.requestInputRun(
+      { ...range, prompt },
+      `${this.branchId}:selection:${range.from}:${range.to}`
+    );
+  }
+
+  private async requestInputRun(input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>, rangeKey: string): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
+    const replacedRunId = this.dispatchRunIds.get(rangeKey);
+    if (replacedRunId) this.runs = this.runs.map((run) => run.id === replacedRunId && run.state === 'running'
+      ? { ...run, state: 'cancelled', completedAt: new Date().toISOString() }
+      : run);
     const controller = new AbortController();
+    const run: CraftRun = {
+      id: makeId('run'),
+      documentId: this.branchId,
+      sourceRevision: this.workspaceRevision,
+      target: textTarget(this.branchId, input.from, input.to, input.text),
+      originalText: input.text,
+      promptId: input.prompt.id,
+      promptVersion: input.prompt.version,
+      sourceStates: { ...this.sourceStates },
+      state: 'running',
+      proposalIds: [],
+      errors: [],
+      createdAt: new Date().toISOString()
+    };
+    this.runs = [...this.runs, run].slice(-200);
     this.dispatches.set(rangeKey, controller);
+    this.dispatchRunIds.set(rangeKey, run.id);
     this.generating = true;
-    await this.log('suggestions_requested', { range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
+    await this.log('suggestions_requested', { runId: run.id, range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
       const request: GenerationRequest = {
         ...input,
@@ -359,39 +421,108 @@ export class WorkspaceState {
           revision: bucket.revision
         }))
       };
-      const data = await this.facade.suggestions(request, controller.signal);
-      if (data.errors.length) this.notice = data.errors.map((item) => `${item.source}: ${item.message}`).join(' · ');
-      await this.coalesceSuggestions([...this.suggestions, ...data.suggestions]);
+      const data = await this.facade.requestInputs(request, controller.signal);
+      const outputDiagnostics = data.errors.filter((item) => item.kind === 'provider_output');
+      const actionableErrors = data.errors.filter((item) => item.kind !== 'provider_output');
+      for (const diagnostic of outputDiagnostics) {
+        console.warn('[Margin Note] Malformed provider output', {
+          runId: run.id,
+          documentId: this.branchId,
+          ...diagnostic
+        });
+      }
+      if (actionableErrors.length) this.notice = actionableErrors.map((item) => `${item.source}: ${item.message}`).join(' · ');
+      const currentRun = this.runs.find((item) => item.id === run.id);
+      const target = currentRun ? firstTextTarget(currentRun.target) : null;
+      const currentText = target && this.documentSnapshot
+        ? documentTextBetween(this.documentSnapshot, target.start, target.end)
+        : null;
+      if (!currentRun || currentRun.state !== 'running' || !target || currentText !== currentRun.originalText) {
+        this.runs = this.runs.map((item) => item.id === run.id
+          ? { ...item, state: 'discarded', errors: data.errors, completedAt: new Date().toISOString() }
+          : item);
+        await this.persistDomainState('Discard stale craft run');
+        this.notice = 'The passage changed while the craft pass was running, so its proposals were safely discarded.';
+        return [];
+      }
+      const adopted = data.proposals.flatMap((proposal) => {
+        const inputRecord = this.adoptProposal(proposal, currentRun, target.start);
+        return inputRecord ? [inputRecord] : [];
+      });
+      this.runs = this.runs.map((item) => item.id === run.id ? {
+        ...item,
+        state: data.errors.some((error) => !error.recovered) && !adopted.length ? 'failed' : 'completed',
+        proposalIds: adopted.map((item) => item.id),
+        errors: data.errors,
+        completedAt: new Date().toISOString()
+      } : item);
+      await this.coalesceSuggestions([...this.suggestions, ...adopted]);
+      for (const suggestion of adopted) {
+        await this.log(suggestion.state === 'hidden' ? 'generated_hidden' : 'suggestion_generated', {
+          runId: run.id,
+          suggestion
+        }, suggestion.id);
+      }
       await this.refreshLedger();
-      return data.suggestions.filter((suggestion) => this.suggestions.some((item) => item.id === suggestion.id && (item.state === 'pending' || item.state === 'hidden')));
+      return adopted.filter((suggestion) => this.suggestions.some((item) => item.id === suggestion.id && (item.state === 'pending' || item.state === 'hidden')));
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return [];
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        this.runs = this.runs.map((item) => item.id === run.id ? { ...item, state: 'cancelled', completedAt: new Date().toISOString() } : item);
+        await this.persistDomainState('Cancel craft run');
+        return [];
+      }
+      this.runs = this.runs.map((item) => item.id === run.id ? {
+        ...item,
+        state: 'failed',
+        errors: [{ source: 'transport', message: error instanceof Error ? error.message : 'Input request failed' }],
+        completedAt: new Date().toISOString()
+      } : item);
+      await this.persistDomainState('Record failed craft run');
       this.lastError = error instanceof Error ? error.message : 'Suggestion request failed';
       return [];
     } finally {
       if (this.dispatches.get(rangeKey) === controller) this.dispatches.delete(rangeKey);
+      if (this.dispatchRunIds.get(rangeKey) === run.id) this.dispatchRunIds.delete(rangeKey);
       this.generating = this.dispatches.size > 0;
     }
+  }
+
+  private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number): Suggestion | null {
+    const insertion = proposal.type === 'insertion' && proposal.from === proposal.to && proposal.sourceText === '';
+    if (!insertion && !isExactTextSpan(run.originalText, proposal.from, proposal.to, proposal.sourceText)) return null;
+    if (insertion && (proposal.from < 0 || proposal.from > run.originalText.length)) return null;
+    const id = makeId('input');
+    const from = currentStart + proposal.from;
+    const to = currentStart + proposal.to;
+    const variants = proposal.variants
+      .filter((text) => text !== proposal.sourceText)
+      .map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, proposal.confidence - index * 0.04) }));
+    const type = proposal.type === 'replacement' && !variants.length ? 'annotation' : proposal.type;
+    return {
+      id,
+      kind: 'craft_suggestion',
+      source: proposal.source,
+      sourceNumber: proposal.sourceNumber,
+      sourceKind: proposal.sourceKind,
+      target: textTarget(this.branchId, from, to, proposal.sourceText),
+      behaviourId: 'craft-input',
+      events: [],
+      anchor: { from, to, text: proposal.sourceText },
+      type,
+      payload: { text: variants[0]?.text, comment: proposal.comment },
+      category: proposal.category,
+      confidence: proposal.confidence,
+      variants,
+      state: run.sourceStates[proposal.source] === 'invisible' ? 'hidden' : 'pending',
+      order: from,
+      createdAt: new Date().toISOString(),
+      provenance: { ...proposal.provenance }
+    };
   }
 
   activate(id: string | null): void { this.activeSuggestionId = id; }
   setPreview(suggestionId: string, text: string): void { this.preview = { suggestionId, text }; }
   clearPreview(): void { this.preview = null; }
-
-  async reconcileSuggestionAnchors(resolve: (suggestion: Suggestion) => { from: number; to: number; text: string } | null): Promise<void> {
-    const reconciled = reconcileAnchors(this.suggestions, resolve);
-    const expiredIds = new Set(reconciled.expired.map((suggestion) => suggestion.id));
-    if (this.activeSuggestionId && expiredIds.has(this.activeSuggestionId)) this.activeSuggestionId = null;
-    if (this.preview && expiredIds.has(this.preview.suggestionId)) this.preview = null;
-    await this.coalesceSuggestions(reconciled.suggestions);
-    for (const suggestion of reconciled.expired) {
-      await this.log('stale_after_edit', {
-        expected: suggestion.anchor.text,
-        source: suggestion.source,
-        category: suggestion.category
-      }, suggestion.id);
-    }
-  }
 
   async resolveSuggestion(id: string, state: 'accepted' | 'rejected' | 'stale', eventType: LedgerEvent['type'], payload: Record<string, unknown> = {}): Promise<void> {
     const suggestion = this.suggestions.find((item) => item.id === id);
@@ -468,10 +599,11 @@ export class WorkspaceState {
     const data = await this.facade.suggestionHistory(id);
     this.ledger = data.events;
     this.costUsd = data.stats.costUsd;
-    this.loadDocumentDomain(this.currentDocument, data.events);
+    const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
     this.documentSnapshot = null;
     this.undoStack = [];
     this.redoStack = [];
+    if (migratedLegacyInputs) await this.persistDomainState('Archive legacy input targets');
     await this.log('branch_switched', { from: previous, to: id });
   }
 
@@ -516,22 +648,8 @@ export class WorkspaceState {
     return document;
   }
 
-  async saveDocumentContent(content: string, reason = 'Editing session'): Promise<void> {
-    const documentId = this.branchId;
-    this.documentSave = this.documentSave.then(async () => {
-      const document = await this.facade.saveDocument({
-        id: documentId,
-        content,
-        extensions: this.domainExtensions(),
-        createdBy: this.sessionId,
-        reason
-      });
-      this.documents = this.documents.map((item) => item.id === document.id ? document : item);
-      this.refreshBranches();
-    }).catch((error) => {
-      this.lastError = error instanceof Error ? error.message : 'Document save failed';
-    });
-    await this.documentSave;
+  async persistCurrentDocument(reason = 'Editing session'): Promise<void> {
+    await this.queueCommit(reason);
   }
 
   async renameDocument(id: string, title: string): Promise<void> {
@@ -604,19 +722,30 @@ export class WorkspaceState {
     this.inputs = restored.inputs;
     this.formats = restored.formats;
     this.workspaceRevision = restored.revision;
-    this.documentSnapshot = restored.document;
+    this.setCanonicalDocument(restored.document);
     this.activeSuggestionId = null;
     this.preview = null;
   }
 
-  private loadDocumentDomain(document: WorkspaceDocument | null, events: Required<LedgerEvent>[]): void {
+  private loadDocumentDomain(document: WorkspaceDocument | null): number {
     const stored = document?.extensions.margin_note;
     const value = stored && typeof stored === 'object' && !Array.isArray(stored)
       ? stored as Record<string, unknown>
       : null;
     const persistedInputs = Array.isArray(value?.inputs) ? value.inputs as Suggestion[] : null;
-    this.inputs = (persistedInputs ?? restoreSuggestions(events)).map((input) => normalizeInputRecord(input, document?.id ?? this.branchId));
+    const storedAuthorityVersion = typeof value?.authorityVersion === 'number' ? value.authorityVersion : 0;
+    let migratedLegacyInputs = 0;
+    this.inputs = (persistedInputs ?? []).map((input) => {
+      const normalized = normalizeInputRecord(input, document?.id ?? this.branchId);
+      const legacyLive = storedAuthorityVersion < authorityVersion
+        && normalized.id.startsWith('sg_')
+        && (normalized.state === 'pending' || normalized.state === 'hidden');
+      if (!legacyLive) return normalized;
+      migratedLegacyInputs += 1;
+      return { ...normalized, state: 'stale' as const };
+    });
     this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
+    this.runs = Array.isArray(value?.runs) ? value.runs as CraftRun[] : [];
     const storedBehaviours = value?.behaviours && typeof value.behaviours === 'object' && !Array.isArray(value.behaviours)
       ? value.behaviours as Record<string, AttachmentBehaviour>
       : {};
@@ -625,6 +754,7 @@ export class WorkspaceState {
       this.behaviours['format-default'] = { ...defaultAttachmentBehaviours['format-default'] };
     }
     this.workspaceRevision = typeof value?.revision === 'number' ? value.revision : document?.revision ?? 0;
+    return migratedLegacyInputs;
   }
 
   private domainExtensions(): WorkspaceDocument['extensions'] {
@@ -633,27 +763,41 @@ export class WorkspaceState {
       ...current,
       margin_note: JSON.parse(JSON.stringify({
         revision: this.workspaceRevision,
+        authorityVersion,
         behaviourVersion: attachmentBehaviourVersion,
         inputs: this.inputs,
         formats: this.formats,
+        runs: this.runs,
         behaviours: this.behaviours
       }))
     } as WorkspaceDocument['extensions'];
   }
 
   private async persistDomainState(reason: string): Promise<void> {
-    const documentId = this.branchId;
+    await this.queueCommit(reason);
+  }
+
+  private async queueCommit(reason: string): Promise<void> {
+    const document = this.currentDocument;
+    if (!document) return;
+    const transaction = {
+      transactionId: makeId('commit'),
+      documentId: document.id,
+      content: document.content,
+      extensions: this.domainExtensions(),
+      workspaceRevision: this.workspaceRevision,
+      durableRevision: document.revision,
+      sessionId: this.sessionId,
+      reason
+    };
     this.documentSave = this.documentSave.then(async () => {
-      const document = await this.facade.saveDocument({
-        id: documentId,
-        extensions: this.domainExtensions(),
-        createdBy: this.sessionId,
-        reason
-      });
-      this.documents = this.documents.map((item) => item.id === document.id ? document : item);
+      const receipt = await this.facade.commit(transaction);
+      this.documents = this.documents.map((item) => item.id === receipt.documentId
+        ? { ...item, revision: Math.max(item.revision, receipt.durableRevision), updatedAt: receipt.updatedAt }
+        : item);
       this.refreshBranches();
     }).catch((error) => {
-      this.lastError = error instanceof Error ? error.message : 'Workspace state save failed';
+      this.lastError = error instanceof Error ? error.message : 'Workspace commit failed';
     });
     await this.documentSave;
   }
@@ -661,15 +805,29 @@ export class WorkspaceState {
   private async coalesceSuggestions(items: Suggestion[]): Promise<void> {
     const coalesced = coalesceDuplicateSuggestions(items.map((item) => normalizeInputRecord(item, this.branchId)));
     this.suggestions = coalesced.suggestions;
-    for (const { duplicate, canonical } of coalesced.suppressed) {
+    for (const { duplicate, canonical, reason } of coalesced.suppressed) {
       await this.log('duplicate_suppressed', {
         duplicateOf: canonical.id,
+        reason,
         source: duplicate.source,
         category: duplicate.category,
         anchor: [duplicate.anchor.from, duplicate.anchor.to]
       }, duplicate.id);
     }
     await this.persistDomainState('Update inputs');
+  }
+
+  private setCanonicalDocument(snapshot: EditorDocumentSnapshot): void {
+    this.documentSnapshot = cloneHistorySnapshot({
+      document: snapshot,
+      inputs: [],
+      formats: [],
+      revision: this.workspaceRevision
+    }).document;
+    this.documents = this.documents.map((document) => document.id === this.branchId
+      ? { ...document, content: snapshot.text, updatedAt: new Date().toISOString() }
+      : document);
+    this.refreshBranches();
   }
 }
 

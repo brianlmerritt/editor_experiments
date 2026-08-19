@@ -1,8 +1,8 @@
 import { env } from '$env/dynamic/private';
-import type { Category, GenerationRequest, SourceAvailability, Suggestion, SuggestionVariant } from '$lib/domain';
-import { makeId } from '$lib/domain';
-import { textTarget } from '$lib/workspace/attachments';
+import type { Category, GenerationRequest, InputError, InputProposal, SourceAvailability, Suggestion } from '$lib/domain';
+import { isExactTextSpan, makeId } from '$lib/domain';
 import { maskCredential, readStoredOpenRouterSettings, writeStoredOpenRouterSettings } from '$lib/server/provider-settings';
+import { jsonrepair } from 'jsonrepair';
 
 interface DraftSuggestion {
   from: number;
@@ -12,6 +12,7 @@ interface DraftSuggestion {
   comment: string;
   replacement?: string;
   variants?: string[];
+  sourceText?: string;
   confidence: number;
 }
 
@@ -27,6 +28,14 @@ interface ConfiguredProvider {
 interface RuntimeProviderSettings {
   openrouter?: { key: string; model: string; persistence?: SourceAvailability['persistence'] };
   ollama?: { model: string; baseUrl?: string };
+}
+
+export class ProviderOutputError extends Error {
+  override readonly name = 'ProviderOutputError';
+
+  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = []) {
+    super(message);
+  }
 }
 
 const runtimeProviders = globalThis as typeof globalThis & {
@@ -101,31 +110,26 @@ export function suggestionSourceAvailability(): Record<string, SourceAvailabilit
   };
 }
 
-function suggestionFromDraft(draft: DraftSuggestion, request: GenerationRequest, source: string, sourceNumber: number, sourceKind: 'local' | 'ai', latencyMs: number, costUsd = 0): Suggestion {
-  const id = makeId('sg');
+function proposalFromDraft(draft: DraftSuggestion, request: GenerationRequest, source: string, sourceNumber: number, sourceKind: 'local' | 'ai', latencyMs: number, costUsd = 0): InputProposal {
+  const proposalId = makeId('proposal');
   const anchorText = request.text.slice(draft.from - request.from, draft.to - request.from);
   const candidates = draft.variants ?? (draft.replacement !== undefined ? [draft.replacement] : []);
   const effective = [...new Set(candidates)].filter((text) => text !== anchorText);
-  const variants: SuggestionVariant[] = effective.map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, draft.confidence - index * 0.04) }));
+  const variants = effective;
   const type = draft.type === 'replacement' && !variants.length ? 'annotation' : draft.type;
   return {
-    id,
-    kind: 'craft_suggestion',
+    proposalId,
     source,
     sourceNumber,
     sourceKind,
-    target: textTarget(request.branchId, draft.from, draft.to, anchorText),
-    behaviourId: 'craft-input',
-    events: [],
-    anchor: { from: draft.from, to: draft.to, text: anchorText },
+    from: draft.from - request.from,
+    to: draft.to - request.from,
+    sourceText: anchorText,
     type,
-    payload: { text: variants[0]?.text, comment: draft.comment },
     category: draft.category,
+    comment: draft.comment,
     confidence: draft.confidence,
     variants,
-    state: request.sourceStates[source] === 'invisible' ? 'hidden' : 'pending',
-    order: draft.from,
-    createdAt: new Date().toISOString(),
     provenance: {
       promptVersion: request.prompt.version,
       briefVersion: request.brief.version,
@@ -314,7 +318,7 @@ function assemblePrompt(request: GenerationRequest): string {
   const context = (request.context ?? [])
     .map((bucket) => `### ${bucket.title} (${bucket.scope}, v${bucket.revision}${bucket.role ? `, ${bucket.role}` : ''})\n${bucket.content}`)
     .join('\n\n');
-  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE. For a replacement, provide two or three distinct alternatives in variants; none may equal the selected source text. If there is no useful change, return an annotation or no suggestion instead of a no-op replacement.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nCONTEXT BUCKETS\n${context || 'None'}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
+  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, or sentence that the comment directly discusses. Never begin or end source_text inside a word and never include leading or trailing whitespace. For a passage-wide annotation, use from 0, to the full passage length, and copy the full passage into source_text. Return at most one annotation for the same substantive issue at the same location. For a replacement, provide two or three distinct alternatives in variants; none may equal source_text. If there is no useful change, return no suggestion instead of guessing an anchor.\n\nBRIEF\nForm: ${request.brief.form}\nPOV: ${request.brief.pov}\nTense: ${request.brief.tense}\nDistance: ${request.brief.distance}\nCanon: ${canon}\n\nCONTEXT BUCKETS\n${context || 'None'}\n\nTASK\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
 }
 
 function balancedJsonCandidates(content: string): string[] {
@@ -350,28 +354,55 @@ function balancedJsonCandidates(content: string): string[] {
   return candidates;
 }
 
-function parseProviderJson(content: string): unknown {
+function parseProviderJson(content: string): { value: unknown; repaired: boolean } {
   const trimmed = content.trim().replace(/^\uFEFF/, '');
   const fenced = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1].trim());
-  const candidates = [...new Set([trimmed, ...fenced, ...balancedJsonCandidates(trimmed)])];
+  const unclosedFence = /```(?:json)?\s*([\s\S]*)$/i.exec(trimmed)?.[1].trim();
+  const jsonStart = [trimmed.indexOf('{'), trimmed.indexOf('[')]
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  const trailingJson = jsonStart == null ? undefined : trimmed.slice(jsonStart);
+  const candidates = [...new Set([
+    ...fenced,
+    unclosedFence,
+    ...balancedJsonCandidates(trimmed),
+    trailingJson,
+    trimmed
+  ].filter((candidate): candidate is string => Boolean(candidate)))];
   for (const candidate of candidates) {
-    for (const value of [candidate, candidate.replace(/,\s*([}\]])/g, '$1')]) {
+    const withoutTrailingCommas = candidate.replace(/,\s*([}\]])/g, '$1');
+    const representations = [
+      { value: candidate, repaired: candidate !== trimmed },
+      { value: withoutTrailingCommas, repaired: candidate !== trimmed || withoutTrailingCommas !== candidate }
+    ];
+    try {
+      const repaired = jsonrepair(candidate);
+      representations.push({ value: repaired, repaired: true });
+    } catch {
+      // The output is not locally repairable; other extracted candidates may be.
+    }
+    for (const representation of representations) {
       try {
-        return JSON.parse(value) as unknown;
+        const parsed = JSON.parse(representation.value) as unknown;
+        if (typeof parsed === 'object' && parsed !== null) return { value: parsed, repaired: representation.repaired };
       } catch {
         // Try the next locally recoverable representation.
       }
     }
   }
-  throw new Error('Provider returned invalid JSON after fenced-block and surrounding-text recovery.');
+  throw new ProviderOutputError('Provider returned invalid JSON after local repair and validation.');
 }
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function parseProviderSuggestions(content: string): Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> {
-  const parsed = parseProviderJson(content);
+function parseProviderSuggestionsDetailed(content: string): {
+  suggestions: Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }>;
+  locallyRepaired: boolean;
+} {
+  const parsedResult = parseProviderJson(content);
+  const parsed = parsedResult.value;
   const rawSuggestions = Array.isArray(parsed) ? parsed : record(parsed) && Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
   const valid = rawSuggestions.flatMap((value) => {
     if (!record(value)) return [];
@@ -397,30 +428,119 @@ export function parseProviderSuggestions(content: string): Array<Omit<DraftSugge
       comment: typeof value.comment === 'string' ? value.comment : 'AI craft suggestion.',
       replacement,
       variants,
+      sourceText: typeof value.source_text === 'string' ? value.source_text : undefined,
       confidence
     }];
   });
-  if (rawSuggestions.length && !valid.length) throw new Error('Provider JSON contained suggestions, but none matched the required suggestion schema.');
-  return valid;
+  if (rawSuggestions.length && !valid.length) throw new ProviderOutputError('Provider JSON contained suggestions, but none matched the required suggestion schema.');
+  return { suggestions: valid, locallyRepaired: parsedResult.repaired };
 }
 
-async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number }> {
+export function parseProviderSuggestions(content: string): Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> {
+  return parseProviderSuggestionsDetailed(content).suggestions;
+}
+
+export function resolveProviderRange(
+  draft: Pick<DraftSuggestion, 'from' | 'to' | 'sourceText' | 'type'>,
+  passage: string
+): { from: number; to: number } | null {
+  if (draft.type === 'insertion' && draft.from === draft.to && draft.sourceText === '') {
+    return draft.from >= 0 && draft.from <= passage.length ? { from: draft.from, to: draft.to } : null;
+  }
+  if (!draft.sourceText) return null;
+  if (isExactTextSpan(passage, draft.from, draft.to, draft.sourceText)) {
+    return { from: draft.from, to: draft.to };
+  }
+  const matches: number[] = [];
+  let cursor = passage.indexOf(draft.sourceText);
+  while (cursor >= 0) {
+    matches.push(cursor);
+    cursor = passage.indexOf(draft.sourceText, cursor + 1);
+  }
+  if (matches.length !== 1) return null;
+  const from = matches[0];
+  const to = from + draft.sourceText.length;
+  return isExactTextSpan(passage, from, to, draft.sourceText) ? { from, to } : null;
+}
+
+async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number; providerAttempts: number; diagnostics: Array<Omit<InputError, 'source'>> }> {
   const started = performance.now();
-  const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
-    body: JSON.stringify({ model, temperature: 0.3, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: assemblePrompt(request) }] })
-  });
-  if (!response.ok) throw new Error(`Provider returned ${response.status}`);
-  const data = await response.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
-  const parsed = parseProviderSuggestions(data.choices?.[0]?.message?.content ?? '{"suggestions":[]}');
-  const drafts = parsed.map((item) => ({ ...item, from: request.from + item.from, to: request.from + item.to })).filter((item) => item.to >= item.from && item.from >= request.from && item.to <= request.from + request.text.length);
-  return { drafts, latencyMs: performance.now() - started, inputTokens: data.usage?.prompt_tokens, outputTokens: data.usage?.completion_tokens };
+  const originalPrompt = assemblePrompt(request);
+  let previousOutput = '';
+  let previousFailure = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+  const diagnostics: Array<Omit<InputError, 'source'>> = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const messages = attempt === 1
+      ? [{ role: 'user', content: originalPrompt }]
+      : [
+          { role: 'user', content: originalPrompt },
+          { role: 'assistant', content: previousOutput.slice(0, 12000) },
+          {
+            role: 'user',
+            content: `Your previous response was rejected: ${previousFailure} Return the answer again as one valid JSON object matching the requested schema exactly. Return JSON only, with no Markdown fence or explanation.`
+          }
+        ];
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify({ model, temperature: 0.3, response_format: { type: 'json_object' }, messages })
+    });
+    if (!response.ok) throw new Error(`Provider returned ${response.status}`);
+    const data = await response.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    previousOutput = data.choices?.[0]?.message?.content ?? '{"suggestions":[]}';
+    inputTokens += data.usage?.prompt_tokens ?? 0;
+    outputTokens += data.usage?.completion_tokens ?? 0;
+    try {
+      const parsedResult = parseProviderSuggestionsDetailed(previousOutput);
+      const parsed = parsedResult.suggestions;
+      const drafts = parsed.flatMap((item) => {
+        const range = resolveProviderRange(item, request.text);
+        return range ? [{ ...item, from: request.from + range.from, to: request.from + range.to }] : [];
+      });
+      if (parsed.length && !drafts.length) throw new ProviderOutputError('Provider suggestions did not contain an exact, unambiguous source_text anchor.');
+      if (parsedResult.locallyRepaired) {
+        diagnostics.push({
+          kind: 'provider_output',
+          attempt,
+          recovered: true,
+          outcome: 'repaired_locally',
+          message: 'Malformed provider output was repaired locally before validation.',
+          rawOutput: previousOutput.slice(0, 6000)
+        });
+      }
+      if (attempt === 2 && diagnostics[0]) {
+        diagnostics[0] = { ...diagnostics[0], recovered: true, outcome: 'recovered_by_retry' };
+      }
+      return {
+        drafts,
+        latencyMs: performance.now() - started,
+        inputTokens: inputTokens || undefined,
+        outputTokens: outputTokens || undefined,
+        providerAttempts: attempt,
+        diagnostics
+      };
+    } catch (error) {
+      if (!(error instanceof ProviderOutputError)) throw error;
+      previousFailure = error.message;
+      diagnostics.push({
+        kind: 'provider_output',
+        attempt,
+        recovered: false,
+        outcome: attempt === 1 ? 'retry_requested' : 'rejected',
+        message: error.message,
+        rawOutput: previousOutput.slice(0, 6000)
+      });
+      if (attempt === 2) throw new ProviderOutputError(`${error.message} Automatic corrective retry also failed.`, diagnostics);
+    }
+  }
+  throw new ProviderOutputError('Provider output recovery exhausted.');
 }
 
-export async function generateSuggestions(request: GenerationRequest): Promise<{ suggestions: Suggestion[]; errors: { source: string; message: string }[] }> {
-  const suggestions: Suggestion[] = [];
-  const errors: { source: string; message: string }[] = [];
+export async function generateSuggestions(request: GenerationRequest): Promise<{ proposals: InputProposal[]; errors: InputError[] }> {
+  const proposals: InputProposal[] = [];
+  const errors: InputError[] = [];
   const providers = configuredProviders();
   const activeProviders = providers.filter((provider) => request.sourceStates[provider.id] !== 'off');
   const selectionRequest = request.prompt.id !== 'sentinel';
@@ -428,34 +548,44 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
     const started = performance.now();
     const drafts = localChecks(request);
     const latency = performance.now() - started;
-    suggestions.push(...drafts.map((draft) => suggestionFromDraft(draft, request, 'local-craft', 1, 'local', latency)));
+    proposals.push(...drafts.map((draft) => proposalFromDraft(draft, request, 'local-craft', 1, 'local', latency)));
   }
   // Selection replay is a deterministic fallback. When a real provider is active,
   // do not obscure its result with a scripted "no safe alternative" annotation.
   if (request.sourceStates['fake-sentinel'] !== 'off' && !(selectionRequest && activeProviders.length)) {
     await new Promise((resolve) => setTimeout(resolve, 280));
-    suggestions.push(...scriptedChecks(request).map((draft) => suggestionFromDraft(draft, request, 'fake-sentinel', 2, 'ai', 280, 0.00002)));
+    proposals.push(...scriptedChecks(request).map((draft) => proposalFromDraft(draft, request, 'fake-sentinel', 2, 'ai', 280, 0.00002)));
   }
   for (const provider of providers) {
     if (request.sourceStates[provider.id] === 'off') continue;
     try {
       const result = await openAiShaped(provider.baseUrl, provider.key, provider.model, request);
-      suggestions.push(...result.drafts.map((draft) => {
-        const suggestion = suggestionFromDraft(draft, request, provider.id, provider.number, 'ai', result.latencyMs);
-        suggestion.provenance.inputTokens = result.inputTokens;
-        suggestion.provenance.outputTokens = result.outputTokens;
-        suggestion.provenance.model = provider.model;
-        return suggestion;
+      errors.push(...result.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
+      proposals.push(...result.drafts.map((draft) => {
+        const proposal = proposalFromDraft(draft, request, provider.id, provider.number, 'ai', result.latencyMs);
+        proposal.provenance.inputTokens = result.inputTokens;
+        proposal.provenance.outputTokens = result.outputTokens;
+        proposal.provenance.providerAttempts = result.providerAttempts;
+        proposal.provenance.model = provider.model;
+        return proposal;
       }));
     } catch (error) {
-      errors.push({ source: provider.id, message: error instanceof Error ? error.message : 'Provider failed' });
+      if (error instanceof ProviderOutputError && error.diagnostics.length) {
+        errors.push(...error.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
+      } else {
+        errors.push({
+          source: provider.id,
+          kind: error instanceof ProviderOutputError ? 'provider_output' : 'provider_request',
+          message: error instanceof Error ? error.message : 'Provider failed'
+        });
+      }
     }
   }
   const availability = suggestionSourceAvailability();
   for (const source of ['openrouter', 'ollama'] as const) {
     if (request.sourceStates[source] !== 'off' && !availability[source].available) {
-      errors.push({ source, message: availability[source].reason ?? 'Source is not configured.' });
+      errors.push({ source, kind: 'configuration', message: availability[source].reason ?? 'Source is not configured.' });
     }
   }
-  return { suggestions, errors };
+  return { proposals, errors };
 }

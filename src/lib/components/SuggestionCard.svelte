@@ -6,11 +6,14 @@
     active?: boolean;
     tray?: boolean;
     selectedVariant?: number;
+    revisionBusy?: boolean;
+    revisionAvailable?: boolean;
     onActivate?: () => void;
     onSelectVariant?: (index: number) => void;
     onAccept?: (index: number, edit: boolean) => void;
     onReject?: (viaDrag: boolean) => void;
     onPreview?: (text: string | null) => void;
+    onSuggestRevision?: () => void;
     onSourceHover?: () => void;
     onMove?: (direction: -1 | 1) => void;
   }
@@ -20,11 +23,14 @@
     active = false,
     tray = false,
     selectedVariant = 0,
+    revisionBusy = false,
+    revisionAvailable = true,
     onActivate = () => {},
     onSelectVariant = () => {},
     onAccept = () => {},
     onReject = () => {},
     onPreview = () => {},
+    onSuggestRevision = () => {},
     onSourceHover = () => {},
     onMove = () => {}
   }: Props = $props();
@@ -111,6 +117,8 @@
       <button class="reject" type="button" title="Reject (X)" onclick={stopClick(() => onReject(false))}>×</button>
       {#if variants.length}
         <button class="edit" type="button" title="Accept and edit (E)" onclick={stopClick(() => onAccept(selectedVariant, true))}>e</button>
+      {:else}
+        <button class="suggest-revision" type="button" disabled={revisionBusy} onclick={stopClick(onSuggestRevision)}>{revisionBusy ? 'Suggesting…' : revisionAvailable ? 'Suggest revisions' : 'Enable AI to revise'}</button>
       {/if}
     </span>
     <button type="button" class="source" title={`${suggestion.sourceKind === 'local' ? 'Local' : 'AI'} source ${suggestion.sourceNumber}: ${suggestion.source}`} onmouseenter={onSourceHover} onclick={stopClick(onActivate)}>
@@ -141,6 +149,8 @@
   footer button:hover { background: var(--paper-deep); color: var(--ink); }
   footer .reject:hover { border-color: var(--reject); color: var(--reject); }
   footer .edit { font-style: italic; }
+  footer .suggest-revision { width: auto; border-radius: 3px; padding: 0 8px; font-size: 10px; font-weight: 600; }
+  footer .suggest-revision:disabled { opacity: .55; cursor: wait; }
   footer .source { width: auto; height: auto; margin-left: auto; display: flex; align-items: baseline; gap: 2px; border: 0; color: var(--ink); font: 800 13px/1 var(--font-ui); padding: 3px 2px; }
   .source b { color: var(--muted); font-size: 9px; }
   .tray { max-width: 520px; }

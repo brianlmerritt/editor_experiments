@@ -1,10 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import EditorShell from '$lib/editor/EditorShell.svelte';
-  import { rebaseResponseRange, type TrackedRequestRange } from '$lib/editor/request-anchor';
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
-  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
   import { settings as providerSettings } from '$lib/state/settings.svelte';
@@ -34,7 +33,6 @@
   let workspaceReady = $state(false);
   let displayedDocumentRevision = $state(1);
   let documentSaving = $state(false);
-  let documentText = $state('');
   let cardTops = $state<Record<string, number>>({});
   let cardsHeight = $state(0);
   let cardsElement = $state<HTMLDivElement>();
@@ -46,8 +44,17 @@
   let newContextTitle = $state('');
   let newContextRole = $state('');
   let newContextScope = $state<ContextScope>('project');
+  let revisionSuggestionId = $state<string | null>(null);
+  let customRequestOpen = $state(false);
+  let customRequest = $state('');
 
   let selectedPrompt = $derived(workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0]);
+  let currentDocumentText = $derived(workspace.currentDocument?.content ?? '');
+  let revisionSuggestion = $derived(workspace.suggestions.find((suggestion) => suggestion.id === revisionSuggestionId) ?? null);
+  let hasRevisionProvider = $derived(
+    (workspace.sourceStates.openrouter === 'visible' && providerSettings.sourceAvailability.openrouter?.available === true)
+    || (workspace.sourceStates.ollama === 'visible' && providerSettings.sourceAvailability.ollama?.available === true)
+  );
   let managedInputs = $derived.by(() => workspace.inputs
     .filter((input) => inputStateFilter === 'all' || input.state === inputStateFilter)
     .filter((input) => !inputSearch.trim() || `${input.payload.comment} ${input.source} ${input.category} ${input.state}`.toLowerCase().includes(inputSearch.trim().toLowerCase()))
@@ -182,31 +189,18 @@
   }
 
   function textChanged(detail: { text: string; characters: number; origin?: unknown }): void {
-    documentText = detail.text;
     if (!editorReady) {
       editorReady = true;
-      if (editor) {
-        const currentEditor = editor;
-        void workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
-        refreshLiveSuggestions();
-      }
-      if (workspace.currentDocument && detail.text !== workspace.currentDocument.content) {
-        scheduleDocumentSave(detail.text, 'Recovered local editor state');
-      }
       return;
     }
-    if (editor) {
-      const currentEditor = editor;
-      void workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
-      refreshLiveSuggestions();
-    }
+    refreshLiveSuggestions();
     const origin = detail.origin as { kind?: string } | undefined;
     const saveReason = origin?.kind === 'workspace_history'
       ? 'Undo or redo'
       : origin?.kind === 'input_acceptance'
         ? 'Accepted revision'
         : 'Editing session';
-    scheduleDocumentSave(detail.text, saveReason);
+    scheduleDocumentSave(saveReason);
     if (origin && origin.kind !== 'human') return;
     const now = Date.now();
     if (!editSession.started) editSession.started = now;
@@ -237,8 +231,6 @@
   }
 
   function strikeSelection(): void {
-    const snapshot = editor?.getSnapshot();
-    if (snapshot) workspace.setEditorReady(snapshot);
     const removing = workspace.selectionHasStrikethrough(selection.from, selection.to);
     if (workspace.toggleSelectionStrikethrough(selection.from, selection.to, selection.text)) {
       refreshLiveSuggestions();
@@ -247,8 +239,6 @@
   }
 
   function strikeWork(): void {
-    const snapshot = editor?.getSnapshot();
-    if (snapshot) workspace.setEditorReady(snapshot);
     const removing = workspace.workHasStrikethrough;
     if (workspace.toggleWorkStrikethrough()) {
       refreshLiveSuggestions();
@@ -267,106 +257,109 @@
     refreshLiveSuggestions();
   }
 
-  function scheduleDocumentSave(text: string, reason: string): void {
+  function scheduleDocumentSave(reason: string): void {
     if (documentSaveTimer) clearTimeout(documentSaveTimer);
     documentSaving = true;
     documentSaveTimer = setTimeout(async () => {
       documentSaveTimer = null;
-      await workspace.saveDocumentContent(text, reason);
+      await workspace.persistCurrentDocument(reason);
       displayedDocumentRevision = workspace.currentDocument?.revision ?? displayedDocumentRevision;
       documentSaving = false;
     }, 1200);
   }
 
   async function runSentinels(): Promise<void> {
-    const currentEditor = editor;
-    if (!currentEditor || !selectedPrompt || workspace.paused) return;
-    await workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
-    const requests = currentEditor.getParagraphs().map((paragraph) => ({
-      paragraph,
-      tracked: { ...paragraph, ...currentEditor.getRelativeAnchor(paragraph.from, paragraph.to) } satisfies TrackedRequestRange
-    }));
-    const results = await Promise.all(requests.map(({ paragraph }) => workspace.requestSuggestions({ ...paragraph, prompt: selectedPrompt }, `${workspace.branchId}:${paragraph.from}:${paragraph.to}`)));
-    const valid = new Set<string>();
-    let discarded = 0;
-    for (let index = 0; index < requests.length; index += 1) {
-      const result = await anchorProviderResponses(currentEditor, results[index], requests[index].tracked);
-      const anchored = result.anchored;
-      discarded += result.discarded;
-      for (const suggestion of anchored) valid.add(suggestion.id);
-    }
-    showNotice(discarded
-      ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added; ${discarded} stale ${discarded === 1 ? 'response was' : 'responses were'} safely discarded.`
-      : valid.size
-        ? `${valid.size} new ${valid.size === 1 ? 'input' : 'inputs'} added.`
-        : 'Craft pass complete; no new inputs.');
+    if (!selectedPrompt || workspace.paused) return;
+    workspace.notice = null;
+    const incoming = await workspace.runCraftPass(selectedPrompt);
+    if (!workspace.notice) showNotice(incoming.length
+      ? `${incoming.length} new ${incoming.length === 1 ? 'input' : 'inputs'} added.`
+      : 'Craft pass complete; no new inputs.');
     refreshLiveSuggestions();
     await tick();
     layoutCards();
+  }
+
+  async function runSelectionPrompt(prompt: TaskPrompt, pendingMessage?: string): Promise<Suggestion[]> {
+    if (!selection.text.trim()) return [];
+    workspace.notice = null;
+    if (pendingMessage) showNotice(pendingMessage);
+    const incoming = await workspace.runSelectionPass(selection, prompt);
+    refreshLiveSuggestions();
+    await tick();
+    layoutCards();
+    if (incoming[0]) void activateCard(incoming[0].id);
+    return incoming;
   }
 
   async function runSelection(promptId: string): Promise<void> {
-    const currentEditor = editor;
-    if (!currentEditor || !selection.text.trim()) return;
-    await workspace.reconcileSuggestionAnchors((suggestion) => currentEditor.resolveSuggestionAnchor(suggestion));
-    const requested = {
-      ...selection,
-      ...currentEditor.getRelativeAnchor(selection.from, selection.to)
-    } satisfies TrackedRequestRange;
     const prompt = workspace.prompts.find((item) => item.id === promptId) ?? { id: promptId, name: promptId, version: 1, instruction: `Offer a ${promptId} revision.` };
-    const incoming = await workspace.requestSuggestions({ text: selection.text, from: selection.from, to: selection.to, prompt }, `${workspace.branchId}:selection:${selection.from}:${selection.to}`);
-    const result = await anchorProviderResponses(currentEditor, incoming, requested);
-    const anchored = result.anchored;
-    refreshLiveSuggestions();
-    await tick();
-    layoutCards();
-    if (result.discarded) showNotice('The passage changed while the revision was being prepared, so the stale response was safely discarded.');
-    else if (anchored[0]) void activateCard(anchored[0].id);
+    await runSelectionPrompt(prompt);
   }
 
-  async function anchorProviderResponses(
-    currentEditor: EditorShell,
-    incoming: Suggestion[],
-    requested: TrackedRequestRange
-  ): Promise<{ anchored: Suggestion[]; discarded: number }> {
-    const resolved = currentEditor.resolveRelativeAnchor(requested.start, requested.end);
-    const anchored: Suggestion[] = [];
-    let discarded = 0;
-    for (const suggestion of incoming) {
-      const range = resolved && rebaseResponseRange(
-        suggestion,
-        requested,
-        resolved,
-        (from, to) => currentEditor.getTextBetween(from, to)
-      );
-      if (!range) {
-        discarded += 1;
-        await workspace.resolveSuggestion(suggestion.id, 'stale', 'stale_on_arrival', {
-          reason: resolved ? 'response_no_longer_matches_document' : 'request_anchor_no_longer_resolves'
-        });
-        continue;
-      }
-      const relative = currentEditor.getRelativeAnchor(range.from, range.to);
-      workspace.suggestions = workspace.suggestions.map((item) => {
-        if (item.id !== suggestion.id) return item;
-        let targetUpdated = false;
-        const targets = item.target.targets.map((target) => {
-          if (targetUpdated || target.type !== 'text') return target;
-          targetUpdated = true;
-          return { ...target, start: range.from, end: range.to };
-        });
-        return {
-          ...item,
-          target: { ...item.target, targets },
-          anchor: { ...item.anchor, from: range.from, to: range.to, ...relative }
-        };
-      });
-      anchored.push({
-        ...suggestion,
-        anchor: { ...suggestion.anchor, from: range.from, to: range.to, ...relative }
-      });
+  async function selectSuggestionForRevision(suggestion: Suggestion): Promise<void> {
+    revisionSuggestionId = suggestion.id;
+    customRequestOpen = false;
+    workspace.activate(suggestion.id);
+    editor?.focusSuggestion(suggestion);
+    await tick();
+    layoutCards();
+  }
+
+  async function suggestNoteRevisions(suggestion: Suggestion): Promise<void> {
+    if (!hasRevisionProvider) {
+      showNotice('Enable OpenRouter or Ollama to suggest contextual revisions.');
+      return;
     }
-    return { anchored, discarded };
+    const label = categoryMeta[suggestion.category].label.toLowerCase();
+    const pendingMessage = `Requesting ${label} revisions…`;
+    const incoming = await runSelectionPrompt({
+      id: `address-${suggestion.category}`,
+      name: `Address ${categoryMeta[suggestion.category].label} note`,
+      version: 1,
+      instruction: `Offer two or three distinct replacement revisions for the selected passage that address this ${label} note: ${suggestion.payload.comment} Preserve established facts, voice, tense, and intended point of view. Return practical alternatives rather than repeating the diagnosis.`
+    }, pendingMessage);
+    if (workspace.notice === pendingMessage) {
+      showNotice(incoming.length
+        ? `${incoming.length} revision ${incoming.length === 1 ? 'option' : 'options'} returned.`
+        : 'The provider returned no usable revision alternatives.');
+    }
+  }
+
+  async function startSuggestionRevision(suggestion: Suggestion): Promise<void> {
+    await selectSuggestionForRevision(suggestion);
+    await suggestNoteRevisions(suggestion);
+  }
+
+  async function suggestCustomRevision(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const instruction = customRequest.trim();
+    if (!instruction) return;
+    if (!hasRevisionProvider) {
+      showNotice('Enable OpenRouter or Ollama to use a custom revision request.');
+      return;
+    }
+    customRequestOpen = false;
+    const pendingMessage = 'Requesting custom revisions…';
+    const incoming = await runSelectionPrompt({
+      id: 'custom-revision',
+      name: 'Custom revision',
+      version: 1,
+      instruction: `Offer two or three distinct replacement revisions for the selected passage. Follow this writer instruction: ${instruction} Preserve established facts and any narrative constraints not explicitly changed by the instruction.`
+    }, pendingMessage);
+    if (workspace.notice === pendingMessage) {
+      showNotice(incoming.length
+        ? `${incoming.length} custom revision ${incoming.length === 1 ? 'option' : 'options'} returned.`
+        : 'The provider returned no usable custom revisions.');
+    }
+  }
+
+  function selectionChanged(detail: { from: number; to: number; text: string }): void {
+    selection = detail;
+    if (revisionSuggestion && (detail.from !== revisionSuggestion.anchor.from || detail.to !== revisionSuggestion.anchor.to)) {
+      revisionSuggestionId = null;
+    }
+    if (!detail.text) customRequestOpen = false;
   }
 
   function activateFromEditor(id: string): void {
@@ -466,11 +459,11 @@
 
   async function forkBranch(): Promise<void> {
     const name = window.prompt('Name this branch', `Alternative ${workspace.branches.length}`)?.trim();
-    if (!name || !editor) return;
+    if (!name) return;
     const id = makeId('branch');
-    await editor.forkTo(id);
-    const branch: Branch = { id, name, parentId: workspace.branchId, createdAt: new Date().toISOString(), wordCount: wordCount(editor.getText()), lastEdited: new Date().toISOString() };
-    await workspace.addBranch(branch, editor.getText());
+    const content = workspace.currentDocument?.content ?? '';
+    const branch: Branch = { id, name, parentId: workspace.branchId, createdAt: new Date().toISOString(), wordCount: wordCount(content), lastEdited: new Date().toISOString() };
+    await workspace.addBranch(branch, content);
     await switchDocument(id);
   }
 
@@ -479,12 +472,11 @@
     if (documentSaveTimer) {
       clearTimeout(documentSaveTimer);
       documentSaveTimer = null;
-      await workspace.saveDocumentContent(documentText, 'Saved before switching document');
+      await workspace.persistCurrentDocument('Saved before switching document');
       documentSaving = false;
     }
     editorReady = false;
     selection = { from: 1, to: 1, text: '' };
-    documentText = '';
     await workspace.switchBranch(id);
     displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
@@ -495,12 +487,11 @@
     if (documentSaveTimer) {
       clearTimeout(documentSaveTimer);
       documentSaveTimer = null;
-      await workspace.saveDocumentContent(documentText, 'Saved before switching project');
+      await workspace.persistCurrentDocument('Saved before switching project');
       documentSaving = false;
     }
     editorReady = false;
     selection = { from: 1, to: 1, text: '' };
-    documentText = '';
     await workspace.switchProject(id);
     displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
@@ -568,8 +559,7 @@
   }
 
   async function exportMarkdown(): Promise<void> {
-    if (!editor) return;
-    const result = await workspace.exportMarkdown(editor.getText(), workspace.branches.find((branch) => branch.id === workspace.branchId)?.name);
+    const result = await workspace.exportMarkdown(currentDocumentText, workspace.branches.find((branch) => branch.id === workspace.branchId)?.name);
     const href = URL.createObjectURL(result.blob);
     const anchor = document.createElement('a');
     anchor.href = href;
@@ -618,13 +608,13 @@
             <button onclick={createProject} title="Create project">+ Project</button>
             <span aria-hidden="true">/</span>
             <select value={workspace.branchId} onchange={(event) => switchDocument((event.currentTarget as HTMLSelectElement).value)} aria-label="Document">
-              {#each workspace.documents.filter((document) => document.projectId === workspace.projectId) as document}<option value={document.id}>{document.title} · {document.id === workspace.branchId ? wordCount(documentText) : wordCount(document.content)}w</option>{/each}
+              {#each workspace.documents.filter((document) => document.projectId === workspace.projectId) as document}<option value={document.id}>{document.title} · {wordCount(document.content)}w</option>{/each}
             </select>
             <button onclick={createDocument} title="Create blank document">+ Document</button>
             <button onclick={renameDocument}>Rename</button>
             <button onclick={forkBranch}>Fork from here</button>
           </div>
-          <div><span>{wordCount(documentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button onclick={exportMarkdown}>Export .md</button></div>
+          <div><span>{wordCount(currentDocumentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button onclick={exportMarkdown}>Export .md</button></div>
           <div class="document-tools">
             <button disabled={!workspace.undoStack.length} onclick={undoWorkspace}>Undo</button>
             <button disabled={!workspace.redoStack.length} onclick={redoWorkspace}>Redo</button>
@@ -649,10 +639,14 @@
                 paused={isPaused}
                 onTextChange={textChanged}
                 onEditorReady={(snapshot) => workspace.setEditorReady(snapshot)}
-                onEditorTransaction={(detail) => workspace.recordEditorTransaction(detail)}
+                onEditorTransaction={(detail) => {
+                  const projection = workspace.recordEditorTransaction(detail);
+                  refreshLiveSuggestions();
+                  return { suggestions: liveSuggestions, formats: projection.formats };
+                }}
                 onUndoRequest={undoWorkspace}
                 onRedoRequest={redoWorkspace}
-                onSelectionChange={(detail) => selection = detail}
+                onSelectionChange={selectionChanged}
                 onSuggestionActivate={activateFromEditor}
                 onSuggestionHover={(id) => workspace.activate(id)}
               />
@@ -662,11 +656,24 @@
           {#if selection.text && !workspace.paused}
             <div class="selection-menu">
               <span>{selection.text.split(/\s+/).length}w selected</span>
+              {#if revisionSuggestion}
+                <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
+              {/if}
               <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
               <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
               <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
               <button type="button" onmousedown={preventDefault} onclick={() => runSelection('synonyms')}>Synonyms</button>
               <button type="button" onmousedown={preventDefault} onclick={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
+              <button type="button" onmousedown={preventDefault} onclick={() => customRequestOpen = !customRequestOpen}>Custom request…</button>
+              {#if customRequestOpen}
+                <form class="custom-request" onsubmit={suggestCustomRevision}>
+                  <input bind:value={customRequest} aria-label="Custom revision request" placeholder="Describe the revision you want" />
+                  {#if !customRequest.trim()}
+                    <button class="request-example" type="button" onclick={() => customRequest = 'Keep Mara close but add to her anxiety'}>Use example: “Keep Mara close but add to her anxiety”</button>
+                  {/if}
+                  <button type="submit" disabled={!customRequest.trim()}>Suggest revisions</button>
+                </form>
+              {/if}
             </div>
           {/if}
         </div>
@@ -724,11 +731,14 @@
                   active={workspace.activeSuggestionId === suggestion.id}
                   tray={workspace.surface === 'tray'}
                   selectedVariant={selectedVariants[suggestion.id] ?? 0}
+                  revisionBusy={workspace.generating && revisionSuggestionId === suggestion.id}
+                  revisionAvailable={hasRevisionProvider}
                   onActivate={() => void activateCard(suggestion.id)}
                   onSelectVariant={(index) => chooseVariant(suggestion.id, index)}
                   onAccept={(index, edit) => accept(suggestion, index, edit)}
                   onReject={(viaDrag) => reject(suggestion, viaDrag)}
                   onPreview={(text) => text === null ? workspace.clearPreview() : workspace.setPreview(suggestion.id, text)}
+                  onSuggestRevision={() => void startSuggestionRevision(suggestion)}
                   onSourceHover={() => workspace.log('source_tooltip_hovered', { source: suggestion.source, sourceNumber: suggestion.sourceNumber }, suggestion.id)}
                   onMove={(direction) => workspace.reorder(suggestion.id, direction)}
                 />
@@ -902,10 +912,15 @@
   .document-tools { padding-left: 6px; border-left: 1px solid var(--line); }
   .editor-wrap { position: relative; }
   .editor-loading { display: grid; place-items: center; min-height: 68vh; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); font: 12px/1.5 var(--font-ui); }
-  .selection-menu { position: sticky; z-index: 12; bottom: 22px; display: flex; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 40px); margin: -58px auto 17px; padding: 5px; border: 1px solid #34322e; border-radius: 4px; background: #282723; color: #f7f3e9; box-shadow: 0 10px 30px rgb(0 0 0 / .2); }
+  .selection-menu { position: sticky; z-index: 12; bottom: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 40px); margin: -58px auto 17px; padding: 5px; border: 1px solid #34322e; border-radius: 4px; background: #282723; color: #f7f3e9; box-shadow: 0 10px 30px rgb(0 0 0 / .2); }
   .selection-menu span { padding: 0 8px; color: #a9a69f; font-size: 9px; }
   .selection-menu button { border: 0; border-radius: 2px; background: transparent; color: inherit; padding: 7px 9px; font-size: 10px; cursor: pointer; }
   .selection-menu button:hover { background: #3c3a35; }
+  .selection-menu .contextual-revision { background: #3c3a35; color: #fff; }
+  .custom-request { display: flex; flex: 1 0 100%; gap: 4px; padding: 3px; }
+  .custom-request input { min-width: 280px; flex: 1; border: 1px solid #55524c; border-radius: 2px; background: #f7f3e9; color: #25231f; padding: 7px 8px; font: 11px/1.2 var(--font-ui); }
+  .custom-request .request-example { max-width: 260px; color: #d7d2c8; text-align: left; white-space: normal; }
+  .custom-request button:disabled { opacity: .4; cursor: default; }
   aside { min-width: 0; padding-top: 42px; }
   aside > header { display: flex; align-items: end; justify-content: space-between; min-height: 30px; padding: 0 0 9px; border-bottom: 1px solid var(--line); }
   aside > header div { display: flex; align-items: baseline; gap: 8px; }

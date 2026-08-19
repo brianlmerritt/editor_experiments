@@ -33,6 +33,34 @@ export interface SuggestionVariant {
   confidence?: number;
 }
 
+export interface InputProposal {
+  proposalId: string;
+  source: string;
+  sourceNumber: number;
+  sourceKind: SourceKind;
+  from: number;
+  to: number;
+  sourceText: string;
+  type: SuggestionType;
+  category: Category;
+  comment: string;
+  variants: string[];
+  confidence: number;
+  provenance: Provenance;
+}
+
+export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration';
+
+export interface InputError {
+  source: string;
+  message: string;
+  kind?: InputErrorKind;
+  attempt?: number;
+  recovered?: boolean;
+  outcome?: 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
+  rawOutput?: string;
+}
+
 export interface Provenance {
   promptVersion: number;
   briefVersion: number;
@@ -41,6 +69,7 @@ export interface Provenance {
   latencyMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  providerAttempts?: number;
   costUsd?: number;
 }
 
@@ -153,6 +182,24 @@ export interface GenerationRequest {
   }>;
 }
 
+export type RunState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'discarded';
+
+export interface CraftRun {
+  id: string;
+  documentId: string;
+  sourceRevision: number;
+  target: TargetSet;
+  originalText: string;
+  promptId: string;
+  promptVersion: number;
+  sourceStates: Record<string, SourceState>;
+  state: RunState;
+  proposalIds: string[];
+  errors: InputError[];
+  createdAt: string;
+  completedAt?: string;
+}
+
 export interface JudgmentPair {
   id: string;
   suggestionId: string;
@@ -190,6 +237,43 @@ function normalizedSuggestionText(value: string | undefined): string {
   return (value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 }
 
+const semanticStopWords = new Set([
+  'about', 'after', 'already', 'also', 'and', 'any', 'are', 'before', 'been', 'being',
+  'but', 'can', 'confirm', 'consider', 'could', 'does', 'for', 'from', 'had', 'has',
+  'have', 'her', 'hers', 'him', 'his', 'into', 'its', 'may', 'might', 'more', 'not',
+  'of', 'off', 'she', 'should', 'that', 'the', 'their', 'them', 'they', 'this', 'to',
+  'was', 'were', 'what', 'whether', 'which', 'with', 'would', 'you', 'your'
+]);
+const positiveSignals = new Set(['appropriate', 'correct', 'effective', 'good', 'maintains', 'solid', 'strong', 'works']);
+const criticalSignals = new Set(['check', 'consider', 'distant', 'flat', 'intrusion', 'issue', 'risk', 'unclear', 'weak']);
+
+function semanticTokens(value: string): Set<string> {
+  return new Set((value.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((token) => token.length > 2 && !semanticStopWords.has(token)));
+}
+
+function stance(tokens: Set<string>): 'positive' | 'critical' | 'neutral' {
+  const positive = [...tokens].some((token) => positiveSignals.has(token));
+  const critical = [...tokens].some((token) => criticalSignals.has(token));
+  if (positive && !critical) return 'positive';
+  if (critical && !positive) return 'critical';
+  return 'neutral';
+}
+
+/**
+ * Validates a provider-selected source span without guessing. Exact text is required,
+ * leading/trailing whitespace is rejected, and word-like text cannot start or end in
+ * the middle of another word.
+ */
+export function isExactTextSpan(passage: string, from: number, to: number, sourceText: string): boolean {
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to > passage.length) return false;
+  if (!sourceText || sourceText.trim() !== sourceText || passage.slice(from, to) !== sourceText) return false;
+  const wordCharacter = (value: string | undefined) => Boolean(value && /[\p{L}\p{N}_]/u.test(value));
+  if (from > 0 && wordCharacter(passage[from - 1]) && wordCharacter(sourceText[0])) return false;
+  if (to < passage.length && wordCharacter(sourceText.at(-1)) && wordCharacter(passage[to])) return false;
+  return true;
+}
+
 /** Stable identity for the substance of a suggestion, excluding generated IDs and telemetry. */
 export function suggestionFingerprint(suggestion: Suggestion): string {
   const variantTexts = suggestion.variants.map((variant) => normalizedSuggestionText(variant.text)).sort();
@@ -206,39 +290,28 @@ export function suggestionFingerprint(suggestion: Suggestion): string {
   ]);
 }
 
-export function reconcileSuggestionAnchors(
-  items: Suggestion[],
-  resolve: (suggestion: Suggestion) => { from: number; to: number; text: string } | null
-): { suggestions: Suggestion[]; expired: Suggestion[] } {
-  const expired: Suggestion[] = [];
-  const suggestions = items.map((suggestion) => {
-    if (suggestion.state !== 'pending' && suggestion.state !== 'hidden') return suggestion;
-    const current = resolve(suggestion);
-    if (!current) {
-      expired.push(suggestion);
-      return { ...suggestion, state: 'stale' as const };
-    }
-    let updatedTextTarget = false;
-    const targets = suggestion.target.targets.map((target) => {
-      if (updatedTextTarget || target.type !== 'text') return target;
-      updatedTextTarget = true;
-      return { ...target, start: current.from, end: current.to };
-    });
-    const rebased = {
-      ...suggestion,
-      target: { ...suggestion.target, targets },
-      anchor: { ...suggestion.anchor, from: current.from, to: current.to }
-    };
-    if (current.text === suggestion.anchor.text) return rebased;
-    expired.push(suggestion);
-    return { ...rebased, state: 'stale' as const };
-  });
-  return { suggestions, expired };
-}
-
 export interface SuppressedDuplicate {
   duplicate: Suggestion;
   canonical: Suggestion;
+  reason: 'exact' | 'semantic';
+}
+
+/** Conservative semantic equivalence for repeated AI annotations at the same locus. */
+export function suggestionsDescribeSameIssue(left: Suggestion, right: Suggestion): boolean {
+  if (left.sourceKind !== 'ai' || right.sourceKind !== 'ai') return false;
+  if (left.source !== right.source || left.category !== right.category) return false;
+  if (left.type !== 'annotation' || right.type !== 'annotation') return false;
+  const overlap = Math.max(0, Math.min(left.anchor.to, right.anchor.to) - Math.max(left.anchor.from, right.anchor.from));
+  const shorterRange = Math.min(left.anchor.to - left.anchor.from, right.anchor.to - right.anchor.from);
+  if (shorterRange <= 0 || overlap / shorterRange < 0.6) return false;
+  const leftTokens = semanticTokens(left.payload.comment);
+  const rightTokens = semanticTokens(right.payload.comment);
+  if (Math.min(leftTokens.size, rightTokens.size) < 4) return false;
+  const leftStance = stance(leftTokens);
+  const rightStance = stance(rightTokens);
+  if ((leftStance === 'positive' && rightStance === 'critical') || (leftStance === 'critical' && rightStance === 'positive')) return false;
+  const shared = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return shared / Math.min(leftTokens.size, rightTokens.size) >= 0.25;
 }
 
 /**
@@ -256,20 +329,31 @@ export function coalesceDuplicateSuggestions(items: Suggestion[]): { suggestions
     const current = suggestions[index];
     if (!isLive(current.state) && !isResolved(current.state)) continue;
     const fingerprint = suggestionFingerprint(current);
-    const canonicalIndex = canonicalByFingerprint.get(fingerprint);
+    const mappedExactIndex = canonicalByFingerprint.get(fingerprint);
+    const exactIndex = mappedExactIndex !== undefined
+      && (isLive(suggestions[mappedExactIndex].state) || isResolved(suggestions[mappedExactIndex].state))
+      ? mappedExactIndex
+      : undefined;
+    const semanticIndex = exactIndex === undefined
+      ? suggestions.findIndex((candidate, candidateIndex) => candidateIndex < index
+        && (isLive(candidate.state) || isResolved(candidate.state))
+        && suggestionsDescribeSameIssue(candidate, current))
+      : -1;
+    const canonicalIndex = exactIndex ?? (semanticIndex >= 0 ? semanticIndex : undefined);
     if (canonicalIndex === undefined) {
       canonicalByFingerprint.set(fingerprint, index);
       continue;
     }
 
     const canonical = suggestions[canonicalIndex];
+    const reason = exactIndex === undefined ? 'semantic' as const : 'exact' as const;
     if (isResolved(current.state) && isLive(canonical.state)) {
       suggestions[canonicalIndex] = { ...canonical, state: 'superseded' };
-      suppressed.push({ duplicate: canonical, canonical: current });
+      suppressed.push({ duplicate: canonical, canonical: current, reason });
       canonicalByFingerprint.set(fingerprint, index);
     } else if (isLive(current.state)) {
       suggestions[index] = { ...current, state: 'superseded' };
-      suppressed.push({ duplicate: current, canonical });
+      suppressed.push({ duplicate: current, canonical, reason });
     }
   }
 

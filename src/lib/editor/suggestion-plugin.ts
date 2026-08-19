@@ -1,7 +1,5 @@
-import { Plugin, PluginKey, TextSelection } from 'prosemirror-state';
+import { Plugin, PluginKey, TextSelection, type EditorState } from 'prosemirror-state';
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
-import { ySyncPluginKey, relativePositionToAbsolutePosition } from 'y-prosemirror';
-import * as Y from 'yjs';
 import type { Suggestion } from '$lib/domain';
 import type { FormatAttachment } from '$lib/workspace/attachments';
 import { planDocumentDeletion } from './deletion';
@@ -22,26 +20,16 @@ export interface SuggestionPluginOptions {
   onHover?: (id: string | null) => void;
 }
 
-export function preferredSuggestionRange(
-  suggestion: Suggestion,
-  relativeRange: { from: number; to: number } | null
-): { from: number; to: number } {
+export function suggestionRange(suggestion: Suggestion): { from: number; to: number } {
   const domainTarget = suggestion.target.targets.find((target) => target.type === 'text');
-  return relativeRange ?? {
+  return {
     from: domainTarget?.type === 'text' ? domainTarget.start : suggestion.anchor.from,
     to: domainTarget?.type === 'text' ? domainTarget.end : suggestion.anchor.to
   };
 }
 
-function resolvedRange(state: Parameters<typeof ySyncPluginKey.getState>[0], suggestion: Suggestion): { from: number; to: number } | null {
-  let relativeRange: { from: number; to: number } | null = null;
-  const sync = ySyncPluginKey.getState(state);
-  if (suggestion.anchor.start && suggestion.anchor.end && sync?.binding) {
-    const start = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.start), sync.binding.mapping);
-    const end = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(suggestion.anchor.end), sync.binding.mapping);
-    if (start != null && end != null) relativeRange = { from: start, to: end };
-  }
-  const { from, to } = preferredSuggestionRange(suggestion, relativeRange);
+function resolvedRange(state: EditorState, suggestion: Suggestion): { from: number; to: number } | null {
+  const { from, to } = suggestionRange(suggestion);
   const max = state.doc.content.size;
   if (from < 0 || from > max || to < from || to > max) return null;
   return { from, to };
@@ -70,7 +58,7 @@ function subtractRange(ranges: FormatRange[], removed: FormatRange): FormatRange
   });
 }
 
-function targetRanges(state: Parameters<typeof ySyncPluginKey.getState>[0], format: FormatAttachment, documentId: string): FormatRange[] {
+function targetRanges(state: EditorState, format: FormatAttachment, documentId: string): FormatRange[] {
   const ranges: FormatRange[] = [];
   for (const target of format.target.targets) {
     if (target.type === 'text' && target.nodeId === documentId) {
@@ -88,7 +76,7 @@ function targetRanges(state: Parameters<typeof ySyncPluginKey.getState>[0], form
   return ranges;
 }
 
-function effectiveStrikethroughRanges(state: Parameters<typeof ySyncPluginKey.getState>[0], formats: FormatAttachment[], documentId: string): FormatRange[] {
+function effectiveStrikethroughRanges(state: EditorState, formats: FormatAttachment[], documentId: string): FormatRange[] {
   let effective: FormatRange[] = [];
   const ordered = formats
     .map((format, index) => ({ format, index }))
@@ -104,7 +92,7 @@ function effectiveStrikethroughRanges(state: Parameters<typeof ySyncPluginKey.ge
   return effective;
 }
 
-function buildDecorations(state: Parameters<typeof ySyncPluginKey.getState>[0], pluginState: SuggestionPluginState): DecorationSet {
+function buildDecorations(state: EditorState, pluginState: SuggestionPluginState): DecorationSet {
   const decorations: Decoration[] = [];
   for (const range of effectiveStrikethroughRanges(state, pluginState.formats, pluginState.documentId)) {
     decorations.push(Decoration.inline(range.from, range.to, { class: 'mn-format-strikethrough' }, { formatId: 'effective-strikethrough' }));

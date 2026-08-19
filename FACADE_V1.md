@@ -164,15 +164,28 @@ Indexes such as inputs by node, state, kind, source, or assignee may be stored f
 performance. They are disposable. On disagreement, the canonical Svelte snapshot's
 input and target records win, and indexes are rebuilt.
 
-## Compatibility with the current POC
+## Implemented POC boundary
 
 The current `src/lib/workspace/facade.ts` is an HTTP-oriented first slice. It keeps
-routes and response handling out of Svelte components and now persists the POC domain
-payload—inputs, formats, behaviour profiles, and workspace revision—in the active
-document's `extensions.margin_note` data and immutable document versions.
+routes and response handling out of Svelte components and persists the POC domain
+payload—runs, inputs, formats, behaviour profiles, and workspace revision—in the
+active document's `extensions.margin_note` data and immutable document versions.
 
-The Svelte workspace owns active undo/redo and transforms attachment targets for text
-edits.
+The Svelte workspace owns canonical manuscript content, active undo/redo, run
+lifecycle, proposal adoption, and target transformations. ProseMirror submits
+transactions and renders the returned projection; it is not queried for content by
+save, fork, export, formatting, or generation commands.
+
+`commit` saves the Svelte snapshot to the durable document service, then mirrors the
+acknowledged snapshot into a private `DocumentDriver`. The current browser driver uses
+Yjs and IndexedDB without binding Yjs to the editor. `load` hydrates that mirror from
+the durable snapshot. The driver can be replaced without changing Svelte state or
+editor components.
+
+`requestInputs` transports a Svelte-created request and returns untrusted
+`InputProposal` values. It does not return domain inputs. `WorkspaceState` owns the
+run target and state, exact-text validation, IDs, attachment behaviour, visibility,
+deduplication, persistence, and ledger adoption events.
 
 Provider settings use a parallel boundary: a Svelte 5 Rune settings state owns the
 live form, validation, availability, model, and masked credential identity. The façade
@@ -182,10 +195,6 @@ server boundary and outside workspace and document state.
 The remaining differences from this complete contract are:
 
 - it loads several collections rather than one normalised aggregate snapshot;
-- manuscript content is still mirrored through Yjs/IndexedDB as well as durable
-  document versions;
-- older documents may fall back to reconstructing inputs from ledger events before
-  their first extension-backed save;
 - active history uses full in-memory snapshots and is not durable across reloads;
 - generation and persistence methods share one class;
 - idempotent transaction commits, an outbox, subscriptions, conflicts, and remote

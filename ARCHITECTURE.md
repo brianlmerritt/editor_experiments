@@ -1,9 +1,9 @@
 # Margin Note architecture
 
-This document is the authority for Margin Note's intended application architecture.
-It describes the direction of the experiment, not a claim that every part is already
-implemented. Where the original POC plan conflicts with this document, this document
-wins.
+This document is the authority for Margin Note's application architecture. The core
+Svelte-source-of-truth slice described below is implemented; explicitly deferred
+parts remain design targets rather than claims of completion. Where the original POC
+plan conflicts with this document, this document wins.
 
 Margin Note remains an experiment. The architecture should keep the next experiment
 cheap while protecting the things a writer must be able to trust: the current work,
@@ -274,13 +274,34 @@ change can stale prose and continuity reviews without invalidating unrelated lay
 work; a format-only change can invalidate layout checks without rerunning character
 analysis; a character-state change can invalidate checks for the scenes in its scope.
 
-An asynchronous provider request captures a live editor range before dispatch. When
-the response arrives, that range is resolved against the current document. Edits
-before the range may move it, but any change within the requested passage invalidates
-the response. Accepted inputs prefer the editor's live relative range over persisted
-numeric coordinates and verify the anchored excerpt immediately before replacement.
-The provider therefore never applies a response to a merely similar or coincidentally
-located passage.
+An asynchronous provider request captures a Svelte-owned `ContentTarget`, source
+revision, and exact source text before dispatch. The same workspace reducer transforms
+that run target through every intervening edit. Edits before the range may move it;
+any change within the requested passage discards the run. Provider output contains
+passage-relative offsets plus exact `source_text`. Svelte verifies both against the
+original request, adopts valid proposals as new authoritative inputs at the current
+transformed target, and verifies the current excerpt again before replacement. The
+provider and editor therefore never recover an anchor by guessing at similar text.
+Non-insertion spans must also begin and end at stable text boundaries; a technically
+exact but mid-word range is rejected because it cannot produce a trustworthy visible
+attachment.
+
+Provider transport first repairs common JSON syntax damage, then applies the complete
+schema and attachment validation above. An output-only failure receives one corrective
+retry containing the validation failure; network, authentication, and configuration
+failures are not retried as formatting problems. A successful proposal records the
+number of provider attempts. If the retry also fails, the craft run retains the typed
+diagnostic without a transient user notification. Every malformed reply—including one
+successfully repaired locally or superseded by a valid retry—is retained on the craft
+run and logged to the browser console with its attempt number, recovery outcome, and a
+bounded copy of the raw provider output.
+
+Exact fingerprints prevent literal repetitions. A conservative second pass may
+coalesce paraphrased AI annotations only when they come from the same source, have the
+same category, substantially overlap the same target, share substantive vocabulary,
+and do not have opposing critical/praising stances. Different locations, categories,
+sources, replacement alternatives, and materially different observations remain
+separate inputs.
 
 ## Undo, redo, and durable history
 
@@ -308,8 +329,9 @@ past version.
 
 ## Persistence and implementation status
 
-The first vertical slice is implemented. The Svelte workspace now owns inputs,
-formats, behaviour profiles, document snapshots, and the active undo/redo stacks.
+The first vertical slice is implemented. The Svelte workspace now owns canonical
+document content and snapshots, transactions, craft runs, inputs, formats, behaviour
+profiles, revisions, and the active undo/redo stacks.
 A separate Svelte 5 Rune settings state owns live provider configuration state and
 masked provider identity; the façade transports changes, while the server-side secret
 adapter owns durable credential storage.
@@ -330,10 +352,18 @@ format ranges shrink, split, or disappear according to their behaviour profile. 
 input manager exposes pending and historical states rather than leaving them only in
 the margin.
 
-The document's `extensions.margin_note` payload stores the current inputs, formats,
-behaviours, and workspace revision in durable document versions. Yjs and IndexedDB
-remain editor persistence adapters during the experiment, but Yjs undo no longer owns
-the user-facing history.
+The document's `extensions.margin_note` payload stores current runs, inputs, formats,
+behaviours, and workspace revision in durable document versions. `EditorShell` owns a
+transient ProseMirror view only. It reports a transaction to Svelte before rendering,
+then receives Svelte's transformed input and format projection in that same editor
+transaction. It does not save, fork, export, or dispatch AI from editor-held text.
+
+`WorkspaceFacade.commit` durably saves the Svelte snapshot and then passes the
+acknowledged snapshot to a private Yjs/IndexedDB document driver. Yjs is a write-behind
+mirror and possible future collaboration implementation; it neither binds to
+ProseMirror nor supplies live application state. Provider transports likewise return
+untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal anchors,
+creates input IDs and targets, and decides whether a delayed result remains applicable.
 
 This remains a proof of concept rather than the completed model above. In particular,
 the active document is still a single ProseMirror text tree rather than stable,

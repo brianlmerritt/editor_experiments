@@ -5,13 +5,10 @@
   import { schema } from 'prosemirror-schema-basic';
   import { keymap } from 'prosemirror-keymap';
   import { baseKeymap } from 'prosemirror-commands';
-  import { ySyncPlugin, ySyncPluginKey, absolutePositionToRelativePosition, relativePositionToAbsolutePosition } from 'y-prosemirror';
-  import { IndexeddbPersistence } from 'y-indexeddb';
-  import * as Y from 'yjs';
   import type { Suggestion } from '$lib/domain';
   import type { FormatAttachment, TextChange } from '$lib/workspace/attachments';
   import type { EditorDocumentSnapshot, EditorTransactionDetail, EditorTransactionOrigin } from '$lib/workspace/transactions';
-  import { suggestionPlugin, pushSuggestionState, currentSuggestionRange } from './suggestion-plugin';
+  import { suggestionPlugin, suggestionPluginMeta, pushSuggestionState, currentSuggestionRange } from './suggestion-plugin';
   import { planDocumentDeletion } from './deletion';
 
   interface Props {
@@ -25,7 +22,7 @@
     paused?: boolean;
     onTextChange?: (detail: { text: string; characters: number; origin?: EditorTransactionOrigin }) => void;
     onEditorReady?: (snapshot: EditorDocumentSnapshot) => void;
-    onEditorTransaction?: (detail: EditorTransactionDetail) => void;
+    onEditorTransaction?: (detail: EditorTransactionDetail) => { suggestions: Suggestion[]; formats: FormatAttachment[] } | void;
     onUndoRequest?: () => void;
     onRedoRequest?: () => void;
     onSelectionChange?: (detail: { from: number; to: number; text: string }) => void;
@@ -43,13 +40,6 @@
 
   let mount = $state<HTMLDivElement | null>(null);
   let view = $state<EditorView | null>(null);
-  let ydoc: Y.Doc | null = null;
-  let persistence: IndexeddbPersistence | null = null;
-  let lastText = '';
-
-  function plainText(): string {
-    return view?.state.doc.textBetween(0, view.state.doc.content.size, '\n\n') ?? '';
-  }
 
   function notifySelection(): void {
     if (!view) return;
@@ -91,63 +81,62 @@
   }
 
   onMount(() => {
-    let destroyed = false;
-    void (async () => {
-      ydoc = new Y.Doc();
-      persistence = new IndexeddbPersistence(`margin-note:${branchId}`, ydoc);
-      await persistence.whenSynced;
-      if (destroyed || !ydoc) return;
-      const fragment = ydoc.getXmlFragment('prosemirror');
-      const initialDoc = schema.node('doc', null, initialContent.split(/\n\n/).map((paragraph) => schema.node('paragraph', null, paragraph ? schema.text(paragraph) : undefined)));
-      const state = EditorState.create({
-        schema,
-        doc: initialDoc,
-        plugins: [
-          ySyncPlugin(fragment),
-          suggestionPlugin({ onActivate: onSuggestionActivate, onHover: onSuggestionHover }),
-          keymap({
-            'Mod-z': () => {
-              onUndoRequest();
-              return true;
-            },
-            'Mod-Shift-z': () => { onRedoRequest(); return true; },
-            'Mod-y': () => { onRedoRequest(); return true; }
-          }),
-          keymap(baseKeymap)
-        ]
-      });
-      view = new EditorView(mount, {
-        state,
-        editable: () => !paused,
-        dispatchTransaction(transaction) {
-          if (!view) return;
-          const before = snapshot(view.state);
-          const origin = transactionOrigin(transaction);
-          const changes = transaction.docChanged ? transactionChanges(transaction) : [];
-          const next = view.state.apply(transaction);
-          view.updateState(next);
-          if (transaction.docChanged) {
-            const after = snapshot(next);
-            if (after.text !== before.text) {
-              const characters = Math.abs(after.text.length - before.text.length);
-              lastText = after.text;
-              onEditorTransaction({ before, after, changes, origin });
-              onTextChange({ text: after.text, characters, origin });
-            }
+    const initialDoc = schema.node('doc', null, initialContent.split(/\n\n/).map((paragraph) => schema.node('paragraph', null, paragraph ? schema.text(paragraph) : undefined)));
+    const state = EditorState.create({
+      schema,
+      doc: initialDoc,
+      plugins: [
+        suggestionPlugin({ onActivate: onSuggestionActivate, onHover: onSuggestionHover }),
+        keymap({
+          'Mod-z': () => {
+            onUndoRequest();
+            return true;
+          },
+          'Mod-Shift-z': () => { onRedoRequest(); return true; },
+          'Mod-y': () => { onRedoRequest(); return true; }
+        }),
+        keymap(baseKeymap)
+      ]
+    });
+    view = new EditorView(mount, {
+      state,
+      editable: () => !paused,
+      dispatchTransaction(transaction) {
+        if (!view) return;
+        const before = snapshot(view.state);
+        const origin = transactionOrigin(transaction);
+        const changes = transaction.docChanged ? transactionChanges(transaction) : [];
+        const provisional = view.state.apply(transaction);
+        if (transaction.docChanged) {
+          const after = snapshot(provisional);
+          if (after.text !== before.text) {
+            const projection = onEditorTransaction({ before, after, changes, origin });
+            if (projection) transaction.setMeta(suggestionPluginMeta, {
+              suggestions: projection.suggestions,
+              formats: projection.formats,
+              documentId: branchId,
+              activeId: activeSuggestionId,
+              preview
+            });
           }
-          if (transaction.docChanged || transaction.selectionSet) notifySelection();
         }
-      });
-      lastText = plainText();
-      onTextChange({ text: lastText, characters: lastText.length });
-      onEditorReady(snapshot(view.state));
-      pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
-    })();
+        const next = view.state.apply(transaction);
+        view.updateState(next);
+        if (transaction.docChanged) {
+          const after = snapshot(next);
+          if (after.text !== before.text) {
+            onTextChange({ text: after.text, characters: Math.abs(after.text.length - before.text.length), origin });
+          }
+        }
+        if (transaction.docChanged || transaction.selectionSet) notifySelection();
+      }
+    });
+    const initialSnapshot = snapshot(view.state);
+    onEditorReady(initialSnapshot);
+    onTextChange({ text: initialSnapshot.text, characters: initialSnapshot.text.length });
+    pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
     return () => {
-      destroyed = true;
       view?.destroy();
-      persistence?.destroy();
-      ydoc?.destroy();
     };
   });
 
@@ -161,8 +150,6 @@
     if (view) view.setProps({ editable: () => !paused });
   });
 
-  export function getText(): string { return plainText(); }
-  export function getSnapshot(): EditorDocumentSnapshot | null { return view ? snapshot(view.state) : null; }
   export function syncAttachments(nextSuggestions: Suggestion[], nextFormats: FormatAttachment[]): void {
     if (!view) return;
     pushSuggestionState(view, {
@@ -172,49 +159,6 @@
       activeId: activeSuggestionId,
       preview
     });
-  }
-  export function getTextBetween(from: number, to: number): string {
-    return view?.state.doc.textBetween(from, to, '\n') ?? '';
-  }
-  export function resolveSuggestionAnchor(suggestion: Suggestion): { from: number; to: number; text: string } | null {
-    if (!view) return null;
-    const range = currentSuggestionRange(view, suggestion);
-    return range ? { ...range, text: view.state.doc.textBetween(range.from, range.to, '\n') } : null;
-  }
-  export function getParagraphs(): { from: number; to: number; text: string }[] {
-    if (!view) return [];
-    const paragraphs: { from: number; to: number; text: string }[] = [];
-    view.state.doc.descendants((node, position) => {
-      if (node.isTextblock && node.textContent.trim()) paragraphs.push({ from: position + 1, to: position + node.nodeSize - 1, text: node.textContent });
-      return true;
-    });
-    return paragraphs;
-  }
-  export function getSelection(): { from: number; to: number; text: string } {
-    if (!view) return { from: 1, to: 1, text: '' };
-    const { from, to } = view.state.selection;
-    return { from, to, text: view.state.doc.textBetween(from, to, '\n') };
-  }
-  export function getRelativeAnchor(from: number, to: number): { start?: Record<string, unknown>; end?: Record<string, unknown> } {
-    if (!view) return {};
-    const sync = ySyncPluginKey.getState(view.state);
-    if (!sync?.binding) return {};
-    return {
-      start: Y.relativePositionToJSON(absolutePositionToRelativePosition(from, sync.type, sync.binding.mapping)),
-      end: Y.relativePositionToJSON(absolutePositionToRelativePosition(to, sync.type, sync.binding.mapping))
-    };
-  }
-  export function resolveRelativeAnchor(
-    start?: Record<string, unknown>,
-    end?: Record<string, unknown>
-  ): { from: number; to: number; text: string } | null {
-    if (!view || !start || !end) return null;
-    const sync = ySyncPluginKey.getState(view.state);
-    if (!sync?.binding) return null;
-    const from = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(start), sync.binding.mapping);
-    const to = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(end), sync.binding.mapping);
-    if (from == null || to == null || from < 0 || to < from || to > view.state.doc.content.size) return null;
-    return { from, to, text: view.state.doc.textBetween(from, to, '\n') };
   }
   export function acceptSuggestion(suggestion: Suggestion, text: string): { ok: boolean; reason?: string; from?: number; to?: number } {
     if (!view) return { ok: false, reason: 'Editor is not ready' };
@@ -281,16 +225,6 @@
     const safeTo = Math.max(safeFrom, Math.min(to, max));
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, safeFrom, safeTo)).scrollIntoView());
     view.focus();
-  }
-  export async function forkTo(targetBranchId: string): Promise<void> {
-    if (!ydoc) throw new Error('Editor is not ready');
-    const copy = new Y.Doc();
-    const target = new IndexeddbPersistence(`margin-note:${targetBranchId}`, copy);
-    await target.whenSynced;
-    Y.applyUpdate(copy, Y.encodeStateAsUpdate(ydoc), { kind: 'branch-fork', source: branchId });
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    target.destroy();
-    copy.destroy();
   }
 </script>
 

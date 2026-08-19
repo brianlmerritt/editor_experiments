@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Branch, LedgerEvent, TaskPrompt, WritingBrief } from '$lib/domain';
 import type { PersistentWorkspace } from '$lib/workspace/model';
+import type { DocumentDriver, WorkspaceCommit } from '$lib/workspace/document-driver';
 import { WorkspaceFacade, type FetchLike } from './facade';
 
 const brief: WritingBrief = {
@@ -56,15 +57,66 @@ describe('WorkspaceFacade', () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
+  it('hydrates a document driver behind the facade without exposing it to Svelte state', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input) => {
+      const path = String(input);
+      if (path === '/api/workspace') return json(persistent);
+      if (path === '/api/settings') return json({ brief, prompts, sourceAvailability });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25 } });
+      return json({ error: 'unexpected path' }, 404);
+    });
+    const driver: DocumentDriver = { hydrate: vi.fn(async () => {}), commit: vi.fn(async () => {}) };
+
+    await new WorkspaceFacade(fetcher, driver).load();
+
+    expect(driver.hydrate).toHaveBeenCalledWith({
+      documentId: 'main',
+      content: persistent.documents[0].content,
+      extensions: {},
+      workspaceRevision: 1,
+      durableRevision: 1
+    });
+  });
+
+  it('persists Svelte commits before mirroring them through the document driver', async () => {
+    const order: string[] = [];
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      expect(String(input)).toBe('/api/workspace');
+      order.push('durable');
+      const body = JSON.parse(String(init?.body));
+      return json({ document: { ...persistent.documents[0], ...body.input, revision: 2, updatedAt: '2026-08-18T00:00:01Z' } });
+    });
+    const driver: DocumentDriver = {
+      hydrate: vi.fn(async () => {}),
+      commit: vi.fn(async () => { order.push('mirror'); })
+    };
+    const transaction: WorkspaceCommit = {
+      transactionId: 'commit-1',
+      documentId: 'main',
+      content: 'Svelte owns this text.',
+      extensions: { margin_note: { revision: 4 } },
+      workspaceRevision: 4,
+      durableRevision: 1,
+      sessionId: 'session',
+      reason: 'Edit text'
+    };
+
+    const receipt = await new WorkspaceFacade(fetcher, driver).commit(transaction);
+
+    expect(order).toEqual(['durable', 'mirror']);
+    expect(driver.commit).toHaveBeenCalledWith({ ...transaction, durableRevision: 2 });
+    expect(receipt).toMatchObject({ transactionId: 'commit-1', documentId: 'main', durableRevision: 2 });
+  });
+
   it('passes abort signals through suggestion requests', async () => {
     const fetcher = vi.fn<FetchLike>(async (_input, init) => {
       expect(init?.signal).toBe(controller.signal);
-      return json({ suggestions: [], errors: [] });
+      return json({ proposals: [], errors: [] });
     });
     const controller = new AbortController();
     const facade = new WorkspaceFacade(fetcher);
 
-    const result = await facade.suggestions({
+    const result = await facade.requestInputs({
       text: 'Text',
       from: 1,
       to: 5,
@@ -76,7 +128,7 @@ describe('WorkspaceFacade', () => {
       mode: 'drafting'
     }, controller.signal);
 
-    expect(result).toEqual({ suggestions: [], errors: [] });
+    expect(result).toEqual({ proposals: [], errors: [] });
   });
 
   it('sends OpenRouter credentials only to the provider settings endpoint', async () => {

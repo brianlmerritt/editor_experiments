@@ -1,10 +1,10 @@
 # Margin Note
 
-Margin Note is a meta-first creative writing support POC. The current implementation
-uses local Yjs persistence, immutable SQLite document versions, ProseMirror suggestion
-decorations, and a SQLite event ledger. These are current implementation choices, not
-the application source of truth: the intended architecture makes the Svelte workspace
-state authoritative and keeps persistence and collaboration behind a façade.
+Margin Note is a meta-first creative writing support POC. Svelte 5 Rune workspace
+state is the live application source of truth. ProseMirror renders and reports editor
+transactions; immutable SQLite document versions provide durable storage; Yjs and
+IndexedDB form a write-behind document mirror behind the facade; and SQLite records
+the event ledger. None of those adapters independently owns live manuscript state.
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
@@ -42,10 +42,25 @@ The implemented architecture slice provides:
 - one continuous writing-and-editing surface rather than separate drafting/reviewing
   modes; Pause, source visibility, filters, density, and the input surface control
   interruption instead;
-- Svelte-owned live input, format, behaviour, revision, and undo/redo state;
+- Svelte-owned canonical document, transaction, run, input, format, behaviour,
+  revision, and undo/redo state;
 - a dedicated Svelte 5 Rune settings state for provider availability, masked
   credentials, model selection, validation, dialog state, and saving state;
 - a shared content-target transformer for inputs and formats;
+- delayed AI targets transformed through intervening edits, with changed passages
+  discarded and exact provider source text verified before adoption;
+- rejection of mid-word or whitespace-padded AI anchors and conservative semantic
+  consolidation of paraphrased same-source annotations at the same locus;
+- provider responses treated as proposals from which Svelte creates authoritative
+  input IDs, targets, lifecycle, and provenance;
+- diagnosis-only margin notes can select their current live target and immediately
+  dispatch a contextual multi-option revision request; the same toolbar can request
+  more options or accept one-shot custom writer instructions without introducing a
+  separate chat history;
+- common malformed AI JSON repaired locally before validation, followed by one
+  corrective provider retry when output remains unusable; every malformed reply is
+  retained in run diagnostics and logged to the browser console with its recovery
+  outcome, while exhausted output failures do not produce a transient popup;
 - atomic acceptance and undo/redo of prose plus input lifecycle state;
 - explicit `target_changed` and `target_removed` input states with recorded events;
 - selection- and whole-work strikethrough through the same attachment path;
@@ -84,13 +99,16 @@ OpenRouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Ollama uses
 
 ## Persistence
 
-- Live draft branches: browser IndexedDB keys named `margin-note:<document-id>`.
+- Browser recovery/collaboration mirror: Yjs in IndexedDB keys named
+  `margin-note:document:<document-id>`, written only through the facade document
+  driver after Svelte commits.
 - Projects, durable documents, immutable document/context versions, and the event
   ledger: `data/writing-ledger.sqlite` by default.
-- Existing browser-only drafts are adopted into the durable document on first load.
 - Inputs, formats, behaviour profiles, and workspace revision are stored under the
   document's `extensions.margin_note` payload and included in immutable document
-  versions. Older documents fall back to ledger reconstruction until their next save.
+  versions. Craft run records are stored there as well.
+- On load, the durable document hydrates Svelte and the facade's downstream mirror;
+  the browser mirror does not replace live Svelte state.
 - Immediate undo/redo is intentionally session-local in this POC; durable document
   versions remain the recovery history across reloads.
 - Change the ledger location with `LEDGER_PATH`.

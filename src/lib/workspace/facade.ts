@@ -1,10 +1,11 @@
 import type {
   Branch,
   GenerationRequest,
+  InputError,
+  InputProposal,
   JudgmentPair,
   LedgerEvent,
   SourceAvailability,
-  Suggestion,
   TaskPrompt,
   WritingBrief
 } from '$lib/domain';
@@ -18,6 +19,7 @@ import type {
   WorkspaceDocument,
   WorkspaceProject
 } from '$lib/workspace/model';
+import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from '$lib/workspace/document-driver';
 
 export interface LedgerStats {
   events: number;
@@ -36,9 +38,9 @@ export interface WorkspaceBootstrap {
   sourceAvailability: Record<string, SourceAvailability>;
 }
 
-export interface SuggestionResult {
-  suggestions: Suggestion[];
-  errors: { source: string; message: string }[];
+export interface InputProposalBatch {
+  proposals: InputProposal[];
+  errors: InputError[];
 }
 
 export interface MarkdownExport {
@@ -55,6 +57,13 @@ export interface JudgmentRecord {
   sessionId: string;
   branchId: string;
   presentationOrder: string[];
+}
+
+export interface CommitReceipt {
+  transactionId: string;
+  documentId: string;
+  durableRevision: number;
+  updatedAt: string;
 }
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -98,7 +107,10 @@ function exportFilename(response: Response): string {
  * A different transport can be supplied in tests or when persistence changes.
  */
 export class WorkspaceFacade {
-  constructor(private readonly fetcher: FetchLike = fetch) {}
+  constructor(
+    private readonly fetcher: FetchLike = fetch,
+    private readonly documentDriver: DocumentDriver = defaultDocumentDriver()
+  ) {}
 
   async load(preferred?: { projectId?: string; documentId?: string }): Promise<WorkspaceBootstrap> {
     const persistent = await this.get<PersistentWorkspace>('/api/workspace');
@@ -111,7 +123,7 @@ export class WorkspaceFacade {
       this.get<{ brief: WritingBrief; prompts: TaskPrompt[]; sourceAvailability?: Record<string, SourceAvailability> }>('/api/settings'),
       this.get<{ events: Required<LedgerEvent>[]; stats: LedgerStats }>(`/api/events?history=suggestions&branch=${encodeURIComponent(activeDocument.id)}`)
     ]);
-    return {
+    const bootstrap: WorkspaceBootstrap = {
       brief: settings.brief,
       prompts: settings.prompts,
       branches: projectDocuments.map((document) => ({
@@ -132,6 +144,34 @@ export class WorkspaceFacade {
         openrouter: { available: false, reason: 'OpenRouter availability was not reported.' },
         ollama: { available: false, reason: 'Ollama availability was not reported.' }
       }
+    };
+    const extension = activeDocument.extensions.margin_note;
+    const workspaceRevision = extension && typeof extension === 'object' && !Array.isArray(extension)
+      && typeof extension.revision === 'number' ? extension.revision : activeDocument.revision;
+    await this.documentDriver.hydrate({
+      documentId: activeDocument.id,
+      content: activeDocument.content,
+      extensions: activeDocument.extensions,
+      workspaceRevision,
+      durableRevision: activeDocument.revision
+    });
+    return bootstrap;
+  }
+
+  async commit(transaction: WorkspaceCommit): Promise<CommitReceipt> {
+    const document = await this.saveDocument({
+      id: transaction.documentId,
+      content: transaction.content,
+      extensions: transaction.extensions,
+      createdBy: transaction.sessionId,
+      reason: transaction.reason
+    });
+    await this.documentDriver.commit({ ...transaction, durableRevision: document.revision });
+    return {
+      transactionId: transaction.transactionId,
+      documentId: document.id,
+      durableRevision: document.revision,
+      updatedAt: document.updatedAt
     };
   }
 
@@ -220,7 +260,7 @@ export class WorkspaceFacade {
     return this.get(`/api/events?history=suggestions&branch=${encodeURIComponent(branchId)}`);
   }
 
-  suggestions(request: GenerationRequest, signal?: AbortSignal): Promise<SuggestionResult> {
+  requestInputs(request: GenerationRequest, signal?: AbortSignal): Promise<InputProposalBatch> {
     return this.post('/api/suggest', request, signal);
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categories, categoryMeta, coalesceDuplicateSuggestions, eventTypes, makeId, reconcileSuggestionAnchors, sourceCatalog, suggestionFingerprint, wordCount, type Suggestion } from './domain';
+import { categories, categoryMeta, coalesceDuplicateSuggestions, eventTypes, isExactTextSpan, makeId, sourceCatalog, suggestionFingerprint, suggestionsDescribeSameIssue, wordCount, type Suggestion } from './domain';
 import { textTarget } from '$lib/workspace/attachments';
 
 function suggestion(overrides: Partial<Suggestion> = {}): Suggestion {
@@ -65,31 +65,62 @@ describe('domain contracts', () => {
     expect(result.suppressed[0].canonical.id).toBe('sg_rejected');
   });
 
-  it('recognizes a repeated note after preceding edits move its live anchor', () => {
-    const anchored = suggestion({ anchor: { from: 20, to: 27, text: 'noticed', start: { item: 'start' }, end: { item: 'end' } } });
-    const repeated = suggestion({ id: 'sg_shifted', anchor: { from: 8, to: 15, text: 'noticed' } });
+  it('recognizes exact source spans only at stable text boundaries', () => {
+    const passage = 'Mara watched the porter turn the key.';
+    expect(isExactTextSpan(passage, 17, 23, 'porter')).toBe(true);
+    expect(isExactTextSpan(passage, 18, 23, 'orter')).toBe(false);
+    expect(isExactTextSpan(passage, 17, 22, 'porte')).toBe(false);
+    expect(isExactTextSpan(passage, 16, 23, ' porter')).toBe(false);
+  });
 
-    expect(suggestionFingerprint(anchored)).not.toBe(suggestionFingerprint(repeated));
-    const rebased = reconcileSuggestionAnchors([anchored], () => ({ from: 8, to: 15, text: 'noticed' }));
-    const result = coalesceDuplicateSuggestions([...rebased.suggestions, repeated]);
+  it('coalesces paraphrased AI annotations about the same issue and locus', () => {
+    const first = suggestion({
+      id: 'input-first',
+      source: 'openrouter',
+      sourceKind: 'ai',
+      anchor: { from: 20, to: 36, text: 'The porter stood' },
+      payload: { comment: 'Establishing shot from an external perspective. Confirm this is Mara’s POV; the porter reads as objective narration.' }
+    });
+    const repeated = suggestion({
+      id: 'input-repeated',
+      source: 'openrouter',
+      sourceKind: 'ai',
+      anchor: { from: 20, to: 37, text: 'The porter stood.' },
+      payload: { comment: 'Opening establishes external observation before a POV anchor. Ground the porter in Mara’s perception to tighten close third.' }
+    });
 
+    expect(suggestionsDescribeSameIssue(first, repeated)).toBe(true);
+    const result = coalesceDuplicateSuggestions([first, repeated]);
     expect(result.suggestions.map((item) => item.state)).toEqual(['pending', 'superseded']);
+    expect(result.suppressed[0]).toMatchObject({ reason: 'semantic', duplicate: { id: 'input-repeated' }, canonical: { id: 'input-first' } });
   });
 
-  it('expires a live note as soon as a human edit changes its anchored text', () => {
-    const current = suggestion();
-    const result = reconcileSuggestionAnchors([current], () => ({ from: 4, to: 12, text: 'rewritten' }));
+  it('keeps differently located or oppositely valenced AI observations separate', () => {
+    const critical = suggestion({
+      source: 'openrouter',
+      sourceKind: 'ai',
+      anchor: { from: 20, to: 36, text: 'The porter stood' },
+      payload: { comment: 'External objective perspective creates distance and risks narrator intrusion around Mara’s POV.' }
+    });
+    const praise = suggestion({
+      id: 'input-praise',
+      source: 'openrouter',
+      sourceKind: 'ai',
+      anchor: { from: 20, to: 36, text: 'The porter stood' },
+      payload: { comment: 'Strong external perspective works well and maintains Mara’s POV with effective narrative distance.' }
+    });
+    const elsewhere = suggestion({
+      id: 'input-elsewhere',
+      source: 'openrouter',
+      sourceKind: 'ai',
+      anchor: { from: 80, to: 96, text: 'The porter stood' },
+      payload: { comment: critical.payload.comment }
+    });
 
-    expect(result.suggestions[0].state).toBe('stale');
-    expect(result.expired).toEqual([current]);
+    expect(suggestionsDescribeSameIssue(critical, praise)).toBe(false);
+    expect(suggestionsDescribeSameIssue(critical, elsewhere)).toBe(false);
+    expect(coalesceDuplicateSuggestions([critical, praise, elsewhere]).suggestions.map((item) => item.state))
+      .toEqual(['pending', 'pending', 'pending']);
   });
 
-  it('rebases a live note without expiring it when only preceding text changed', () => {
-    const current = suggestion();
-    const result = reconcileSuggestionAnchors([current], () => ({ from: 14, to: 21, text: 'noticed' }));
-
-    expect(result.suggestions[0].state).toBe('pending');
-    expect(result.suggestions[0].anchor).toMatchObject({ from: 14, to: 21, text: 'noticed' });
-    expect(result.expired).toEqual([]);
-  });
 });
