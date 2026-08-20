@@ -1,11 +1,15 @@
 # Craft revision QA
 
-Updated: 18 August 2026
+Updated: 20 August 2026
 
 This records observed POC behaviour and regression evidence. It is not the source of
 architectural decisions. The authoritative target model is
 [ARCHITECTURE.md](./ARCHITECTURE.md), and persistence responsibilities are specified in
 [FACADE_V1.md](./FACADE_V1.md).
+
+The current screen and the workflows below are regression evidence, not the target
+workspace layout. The next Navigator proof of concept is specified in
+[NAVIGATION.md](./NAVIGATION.md).
 
 ## Workflows exercised
 
@@ -175,6 +179,38 @@ architectural decisions. The authoritative target model is
   needs grouping, pagination/virtualisation, bulk actions, and an explicit archival
   policy before production use.
 - Drag-to-dismiss and its five-second undo toast were not exercised in this pass; ordinary reject was verified.
+
+## Next structural and UX proof of concept
+
+The craft editor must remain working while the next slice replaces the accumulated
+POC chrome with a graph-backed Navigator, central split workspace, and contained
+Inputs/review panel. The next slice still needs regression evidence for:
+
+- a protected but editable Spine present in every work;
+- a fixed Todos Navigator element backed by canonical, targetable Todo records;
+- project-configurable Collection creation rather than hard-coded chapter/scene types;
+- content-bearing parent nodes with ordered structural children;
+- one structural Navigator projection plus switchable relationship aliases;
+- stable Traditional view and selection-aware Context view with independent
+  expansion, scroll, selection, and recent-context memory;
+- structural and related Nodes opened centrally, with horizontal and vertical split
+  views, focused-pane Navigator context, and per-pane navigation memory;
+- stable node identity when the same character appears in primary and aliased views;
+- active-fork filtering and a Svelte-held pane/fork view context;
+- graph, move, relationship, Spine, and Todo mutations in the same undo and persistence
+  path as prose;
+- no regression to Svelte-owned manuscript, target transformation, async run
+  validation, formatting, input lifecycle, or undo/redo.
+
+Recipes, fixed AI buttons, lints, chats, Input-card dismissal, AI coordination, and
+split-fork interaction remain explicitly unresolved in
+[NAVIGATION.md](./NAVIGATION.md). Integrated AI review design is postponed until the
+Spine, canonical Todos, Collection store, graph, and Navigator have been proved.
+Present POC behaviour must not silently become the permanent UX contract.
+
+The Navigator POC begins with no static/generated manuscript, Collection, Node, Input,
+or card content. Existing editor behaviours remain regression targets, but tests must
+construct explicit fixtures rather than depend on visible seed data.
 
 ## Remaining target and undo regression coverage
 

@@ -4,6 +4,9 @@ This document specifies the intended v1 boundary between the authoritative Svelt
 workspace state and persistence, collaboration, service, import, and export
 implementations. The domain model and transaction semantics are defined in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
+The forthcoming graph-backed Navigator and fork-view requirements are recorded in
+[NAVIGATION.md](./NAVIGATION.md); they extend the snapshot content without changing
+this authority boundary.
 
 ## Purpose
 
@@ -58,8 +61,9 @@ must not.
 
 ### `load`
 
-Returns one active work as a domain snapshot: nodes, formats, inputs, behaviour
-profiles, revision metadata, and durable history required to resume safely.
+Returns one active work as a domain snapshot: protected Spine identity and content,
+canonical Todos, Collection definitions, Nodes, typed edges, forks, formats, Inputs,
+behaviour profiles, revision metadata, and durable history required to resume safely.
 
 Loading may combine browser recovery, a server checkpoint, and later transactions.
 That reconciliation occurs behind the façade. The result contains domain types, not
@@ -74,6 +78,11 @@ exposes dirty/error state.
 The transaction ID makes commit idempotent. Retrying must not apply the same semantic
 change twice. A receipt acknowledges durable revision information; it does not return
 a replacement document model.
+
+Structural moves, relationship changes, Collection-definition changes, Spine edits, Todo
+lifecycle changes, fork creation, and durable Input-card lifecycle changes use the
+same commit boundary as prose and formatting. A Navigator component must not persist
+these through its own storage path.
 
 ### `checkpoint`
 
@@ -108,8 +117,9 @@ interface InputService {
 }
 ```
 
-An AI provider never writes to the manuscript directly. Accepting a proposed revision
-creates an ordinary workspace transaction with provenance linking it to the input.
+An AI provider never writes to the manuscript, Spine, Todos, Collections, or relationships
+directly. Accepting a proposed revision or adopting a proposed Todo/change creates an
+ordinary workspace transaction with provenance linking it to the Input.
 
 Keeping this service logically separate prevents generation concerns from expanding
 the persistence contract. The existing `WorkspaceFacade` class may continue to host
@@ -163,6 +173,21 @@ quotation and revision evidence are preserved for recovery and explanation.
 Indexes such as inputs by node, state, kind, source, or assignee may be stored for
 performance. They are disposable. On disagreement, the canonical Svelte snapshot's
 input and target records win, and indexes are rebuilt.
+
+Traditional Navigator trees, selection-aware Context projections, relationship
+facets, Todo views, other smart views, backlinks, applicable-context lists, and fork
+summaries are also derived projections. A facade
+implementation may persist indexes or user presentation preferences, but it must be
+possible to rebuild the projections from canonical Spine, Todo, Collection, Node,
+edge, fork, Input, and transaction data.
+
+Split panes do not load independent works. Each horizontal or vertical pane carries a
+Svelte-owned view context over the one loaded work and a selected fork/Node, plus the
+Navigator and location memory needed to restore that working context. The focused
+pane controls the current Navigator and Inputs/review projection; the facade persists
+domain changes and selected preferences—including Traditional/Context mode and
+independent expansion, scroll, selection, and recent-context memory—not a second
+pane-specific manuscript authority.
 
 ## Implemented POC boundary
 

@@ -8,6 +8,16 @@ the event ledger. None of those adapters independently owns live manuscript stat
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
+The next major proof of concept—a graph-backed Navigator with a protected, editable
+**Spine**, fixed canonical **Todos**, configurable **Collections**, and fork-aware
+terminal-style split views—is specified in [NAVIGATION.md](./NAVIGATION.md). AI and
+reviewing remain in the right-side Inputs system rather than becoming Navigator
+structure. The Navigator switches between a stable **Traditional** hierarchy and a
+remembered, selection-aware **Context** projection without mutating the project graph.
+
+The current screen is retained as evidence for the change-aware editor slice. Its
+accumulated top bars, source cards, fixed AI actions, Margin/Tray controls, and
+developer tools are not the target Navigator UX.
 
 ## Run it
 
@@ -28,8 +38,8 @@ For a quick tour:
    `X` for keyboard review.
 3. Open **Ledger** to verify the instrumentation.
 4. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
-5. Open **Context** to edit the carried-forward narrative rules or add freely named
-   project- and document-scoped knowledge buckets.
+5. Open **Context** to exercise the historical POC context path. It is not the target
+   Spine/Collection interface.
 6. Open **Inputs** to search, filter, locate, reopen, or dismiss current and historical
    human/AI/system material.
 7. Select text or use **Strike work** to exercise attachment-backed formatting, then
@@ -71,6 +81,14 @@ It does not yet provide stable user-defined chapter/scene nodes, rich format/sty
 precedence, durable session history, collaboration reconciliation, typed dependency
 cascades, or a third-party plugin runtime. See [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md)
 for verified workflows and the concrete remaining cases.
+
+It also does not yet implement the Navigator described in
+[NAVIGATION.md](./NAVIGATION.md): the Spine, canonical Todos, Collection creation,
+typed Node relationships, content-bearing containers, Traditional/Context projections,
+or split-pane focus/memory rules remain the next design and
+implementation slice. Integrated AI review design is deliberately postponed until
+that structure is proved. The new visible workspace starts without the current static
+demonstration content; automated tests create explicit fixtures.
 
 All application reactivity must follow [SVELTE_POLICY.md](./SVELTE_POLICY.md): Svelte
 5 Runes, `$props`, snippets, and current event attributes, with a regression test that

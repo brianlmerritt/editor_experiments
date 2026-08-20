@@ -5,6 +5,9 @@ Svelte-source-of-truth slice described below is implemented; explicitly deferred
 parts remain design targets rather than claims of completion. Where the original POC
 plan conflicts with this document, this document wins.
 
+The next graph-backed workspace and UX slice is specified in
+[NAVIGATION.md](./NAVIGATION.md). It is a design target, not implemented behaviour.
+
 Margin Note remains an experiment. The architecture should keep the next experiment
 cheap while protecting the things a writer must be able to trust: the current work,
 its formatting, its inputs, and undo/redo.
@@ -18,8 +21,8 @@ its formatting, its inputs, and undo/redo.
 4. The façade hydrates, persists, synchronises, and exports workspace state. It is not
    the source of truth. Its v1 boundary is specified in
    [FACADE_V1.md](./FACADE_V1.md).
-5. Formats and inputs use the same content-target system. They have different payloads
-   and lifecycle behaviours, not different anchoring technologies.
+5. Formats, inputs, and Todos use the same content-target vocabulary. They have
+   different payloads and lifecycle behaviours, not different anchoring technologies.
 6. Every accepted mutation is an atomic transaction. Undo/redo reverses or reapplies
    the complete transaction, including text, formatting, input state, targets, and
    selection.
@@ -29,6 +32,21 @@ its formatting, its inputs, and undo/redo.
 8. Writing, reviewing, and revising are one continuous workflow. Interruption is
    controlled with Pause, input visibility, source state, filters, and density—not a
    global drafting/reviewing mode that hides part of the workspace.
+9. The **Navigator** is a derived structural and relationship projection over the
+   Svelte workspace. It is not the domain model and does not own copied node data.
+10. Collections are project-configurable categories and generated Navigator headings;
+    Nodes are their stable, potentially content-bearing members. `chapter`, `scene`,
+    `character`, and `location` are examples, not compulsory built-in hierarchy.
+11. Every work has a protected, editable, versioned, fork-aware **Spine** establishing
+    its scope, direction, narrative contract, and central knowledge.
+12. Every work has a fixed **Todos** Navigator element backed by canonical Todo
+    records. AI may propose a Todo through an Input but does not own the Todo.
+13. One work may be viewed through multiple panes and forks. The focused pane selects
+    the Navigator and Inputs/review projection; it does not create another source of
+    truth.
+14. The Navigator has remembered **Traditional** and **Context** projections.
+    Traditional view is structurally stable; Context view responds to the focused
+    pane and selection without mutating canonical Nodes or relationships.
 
 ## Authority and boundaries
 
@@ -62,12 +80,16 @@ selection handles, open panels, and filters may live separately.
 
 The domain needs a small set of primitives:
 
-1. **Content node** — a stable structural unit.
-2. **Content target** — a text selection, node, node range, or union of those.
-3. **Format** — presentation attached to content targets.
-4. **Input** — human, AI, or system material attached or applicable to content.
-5. **Behaviour** — stored rules for transforming an attachment when content changes.
-6. **Transaction** — one reversible semantic change.
+1. **Collection definition** — a project-configurable category and its Node capabilities.
+2. **Content node** — a stable, potentially content-bearing project item.
+3. **Workspace edge** — typed containment, scope, reference, or lineage relationship.
+4. **Fork** — one active lineage/projection of the work graph.
+5. **Content target** — a text selection, node, node range, or union of those.
+6. **Format** — presentation attached to content targets.
+7. **Todo** — canonical, prioritised project work attached or applicable to content.
+8. **Input** — human, AI, local-check, or system review material and proposals.
+9. **Behaviour** — stored rules for transforming an attachment when content changes.
+10. **Transaction** — one reversible semantic change.
 
 Conceptually:
 
@@ -75,8 +97,14 @@ Conceptually:
 interface WorkspaceState {
   work: WorkIdentity;
   revision: number;
+  spineNodeId: NodeId;
+  collectionDefinitions: Record<CollectionId, CollectionDefinition>;
   nodes: Record<NodeId, ContentNode>;
+  edges: Record<EdgeId, WorkspaceEdge>;
+  forks: Record<ForkId, WorkFork>;
+  activeForkId: ForkId;
   formats: Record<FormatId, FormatAttachment>;
+  todos: Record<TodoId, TodoRecord>;
   inputs: Record<InputId, InputRecord>;
   behaviours: Record<BehaviourId, AttachmentBehaviour>;
   undo: HistoryEntry[];
@@ -89,36 +117,107 @@ This is one coordinated writable aggregate. Read-only derived views and indexes 
 expose the current scene, visible inputs, effective formatting, or stale reviews, but
 they are disposable and must not become competing sources of truth.
 
-## Adaptable work structure
+## Adaptable work structure and graph
 
-Each content node has a stable ID, a freely named type, an optional parent, ordered
-children, revision counters, and JSON-compatible extension data:
+Each content Node has a stable ID, a project-defined Collection, optional content,
+revision counters, and JSON-compatible extension data. Having content and containing
+children are independent capabilities:
 
 ```ts
 interface ContentNode {
   id: NodeId;
-  type: string;
-  parentId: NodeId | null;
-  childIds: NodeId[];
-  text?: string;
+  collectionId: CollectionId;
+  title: string;
+  content?: NodeContent;
   contentRevision: number;
   formatRevision: number;
+  extensions: Record<string, JsonValue>;
+}
+
+interface WorkspaceEdge {
+  id: EdgeId;
+  type: string;
+  fromNodeId: NodeId;
+  toNodeId: NodeId;
+  order?: number;
+  scope?: TargetSet;
   extensions: Record<string, JsonValue>;
 }
 ```
 
 `chapter`, `scene`, `section`, `paragraph`, `character`, `research`, and
-`narrative_rules` are optional types or roles, not a compulsory hierarchy. Renaming,
-moving, or reordering a node does not change its identity. The core preserves extension
-data it does not understand.
+`narrative_rules` are optional Collection definitions or roles, not a compulsory
+hierarchy. Renaming, moving, or reordering a node does not change its identity. The
+core preserves extension data it does not understand.
 
-The Codex remains adaptable: freely named records and buckets can be added without
-changing the content model. A specialised add-on is justified only after a real
-workflow needs behaviour beyond an ordinary scoped input.
+Each ordinary Node has at most one primary structural parent. This containment is
+acyclic and ordered. Typed cross-links, scopes, aliases, and derivation relations may
+be many-to-many and circular. Removing an alias never deletes its target. Deleting a
+parent with children requires an explicit delete-descendants, rehome, or cancel
+decision. Relationship cardinality, inverse relations, lifecycle ownership, deletion,
+and ordering policy belong to Collection/relation definitions and the domain
+reducer—not individual components. A domain graph does not imply a graph database.
+
+A Collection heading is a generated Navigator projection, not a content-bearing Node.
+An overview that needs content is represented by a Node or the Spine. Nodes from one
+Collection may appear beneath a Node from another Collection through primary
+containment without requiring another visible Collection heading.
+
+The Navigator renders the fixed Spine and Todos elements, one structural projection,
+and optional relationship facets.
+An alias under a scene points to the same character or location node that appears in
+its primary collection. Additional smart views are queries and indexes, not copied
+content. Detailed interaction and the unresolved Collection-creation rules are
+recorded in [NAVIGATION.md](./NAVIGATION.md).
+
+The Spine remains adaptable: freely named records and Collections can be added
+without changing the core content model. Its protected root identity exists in every
+work, while its data remains editable, versioned, and fork-aware. A specialised
+add-on is justified only after a real workflow needs behaviour beyond a node,
+relation, Collection field, Todo, or ordinary scoped Input.
+
+## Navigator, panes, and forks
+
+Navigator mode, per-view expansion, scroll, selection, recent-context memory, focused
+pane, Input-card collapse, and panel width are Svelte-owned UI state or persisted user
+preference. They never replace the canonical Spine, Todos, Nodes, edges, forks,
+Inputs, or formats they project.
+
+The content workspace is a terminal-style tree of horizontal and vertical splits.
+Each pane carries a view context containing a work, fork, Node, view kind, Navigator
+memory, selection, and location history. The focused pane determines which fork and
+Node the Navigator and Inputs/review panel show. Focusing another pane restores that
+pane's remembered Traditional/Context mode and the independent expansion, scroll,
+selection, and recent-context state for each view. Multiple ProseMirror instances
+may render different Nodes or forks, but all accepted changes enter the same workspace
+command and transaction path. Exact pointer, touch, keyboard, and split gestures are
+deferred until the basic pane manager can be tested.
+
+Traditional view derives the stable hierarchy from primary containment. Context view
+derives an explainable neighbourhood from the focused pane and selection: ancestors,
+children, configured direct relationships, applicable Spine material, and confirmed
+Todos. Context relevance never creates or reorders canonical graph records, and
+unconfirmed AI relationships remain Inputs. Context changes respond to meaningful
+targets rather than every caret movement, preserve editor focus and Navigator scroll,
+and key remembered state by stable identities rather than current display positions.
+
+Selecting a collapsed content-bearing container expands it and opens that container's
+own content in the focused pane. More elaborate combined-descendant views are deferred.
+
+A content fork may vary one node; a work fork may vary Spine decisions and their
+downstream graph. The active fork filters applicable nodes, relations, Spine state,
+impacts, and Todos. Superseded material remains in lineage/history rather
+than appearing throughout the active Navigator. Fork representation, comparison, and
+cross-fork adoption remain design work in [NAVIGATION.md](./NAVIGATION.md).
+
+A logical Node retains its identity across forks. Unchanged Node and relationship
+state may be inherited; editing creates fork-specific state. Spine content, Todos,
+Collections, relationships, and manuscript content are fork-aware, and every pane
+carries the `forkId` used to resolve its projection.
 
 ## Content targets
 
-Formats and inputs share this addressing vocabulary:
+Formats, Todos, and Inputs share this addressing vocabulary:
 
 ```ts
 type ContentTarget =
@@ -168,11 +267,51 @@ format spans may shrink, split, merge, or disappear. Normalisation may combine
 adjacent spans with identical effective properties. The inverse transaction retains
 the deleted text and its formats so undo can restore them exactly.
 
+## Todos
+
+**Todo** is the canonical representation of accepted work to perform. Every project
+has a fixed Todos Navigator element even when it contains no records. A Todo may be
+created directly by the writer, derived from an accepted impact, imported, or adopted
+from an Input proposal:
+
+```ts
+interface TodoRecord {
+  id: TodoId;
+  title: string;
+  detail?: JsonValue;
+  targets: TargetSet;
+  state: string;
+  priority: number;
+  forkId: ForkId;
+  parentTodoId?: TodoId;
+  origin: TodoOrigin;
+  originInputId?: InputId;
+  events: TodoEvent[];
+  createdAtRevision: number;
+  updatedAtRevision: number;
+}
+```
+
+This is illustrative rather than a frozen contract. Todos may relate to the Spine,
+multiple containers or Nodes, manuscript selections, decisions, impacts, and forks.
+Prioritised and target-filtered Todo lists are derived views over the canonical
+records. `parentTodoId` preserves a path to nested subtasks, although nested Todo UI is
+not part of day one.
+
+An AI or local check can propose a Todo only as an Input. The Todo enters authoritative
+project state through an explicit adoption transaction and retains provenance to the
+originating Input. Resolving, deferring, reprioritising, moving, or deleting a Todo is
+a normal reversible domain transaction. AI-created tasks are not part of the initial
+Navigator scope, but origin/provenance is general enough to introduce them deliberately
+later without changing Todo identity.
+
 ## Inputs
 
 **Input** is the user-facing term for material brought to bear on the work. It includes
-human comments, AI findings, rewrite suggestions, todos, questions, instructions,
-decisions, character states, continuity facts, research, and foreshadowing.
+human comments, AI or local-check findings, rewrite suggestions, questions,
+conversations, and proposed changes to prose, the Spine, Todos, Collections, or
+relationships. Canonical Todos, accepted decisions, and authoritative Spine/Collection
+records are not Inputs.
 
 ```ts
 interface InputRecord {
@@ -196,7 +335,8 @@ scope covers scenes 1–3, 5, and 8. A foreshadowing input may have one setup an
 several payoff anchors.
 
 Inputs are expected to outnumber formats and need first-class management outside the
-margin. Derived views should support filtering and grouping by target, scope, kind,
+margin in the right-side Inputs/review system. Derived views should support filtering
+and grouping by target, scope, kind,
 state, source, author/model, priority, tag, assignee, creation revision, and whether
 the target remains attached. These indexes are projections of `inputs`, never the
 canonical records.
@@ -265,9 +405,9 @@ For a text edit, the reducer performs one semantic operation:
    update the rendered projection.
 
 The affected-content record identifies changed nodes and before/after ranges, hashes,
-and change kind (`text`, `format`, `structure`, `input`, or `context`). It is the unit
-used to trigger review and cascading work. Permanent IDs or hashes for every word are
-not required.
+and change kind (`text`, `format`, `structure`, `collection`, `relationship`, `todo`,
+`input`, `context`, or `fork`). It is the unit used to trigger review and cascading work. Permanent IDs or
+hashes for every word are not required.
 
 Reviews and generated inputs record their source revision and dependencies. A text
 change can stale prose and continuity reviews without invalidating unrelated layout
@@ -327,6 +467,13 @@ Immediate undo/redo and durable version history are separate capabilities. The f
 supports editing; the latter supports recovery, audit, comparison, and reopening a
 past version.
 
+Changing a durable Input-card state, moving a Navigator node, editing a relationship,
+editing the Spine, changing a Todo, or creating a fork is also a domain mutation.
+Dismissal, resolution, archival, and deletion must use explicit states and
+transactions where they affect durable work. The final Input-card dismissal policy
+remains open in
+[NAVIGATION.md](./NAVIGATION.md).
+
 ## Persistence and implementation status
 
 The first vertical slice is implemented. The Svelte workspace now owns canonical
@@ -365,12 +512,21 @@ ProseMirror nor supplies live application state. Provider transports likewise re
 untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal anchors,
 creates input IDs and targets, and decides whether a delayed result remains applicable.
 
+The Navigator POC intentionally starts fresh. A new visible workspace contains the
+protected empty Spine, fixed empty Todos view, and state needed to create Collections
+and Nodes—no static/generated manuscript, Collections, Nodes, Inputs, cards, or other
+demonstration content. Existing reducer and editor tests must construct explicit
+fixtures; the current demo content is not migrated into the Navigator workspace.
+
 This remains a proof of concept rather than the completed model above. In particular,
 the active document is still a single ProseMirror text tree rather than stable,
-user-defined structural nodes; history stores complete snapshots instead of compact
-forward and inverse patches; current session undo is not restored after reload; and
-collaborative transaction reconciliation is not implemented. Regression evidence and
-the exact next cases are recorded in [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md).
+user-defined Collection Nodes and graph relations; the Navigator, protected Spine,
+canonical Todos, fork-aware graph, and terminal-style split-pane projection are not
+implemented; history stores complete snapshots instead of compact forward and inverse
+patches; current session undo is not restored after reload; and collaborative
+transaction reconciliation is not implemented. Regression evidence and the exact next cases are
+recorded in [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md). The next vertical slice is
+defined in [NAVIGATION.md](./NAVIGATION.md).
 
 ## Intentionally deferred
 
@@ -378,17 +534,19 @@ the exact next cases are recorded in [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.
   implementation;
 - a runtime third-party plugin system;
 - choosing a permanent extension/plugin contract before real add-ons prove its shape;
-- a graph database or ontology;
+- a graph database or formal literary ontology—the domain may still store typed
+  node/edge relationships using ordinary persistence;
 - OKF, Obsidian, TEI, JSON-LD, or another canonical interchange standard;
 - formal temporal reasoning;
 - automatic schema migration for arbitrary add-on data;
 - multi-work or portfolio management.
 
-Before designing that extension contract, compare Scrivener's binder, document
-templates, labels/status/custom metadata, snapshots, editor layouts, and compile model.
-The goal is to learn from its separation of project structure, writing presentation,
-and published output without copying its storage model or making Scrivener a runtime
-dependency.
+Various editors and `local-first-ai-editor` have now been examined as UX evidence. The
+lessons retained are a quiet hierarchical navigator, content-bearing containers,
+optional panes, adaptable context, configurable actions, and human-controlled edits.
+Margin Note will not copy any of the reviewed editors' product scope nor `local-first-ai-editor`'s
+document authority and annotation architecture. See
+[NAVIGATION.md](./NAVIGATION.md).
 
 Markdown, DOCX, EPUB, and other exports are projections. They are not the canonical
 workspace state.

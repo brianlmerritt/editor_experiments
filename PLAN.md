@@ -6,6 +6,14 @@
 > [ARCHITECTURE.md](./ARCHITECTURE.md) and [FACADE_V1.md](./FACADE_V1.md). Retain this
 > file as implementation history; do not treat conflicting passages as current
 > architecture.
+>
+> The next workspace UX, protected Spine, canonical Todos, configurable Collections, graph
+> relationship, and fork-aware navigation work is specified in
+> [NAVIGATION.md](./NAVIGATION.md). The fixed modes, source bar, action buttons,
+> Margin/Tray split, and build order below are historical POC choices rather than the
+> target interface. Integrated AI review design is postponed until that structure is
+> proved. The Navigator's Traditional/Context view switch is navigation state, not a
+> return to the historical Drafting/Revising modes below.
 
 A meta-first creative writing support tool. Multiple AI and local suggesters propose
 edits and observations against a live draft; every interaction is captured in an
