@@ -15,6 +15,12 @@ reviewing remain in the right-side Inputs system rather than becoming Navigator
 structure. The Navigator switches between a stable **Traditional** hierarchy and a
 remembered, selection-aware **Context** projection without mutating the project graph.
 
+The first Navigator POC is implemented: empty Spine-first projects, canonical Todos,
+user-created Collections, content-bearing and nestable Nodes, confirmed typed
+relationships, and remembered Traditional/Context projections all pass through the
+Svelte workspace state and facade. See [NAVIGATION.md](./NAVIGATION.md) for the tested
+boundary and deferred multi-pane and fork work.
+
 The current screen is retained as evidence for the change-aware editor slice. Its
 accumulated top bars, source cards, fixed AI actions, Margin/Tray controls, and
 developer tools are not the target Navigator UX.

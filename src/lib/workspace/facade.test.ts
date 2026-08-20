@@ -108,6 +108,20 @@ describe('WorkspaceFacade', () => {
     expect(receipt).toMatchObject({ transactionId: 'commit-1', documentId: 'main', durableRevision: 2 });
   });
 
+  it('persists Navigator metadata through the facade without exposing the route shape', async () => {
+    const navigator = { version: 1, revision: 1, collections: [], relationships: [], todos: [] };
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      expect(String(input)).toBe('/api/workspace');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        action: 'save_project', id: 'project', title: 'Moon Dark', extensions: { navigator }
+      });
+      return json({ project: { ...persistent.projects[0], extensions: { navigator }, revision: 2 } });
+    });
+
+    const saved = await new WorkspaceFacade(fetcher).saveProject('project', 'Moon Dark', { navigator });
+    expect(saved.extensions.navigator).toEqual(navigator);
+  });
+
   it('passes abort signals through suggestion requests', async () => {
     const fetcher = vi.fn<FetchLike>(async (_input, init) => {
       expect(init?.signal).toBe(controller.signal);

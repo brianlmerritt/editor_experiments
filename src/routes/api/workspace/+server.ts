@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
+import type { ExtensionData } from '$lib/workspace/model';
 import { getBranches } from '$lib/server/ledger';
 import {
   workspaceRepository,
@@ -47,7 +48,10 @@ export const POST: RequestHandler = async ({ request }) => {
         return json({ project: workspaceRepository.createProject(body.title) }, { status: 201 });
       case 'save_project':
         if (typeof body.id !== 'string' || typeof body.title !== 'string' || !body.title.trim()) throw new Error('Project ID and title are required');
-        return json({ project: workspaceRepository.saveProject(body.id, body.title) });
+        if (body.extensions !== undefined && (typeof body.extensions !== 'object' || body.extensions === null || Array.isArray(body.extensions))) {
+          throw new Error('Project extensions must be an object');
+        }
+        return json({ project: workspaceRepository.saveProject(body.id, body.title, body.extensions as ExtensionData | undefined) });
       case 'create_document':
       {
         const input = inputObject(body);

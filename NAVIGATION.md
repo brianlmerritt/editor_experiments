@@ -648,6 +648,35 @@ data.
 
 ## Next proof-of-concept boundary
 
+### Implemented vertical slice
+
+The first Navigator POC now proves:
+
+- a fresh project starts with an empty, protected Spine and empty Todos rather than
+  generated manuscript or context content;
+- project-defined Collections and content-bearing Nodes are created from Svelte-owned
+  state and persisted through the workspace facade;
+- a Node may contain child Nodes while retaining its own editable content;
+- confirmed typed relationships are stored once and projected with inverse labels;
+- canonical Todos can target one or more Nodes, with `parentTodoId` reserved for later
+  nested-task UI;
+- Traditional and Context views keep independent expansion and selection memory;
+- Context view derives focused ancestors, children, direct relationships, and
+  applicable Todos without mutating the graph;
+- selecting any structural or related Node opens its one durable document in the
+  existing editor and Input workflow.
+
+The current persistence adapter stores Collection definitions, relationships, and
+Todos in the project's Navigator extension while content-bearing Nodes use durable
+workspace documents. This is deliberately behind the facade and is not a commitment
+to that storage representation.
+
+Still deferred from this first slice are Collection management beyond creation,
+moving/reordering/deleting Nodes, multi-target Todo editing UI, relationship-definition
+administration, impact cascades, fork-aware graph variance, and the terminal-style
+multi-pane manager. Existing AI review and Input behaviour remains available but has
+not yet been redesigned around Navigator context.
+
 The next implementation should test the smallest vertical slice that proves the
 Navigator direction without attempting recipes, collaboration, or a complete literary
 ontology:

@@ -6,6 +6,21 @@ import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
 import { documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
+import {
+  ancestors,
+  emptyNavigatorMemory,
+  emptyNavigatorState,
+  navigatorExtensions,
+  nodeCollectionId,
+  nodeExtensions,
+  readNavigatorState,
+  relationNeighbours,
+  type CollectionDefinition,
+  type NavigatorMemory,
+  type NavigatorProjectState,
+  type NavigatorRelationship,
+  type NavigatorTodo
+} from '$lib/workspace/navigator';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
@@ -37,6 +52,8 @@ export class WorkspaceState {
   projects = $state<WorkspaceProject[]>([]);
   documents = $state<WorkspaceDocument[]>([]);
   contextBuckets = $state<ContextBucket[]>([]);
+  navigator = $state<NavigatorProjectState>(emptyNavigatorState());
+  navigatorMemory = $state<NavigatorMemory>(emptyNavigatorMemory());
   sourceStates = $state<Record<string, SourceState>>(Object.fromEntries(sourceCatalog.map((source) => [source.id, source.id === 'openrouter' || source.id === 'ollama' ? 'off' : 'visible'])));
   categoryVisibility = $state<Record<Category, boolean>>(Object.fromEntries(categories.map((category) => [category, true])) as Record<Category, boolean>);
   densityCap = $state(8);
@@ -91,6 +108,43 @@ export class WorkspaceState {
     return this.contextBuckets.filter((bucket) => bucket.projectId === this.projectId && (bucket.scope === 'project' || bucket.documentId === this.branchId));
   }
 
+  get projectNodes(): WorkspaceDocument[] {
+    return this.documents.filter((document) => document.projectId === this.projectId);
+  }
+
+  get spineNode(): WorkspaceDocument | null {
+    return this.projectNodes.find((document) => document.role === 'spine') ?? null;
+  }
+
+  get navigatorNodes(): WorkspaceDocument[] {
+    return this.projectNodes.filter((document) => document.role !== 'spine');
+  }
+
+  get uncollectedNodes(): WorkspaceDocument[] {
+    return this.navigatorNodes.filter((node) => !nodeCollectionId(node)
+      || !this.navigator.collections.some((collection) => collection.id === nodeCollectionId(node)));
+  }
+
+  get selectedNodeAncestors(): WorkspaceDocument[] {
+    return ancestors(this.branchId, this.projectNodes);
+  }
+
+  get selectedNodeChildren(): WorkspaceDocument[] {
+    return this.projectNodes.filter((node) => node.parentId === this.branchId);
+  }
+
+  get selectedNodeRelations(): { node: WorkspaceDocument; label: string; relationshipId: string }[] {
+    const byId = new Map(this.projectNodes.map((node) => [node.id, node]));
+    return relationNeighbours(this.branchId, this.navigator.relationships).flatMap((relation) => {
+      const node = byId.get(relation.nodeId);
+      return node ? [{ node, label: relation.label, relationshipId: relation.relationshipId }] : [];
+    });
+  }
+
+  get selectedNodeTodos(): NavigatorTodo[] {
+    return this.navigator.todos.filter((todo) => todo.targetNodeIds.includes(this.branchId));
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
@@ -109,6 +163,9 @@ export class WorkspaceState {
       this.contextBuckets = loaded.persistent.contextBuckets;
       this.projectId = loaded.activeProjectId;
       this.branchId = loaded.activeDocumentId;
+      this.navigator = readNavigatorState(this.currentProject);
+      this.loadNavigatorMemory();
+      await this.ensureSpine();
       this.branches = loaded.branches;
       this.ledger = loaded.events;
       this.settingsState.load(loaded.sourceAvailability);
@@ -612,6 +669,8 @@ export class WorkspaceState {
     const document = this.documents.find((item) => item.projectId === id);
     if (!document) throw new Error('Project has no document');
     this.projectId = id;
+    this.navigator = readNavigatorState(this.currentProject);
+    this.loadNavigatorMemory();
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', id);
     this.refreshBranches();
     await this.switchBranch(document.id);
@@ -621,16 +680,19 @@ export class WorkspaceState {
     const project = await this.facade.createProject(title);
     const document = await this.facade.createDocument({
       projectId: project.id,
-      title: 'Main draft',
-      role: 'manuscript',
+      title: 'Spine',
+      role: 'spine',
       createdBy: this.sessionId,
-      reason: 'Initial project document'
+      reason: 'Initial project Spine'
     });
     this.projects = [...this.projects, project];
     this.documents = [...this.documents, document];
     const persistent = await this.facade.persistentWorkspace();
     this.contextBuckets = persistent.contextBuckets;
     this.projectId = project.id;
+    this.navigator = emptyNavigatorState();
+    this.navigatorMemory = emptyNavigatorMemory();
+    this.saveNavigatorMemory();
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
     this.refreshBranches();
     await this.switchBranch(document.id);
@@ -646,6 +708,145 @@ export class WorkspaceState {
     this.documents = [...this.documents, document];
     this.refreshBranches();
     return document;
+  }
+
+  async createCollection(input: {
+    name: string;
+    itemName: string;
+    icon?: CollectionDefinition['icon'];
+    mayContainChildren?: boolean;
+  }): Promise<CollectionDefinition | null> {
+    const name = input.name.trim();
+    const itemName = input.itemName.trim();
+    if (!name || !itemName) return null;
+    const collection: CollectionDefinition = {
+      id: makeId('collection'),
+      name,
+      itemName,
+      order: this.navigator.collections.length,
+      icon: input.icon ?? 'text',
+      capabilities: { contentBearing: true, mayContainChildren: input.mayContainChildren ?? true }
+    };
+    await this.commitNavigator('Create Navigator collection', (state) => ({
+      ...state,
+      collections: [...state.collections, collection]
+    }));
+    this.setNavigatorExpanded(`collection:${collection.id}`, true, 'traditional');
+    return collection;
+  }
+
+  async createNavigatorNode(collectionId: string, title: string, parentId: string | null = null): Promise<WorkspaceDocument | null> {
+    const collection = this.navigator.collections.find((item) => item.id === collectionId);
+    if (!collection || !title.trim()) return null;
+    if (parentId && !this.projectNodes.some((node) => node.id === parentId)) throw new Error('Navigator parent is not in this project');
+    const document = await this.facade.createDocument({
+      projectId: this.projectId,
+      title: title.trim(),
+      role: 'navigator_node',
+      parentId,
+      extensions: nodeExtensions({}, collection.id),
+      createdBy: this.sessionId,
+      reason: `Created ${collection.itemName}`
+    });
+    this.documents = [...this.documents, document];
+    this.refreshBranches();
+    this.setNavigatorExpanded(`collection:${collection.id}`, true, 'traditional');
+    return document;
+  }
+
+  async createNavigatorTodo(title: string, targetNodeIds: string[] = [this.branchId]): Promise<NavigatorTodo | null> {
+    if (!title.trim()) return null;
+    const todo: NavigatorTodo = {
+      id: makeId('todo'),
+      title: title.trim(),
+      state: 'open',
+      targetNodeIds: [...new Set(targetNodeIds)],
+      createdAt: new Date().toISOString()
+    };
+    await this.commitNavigator('Create Todo', (state) => ({ ...state, todos: [...state.todos, todo] }));
+    this.setNavigatorExpanded('fixed:todos', true);
+    return todo;
+  }
+
+  async toggleNavigatorTodo(id: string): Promise<void> {
+    await this.commitNavigator('Update Todo', (state) => ({
+      ...state,
+      todos: state.todos.map((todo) => todo.id === id
+        ? { ...todo, state: todo.state === 'open' ? 'done' as const : 'open' as const }
+        : todo)
+    }));
+  }
+
+  async createNavigatorRelationship(targetNodeId: string, type: string, inverseType: string): Promise<NavigatorRelationship | null> {
+    if (targetNodeId === this.branchId || !type.trim() || !inverseType.trim()) return null;
+    if (!this.projectNodes.some((node) => node.id === targetNodeId)) return null;
+    const nextType = type.trim();
+    const nextInverseType = inverseType.trim();
+    const duplicate = this.navigator.relationships.some((relationship) =>
+      (relationship.sourceNodeId === this.branchId
+        && relationship.targetNodeId === targetNodeId
+        && relationship.type === nextType
+        && relationship.inverseType === nextInverseType)
+      || (relationship.sourceNodeId === targetNodeId
+        && relationship.targetNodeId === this.branchId
+        && relationship.type === nextInverseType
+        && relationship.inverseType === nextType));
+    if (duplicate) {
+      this.notice = 'Those items are already directly related.';
+      return null;
+    }
+    const relationship: NavigatorRelationship = {
+      id: makeId('relationship'),
+      sourceNodeId: this.branchId,
+      targetNodeId,
+      type: nextType,
+      inverseType: nextInverseType,
+      confirmed: true
+    };
+    await this.commitNavigator('Create Navigator relationship', (state) => ({
+      ...state,
+      relationships: [...state.relationships, relationship]
+    }));
+    return relationship;
+  }
+
+  async openNavigatorNode(id: string): Promise<void> {
+    if (id === this.branchId) return;
+    await this.persistCurrentDocument('Saved before Navigator selection');
+    await this.switchBranch(id);
+    const memory = this.navigatorMemory.context;
+    this.navigatorMemory = {
+      ...this.navigatorMemory,
+      traditional: { ...this.navigatorMemory.traditional, selectedKey: `node:${id}` },
+      context: {
+        ...memory,
+        selectedKey: `node:${id}`,
+        recentContextKeys: [`node:${id}`, ...memory.recentContextKeys.filter((key) => key !== `node:${id}`)].slice(0, 8)
+      }
+    };
+    this.saveNavigatorMemory();
+  }
+
+  setNavigatorMode(mode: NavigatorMemory['mode']): void {
+    this.navigatorMemory = { ...this.navigatorMemory, mode };
+    this.saveNavigatorMemory();
+  }
+
+  navigatorExpanded(key: string, mode = this.navigatorMemory.mode): boolean {
+    return this.navigatorMemory[mode].expandedKeys.includes(key);
+  }
+
+  setNavigatorExpanded(key: string, expanded: boolean, mode = this.navigatorMemory.mode): void {
+    const current = this.navigatorMemory[mode];
+    const expandedKeys = expanded
+      ? [...new Set([...current.expandedKeys, key])]
+      : current.expandedKeys.filter((item) => item !== key);
+    this.navigatorMemory = { ...this.navigatorMemory, [mode]: { ...current, expandedKeys } };
+    this.saveNavigatorMemory();
+  }
+
+  toggleNavigatorExpanded(key: string): void {
+    this.setNavigatorExpanded(key, !this.navigatorExpanded(key));
   }
 
   async persistCurrentDocument(reason = 'Editing session'): Promise<void> {
@@ -694,6 +895,69 @@ export class WorkspaceState {
         wordCount: document.content.trim() ? document.content.trim().split(/\s+/).length : 0,
         lastEdited: document.updatedAt
       }));
+  }
+
+  private async ensureSpine(): Promise<void> {
+    if (this.spineNode || !this.currentProject) return;
+    const spine = await this.facade.createDocument({
+      projectId: this.projectId,
+      title: 'Spine',
+      role: 'spine',
+      createdBy: this.sessionId,
+      reason: 'Create required project Spine'
+    });
+    this.documents = [...this.documents, spine];
+    this.refreshBranches();
+  }
+
+  private async commitNavigator(
+    reason: string,
+    change: (state: NavigatorProjectState) => NavigatorProjectState
+  ): Promise<void> {
+    const project = this.currentProject;
+    if (!project) return;
+    const next = change(JSON.parse(JSON.stringify(this.navigator)) as NavigatorProjectState);
+    this.navigator = { ...next, revision: this.navigator.revision + 1 };
+    try {
+      const saved = await this.facade.saveProject(
+        project.id,
+        project.title,
+        navigatorExtensions(project.extensions, this.navigator)
+      );
+      this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
+    } catch (error) {
+      this.navigator = readNavigatorState(project);
+      this.lastError = error instanceof Error ? error.message : `Could not ${reason.toLowerCase()}`;
+      throw error;
+    }
+  }
+
+  private navigatorMemoryKey(): string {
+    return `margin-note:navigator:${this.projectId}`;
+  }
+
+  private loadNavigatorMemory(): void {
+    this.navigatorMemory = emptyNavigatorMemory();
+    if (typeof localStorage === 'undefined') return;
+    const stored = localStorage.getItem(this.navigatorMemoryKey());
+    if (!stored) return;
+    try {
+      const value = JSON.parse(stored) as Partial<NavigatorMemory>;
+      if (value.mode !== 'traditional' && value.mode !== 'context') return;
+      this.navigatorMemory = {
+        mode: value.mode,
+        traditional: { ...this.navigatorMemory.traditional, ...value.traditional },
+        context: { ...this.navigatorMemory.context, ...value.context }
+      };
+    } catch {
+      localStorage.removeItem(this.navigatorMemoryKey());
+    }
+  }
+
+  private saveNavigatorMemory(): void {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(this.navigatorMemoryKey(), JSON.stringify(this.navigatorMemory));
+    }
   }
 
   private historySnapshot(document: EditorDocumentSnapshot): WorkspaceHistorySnapshot {

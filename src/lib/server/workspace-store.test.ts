@@ -13,53 +13,67 @@ describe('WorkspaceRepository', () => {
 
   afterEach(() => database.close());
 
-  it('creates a durable default project, document, and narrative-rules bucket', () => {
+  it('creates a fresh project with only an empty protected Spine', () => {
     const first = repository.workspace();
     const second = repository.workspace();
 
     expect(first.projects).toHaveLength(1);
-    expect(first.documents.map((document) => document.id)).toEqual(['main']);
-    expect(first.contextBuckets).toEqual([
-      expect.objectContaining({ title: 'Narrative rules', role: 'narrative_rules', scope: 'project', revision: 1 })
+    expect(first.documents).toEqual([
+      expect.objectContaining({ id: 'spine_default', title: 'Spine', role: 'spine', content: '' })
     ]);
+    expect(first.contextBuckets).toEqual([]);
     expect(second).toEqual(first);
   });
 
   it('stores immutable document revisions and restores by creating a new revision', () => {
-    repository.workspace();
-    const edited = repository.saveDocument({ id: 'main', content: 'Second version', createdBy: 'writer' });
-    const unchanged = repository.saveDocument({ id: 'main', content: 'Second version', createdBy: 'writer' });
-    const original = repository.documentRevisions('main').at(-1)!;
-    const restored = repository.restoreDocument('main', original.id, 'writer');
+    const documentId = repository.workspace().documents[0].id;
+    const edited = repository.saveDocument({ id: documentId, content: 'Second version', createdBy: 'writer' });
+    const unchanged = repository.saveDocument({ id: documentId, content: 'Second version', createdBy: 'writer' });
+    const original = repository.documentRevisions(documentId).at(-1)!;
+    const restored = repository.restoreDocument(documentId, original.id, 'writer');
 
     expect(edited.revision).toBe(2);
     expect(unchanged.revision).toBe(2);
     expect(restored.revision).toBe(3);
     expect(restored.content).toBe(original.content);
-    expect(repository.documentRevisions('main').map((revision) => revision.number)).toEqual([3, 2, 1]);
+    expect(repository.documentRevisions(documentId).map((revision) => revision.number)).toEqual([3, 2, 1]);
+  });
+
+  it('persists project-level Navigator state without changing the project identity', () => {
+    const project = repository.workspace().projects[0];
+    const saved = repository.saveProject(project.id, project.title, {
+      navigator: { version: 1, revision: 1, collections: [], relationships: [], todos: [] }
+    });
+
+    expect(saved.id).toBe(project.id);
+    expect(saved.revision).toBe(2);
+    expect(saved.extensions.navigator).toEqual({
+      version: 1, revision: 1, collections: [], relationships: [], todos: []
+    });
   });
 
   it('versions attachment state with the document instead of losing it on restore', () => {
-    repository.workspace();
+    const documentId = repository.workspace().documents[0].id;
     const edited = repository.saveDocument({
-      id: 'main',
+      id: documentId,
       extensions: { margin_note: { revision: 2, formats: [{ id: 'format-1' }] } },
       createdBy: 'writer'
     });
-    const initial = repository.documentRevisions('main').at(-1)!;
-    const restored = repository.restoreDocument('main', initial.id, 'writer');
+    const initial = repository.documentRevisions(documentId).at(-1)!;
+    const restored = repository.restoreDocument(documentId, initial.id, 'writer');
 
     expect(edited.extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
-    expect(repository.documentRevisions('main')[1].extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
+    expect(repository.documentRevisions(documentId)[1].extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
     expect(restored.extensions).toEqual({});
   });
 
   it('versions freely named project and document context without imposing a schema', () => {
     const workspace = repository.workspace();
     const projectId = workspace.projects[0].id;
+    const documentId = workspace.documents[0].id;
     const bucket = repository.createBucket({
       projectId,
-      documentId: 'main',
+      documentId,
       scope: 'document',
       title: 'Geoffrey at the hospital',
       role: 'scene_state',
@@ -83,15 +97,10 @@ describe('WorkspaceRepository', () => {
     const projectId = repository.workspace().projects[0].id;
     expect(() => repository.createBucket({
       projectId,
-      documentId: 'main',
+      documentId: repository.workspace().documents[0].id,
       scope: 'project',
       title: 'Broken scope'
     })).toThrow('Project context cannot target a document');
   });
 
-  it('keeps narrative rules in place while retaining ordinary deleted bucket history', () => {
-    const workspace = repository.workspace();
-    const narrative = workspace.contextBuckets.find((bucket) => bucket.role === 'narrative_rules')!;
-    expect(() => repository.deleteBucket(narrative.id)).toThrow('Narrative rules cannot be removed');
-  });
 });

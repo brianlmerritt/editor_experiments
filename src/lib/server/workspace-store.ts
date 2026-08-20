@@ -14,22 +14,6 @@ import type {
   WorkspaceProject
 } from '$lib/workspace/model';
 
-export const starterDocument = `The rain had stopped before Mara reached the station. She noticed the platform clock was running seven minutes slow, and she felt an old unease return.
-
-The porter was standing beneath the awning, turning a brass key slowly between his fingers. “You came,” he said quietly.
-
-Mara looked toward the empty tracks. I had promised myself this would be the last time.`;
-
-const starterNarration = `genre: unspecified
-tense: past
-person: third
-focalization: limited
-pov_characters:
-  - Mara
-pov_switching: scene_break_only
-default_distance: close
-knowledge_rule: narrator_knows_only_what_current_pov_can_perceive_or_remember`;
-
 const defaultProjectId = 'project_default';
 
 interface ProjectRow {
@@ -97,6 +81,7 @@ export interface CreateDocumentInput {
   content?: string;
   role?: string;
   parentId?: string | null;
+  extensions?: ExtensionData;
   createdBy?: string;
   reason?: string;
 }
@@ -287,36 +272,20 @@ export class WorkspaceRepository {
     }
   }
 
-  ensureDefaults(legacyBranches: Branch[] = []): void {
+  ensureDefaults(_legacyBranches: Branch[] = []): void {
     const ensure = this.database.transaction(() => {
       this.database.prepare(`
         INSERT OR IGNORE INTO workspace_projects (id, title) VALUES (?, ?)
       `).run(defaultProjectId, 'My writing project');
 
-      const branches = legacyBranches.length
-        ? legacyBranches
-        : [{ id: 'main', name: 'Main draft', createdAt: '', wordCount: 0, lastEdited: '' }];
-      for (const [index, branch] of branches.entries()) {
-        const initialContent = branch.id === 'main' ? starterDocument : '';
+      const hasDocument = this.database.prepare('SELECT 1 FROM workspace_documents WHERE project_id = ? LIMIT 1').get(defaultProjectId);
+      if (!hasDocument) {
         const inserted = this.database.prepare(`
           INSERT OR IGNORE INTO workspace_documents
             (id, project_id, parent_id, title, sort_order, role, content)
-          VALUES (?, ?, ?, ?, ?, 'manuscript', ?)
-        `).run(branch.id, defaultProjectId, branch.parentId ?? null, branch.name, index, initialContent);
-        if (inserted.changes) this.insertDocumentRevision(branch.id, 1, branch.name, initialContent, {}, 'system', 'Initial document');
-      }
-
-      const narrativeExists = this.database.prepare(`
-        SELECT 1 FROM workspace_context_buckets WHERE project_id = ? AND role = 'narrative_rules' AND deleted_at IS NULL
-      `).get(defaultProjectId);
-      if (!narrativeExists) {
-        const bucketId = 'context_narrative_rules';
-        this.database.prepare(`
-          INSERT INTO workspace_context_buckets
-            (id, project_id, document_id, scope, title, role, content)
-          VALUES (?, ?, NULL, 'project', 'Narrative rules', 'narrative_rules', ?)
-        `).run(bucketId, defaultProjectId, starterNarration);
-        this.insertBucketRevision(bucketId, 1, 'Narrative rules', 'narrative_rules', starterNarration, 'system', 'Initial context');
+          VALUES ('spine_default', ?, NULL, 'Spine', 0, 'spine', '')
+        `).run(defaultProjectId);
+        if (inserted.changes) this.insertDocumentRevision('spine_default', 1, 'Spine', '', {}, 'system', 'Initial project Spine');
       }
     });
     ensure();
@@ -333,27 +302,19 @@ export class WorkspaceRepository {
   createProject(title: string): WorkspaceProject {
     if (!title.trim()) throw new Error('Project title is required');
     const projectId = id('project');
-    const create = this.database.transaction(() => {
-      this.database.prepare('INSERT INTO workspace_projects (id, title) VALUES (?, ?)').run(projectId, title.trim());
-      const bucketId = id('context');
-      this.database.prepare(`
-        INSERT INTO workspace_context_buckets
-          (id, project_id, document_id, scope, title, role, content)
-        VALUES (?, ?, NULL, 'project', 'Narrative rules', 'narrative_rules', ?)
-      `).run(bucketId, projectId, starterNarration);
-      this.insertBucketRevision(bucketId, 1, 'Narrative rules', 'narrative_rules', starterNarration, 'system', 'Initial context');
-    });
-    create();
+    this.database.prepare('INSERT INTO workspace_projects (id, title) VALUES (?, ?)').run(projectId, title.trim());
     return projectFromRow(this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow);
   }
 
-  saveProject(projectId: string, title: string): WorkspaceProject {
+  saveProject(projectId: string, title: string, nextExtensions?: ExtensionData): WorkspaceProject {
     if (!title.trim()) throw new Error('Project title is required');
+    const current = this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
+    if (!current) throw new Error('Project not found');
     const result = this.database.prepare(`
       UPDATE workspace_projects
-      SET title = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      SET title = ?, extensions = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
       WHERE id = ?
-    `).run(title.trim(), projectId);
+    `).run(title.trim(), JSON.stringify(nextExtensions ?? extensions(current.extensions)), projectId);
     if (!result.changes) throw new Error('Project not found');
     return projectFromRow(this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow);
   }
@@ -368,10 +329,10 @@ export class WorkspaceRepository {
     const create = this.database.transaction(() => {
       this.database.prepare(`
         INSERT INTO workspace_documents
-          (id, project_id, parent_id, title, sort_order, role, content)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(documentId, input.projectId, input.parentId ?? null, title, order, input.role ?? null, content);
-      this.insertDocumentRevision(documentId, 1, title, content, {}, input.createdBy, input.reason ?? 'Created document');
+          (id, project_id, parent_id, title, sort_order, role, content, extensions)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(documentId, input.projectId, input.parentId ?? null, title, order, input.role ?? null, content, JSON.stringify(input.extensions ?? {}));
+      this.insertDocumentRevision(documentId, 1, title, content, input.extensions ?? {}, input.createdBy, input.reason ?? 'Created document');
     });
     create();
     return this.document(documentId);

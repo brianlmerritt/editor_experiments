@@ -3,6 +3,7 @@
   import EditorShell from '$lib/editor/EditorShell.svelte';
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
+  import Navigator from '$lib/components/Navigator.svelte';
   import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
@@ -597,7 +598,9 @@
       <button class:active={workspace.surface === 'tray'} onclick={() => workspace.surface = 'tray'}>Tray</button>
     </nav>
 
-  <main>
+  <div class="workbench">
+    <Navigator onOpenNode={switchDocument} />
+    <main>
     <section class="workspace">
       <div class="document-column">
         <div class="document-meta">
@@ -606,11 +609,7 @@
               {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
             </select>
             <button onclick={createProject} title="Create project">+ Project</button>
-            <span aria-hidden="true">/</span>
-            <select value={workspace.branchId} onchange={(event) => switchDocument((event.currentTarget as HTMLSelectElement).value)} aria-label="Document">
-              {#each workspace.documents.filter((document) => document.projectId === workspace.projectId) as document}<option value={document.id}>{document.title} · {wordCount(document.content)}w</option>{/each}
-            </select>
-            <button onclick={createDocument} title="Create blank document">+ Document</button>
+            <span aria-hidden="true">/</span><strong>{workspace.currentDocument?.title}</strong>
             <button onclick={renameDocument}>Rename</button>
             <button onclick={forkBranch}>Fork from here</button>
           </div>
@@ -750,7 +749,8 @@
     </section>
 
     {#if ledgerOpen}<div class="ledger-panel"><LedgerTail events={workspace.ledger} costUsd={workspace.costUsd} /></div>{/if}
-  </main>
+    </main>
+  </div>
 
   <div class="pause-banner" class:mode-hidden={!isPaused}><b>Paused</b> — editing, dispatch timers, and provider spend are suspended.</div>
   {#if workspace.notice}<button class="notice" onclick={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
@@ -898,7 +898,8 @@
   .filterbar input { width: 70px; accent-color: var(--accent); }
   .filterbar output { width: 16px; }
   .spacer { flex: 1; }
-  main { width: min(1390px, calc(100% - 42px)); margin: 0 auto; padding: 34px 0 80px; }
+  .workbench { display: grid; grid-template-columns: 270px minmax(0, 1fr); align-items: start; }
+  main { min-width: 0; width: min(1190px, calc(100% - 36px)); margin: 0 auto; padding: 34px 0 80px; }
   .workspace { display: grid; grid-template-columns: minmax(540px, 830px) minmax(260px, 350px); justify-content: center; gap: clamp(28px, 5vw, 72px); }
   .document-column { min-width: 0; }
   .document-meta { display: flex; justify-content: space-between; align-items: center; min-height: 34px; margin-bottom: 8px; color: var(--muted); font-size: 10px; }
@@ -1021,6 +1022,7 @@
   .new-context > button:disabled { opacity: .45; cursor: default; }
   .new-context::after { display: block; clear: both; content: ''; }
   @media (max-width: 980px) {
+    .workbench { grid-template-columns: 230px minmax(0, 1fr); }
     .workspace { grid-template-columns: minmax(0, 1fr); }
     aside { padding-top: 8px; }
     .cards.docked { display: grid; gap: 10px; min-height: 0; padding-top: 12px; }
@@ -1032,6 +1034,7 @@
     .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
     .top-actions button:nth-last-child(n+3), .top-actions a { display: none; }
     .filterbar { top: 58px; }
+    .workbench { grid-template-columns: 1fr; }
     main { width: calc(100% - 20px); padding-top: 18px; }
     .form-grid { grid-template-columns: 1fr; }
     .context-fields { grid-template-columns: 1fr; }

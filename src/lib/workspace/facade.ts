@@ -184,8 +184,8 @@ export class WorkspaceFacade {
     return result.project;
   }
 
-  async saveProject(id: string, title: string): Promise<WorkspaceProject> {
-    const result = await this.post<{ project: WorkspaceProject }>('/api/workspace', { action: 'save_project', id, title });
+  async saveProject(id: string, title: string, extensions?: ExtensionData): Promise<WorkspaceProject> {
+    const result = await this.post<{ project: WorkspaceProject }>('/api/workspace', { action: 'save_project', id, title, extensions });
     return result.project;
   }
 
@@ -196,6 +196,7 @@ export class WorkspaceFacade {
     content?: string;
     role?: string;
     parentId?: string | null;
+    extensions?: ExtensionData;
     createdBy?: string;
     reason?: string;
   }): Promise<WorkspaceDocument> {

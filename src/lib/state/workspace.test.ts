@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { InputProposal, LedgerEvent, Suggestion, TaskPrompt } from '$lib/domain';
 import { textTarget } from '$lib/workspace/attachments';
 import type { WorkspaceFacade } from '$lib/workspace/facade';
-import type { WorkspaceDocument } from '$lib/workspace/model';
+import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
 import { WorkspaceState } from './workspace.svelte';
 
@@ -54,6 +54,12 @@ function document(content = 'noticed'): WorkspaceDocument {
     kind: 'document',
     content,
     updatedAt: '2026-08-18T00:00:00Z'
+  };
+}
+
+function project(): WorkspaceProject {
+  return {
+    id: 'project', title: 'Writing project', revision: 1, extensions: {}, updatedAt: '2026-08-18T00:00:00Z'
   };
 }
 
@@ -292,5 +298,68 @@ describe('semantic workspace history', () => {
     expect(migrated).toBe(1);
     expect(workspace.inputs[0].state).toBe('stale');
     expect(workspace.workspaceRevision).toBe(12);
+  });
+});
+
+describe('Navigator workspace transactions', () => {
+  it('creates and persists a user-defined Collection from Svelte-owned state', async () => {
+    const facade = fakeFacade();
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), revision: 2, extensions: extensions ?? {} }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+
+    const collection = await workspace.createCollection({ name: 'Characters', itemName: 'Character', icon: 'character' });
+
+    expect(collection).toMatchObject({ name: 'Characters', itemName: 'Character', icon: 'character' });
+    expect(workspace.navigator.collections).toEqual([collection]);
+    expect(workspace.navigator.revision).toBe(1);
+    expect(facade.saveProject).toHaveBeenCalledWith(
+      'project',
+      'Writing project',
+      expect.objectContaining({ navigator: expect.objectContaining({ revision: 1, collections: [collection] }) })
+    );
+  });
+
+  it('creates content-bearing Nodes with collection membership behind the facade', async () => {
+    const facade = fakeFacade();
+    facade.createDocument = vi.fn(async (input) => ({
+      id: 'mara', projectId: input.projectId, parentId: input.parentId ?? null, title: input.title,
+      order: 1, revision: 1, role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const,
+      content: '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+    workspace.navigator.collections = [{
+      id: 'characters', name: 'Characters', itemName: 'Character', order: 0, icon: 'character',
+      capabilities: { contentBearing: true, mayContainChildren: false }
+    }];
+
+    const created = await workspace.createNavigatorNode('characters', 'Mara');
+
+    expect(created?.id).toBe('mara');
+    expect(created?.extensions.navigator).toEqual({ collectionId: 'characters' });
+    expect(workspace.documents.at(-1)?.id).toBe('mara');
+  });
+
+  it('persists canonical Todos and confirmed typed relationships', async () => {
+    const facade = fakeFacade();
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [document(), { ...document(), id: 'mara', title: 'Mara', order: 1 }];
+
+    const todo = await workspace.createNavigatorTodo('Check Mara continuity', ['main', 'mara']);
+    const relationship = await workspace.createNavigatorRelationship('mara', 'features', 'appears in');
+
+    expect(todo?.targetNodeIds).toEqual(['main', 'mara']);
+    expect(relationship).toMatchObject({ sourceNodeId: 'main', targetNodeId: 'mara', type: 'features', inverseType: 'appears in' });
+    expect(workspace.navigator.revision).toBe(2);
+    expect(facade.saveProject).toHaveBeenCalledTimes(2);
   });
 });
