@@ -302,18 +302,80 @@ describe('semantic workspace history', () => {
 });
 
 describe('Navigator workspace transactions', () => {
+  it('repairs protected project content and materializes legacy Collections when switching projects', async () => {
+    const facade = fakeFacade();
+    const legacyProject: WorkspaceProject = {
+      ...project(),
+      id: 'legacy',
+      title: 'Legacy project',
+      extensions: {
+        navigator: {
+          version: 1,
+          revision: 1,
+          collections: [{
+            id: 'scenes', name: 'Scenes', singularName: 'Scene', order: 0, icon: 'folder',
+            numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true }
+          }],
+          relationships: [], todos: [{ id: 'todo-legacy', title: 'Review opening', state: 'open', targetNodeIds: [], createdAt: '2026-08-18T00:00:00Z' }]
+        }
+      }
+    };
+    facade.createDocument = vi.fn(async (input) => ({
+      id: input.id ?? `${input.role}-id`, projectId: input.projectId, parentId: input.parentId ?? null,
+      title: input.title, order: 1, revision: 1, role: input.role, extensions: input.extensions ?? {},
+      kind: 'document' as const, content: '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project(), legacyProject];
+    workspace.documents = [document()];
+
+    await workspace.switchProject('legacy');
+
+    expect(workspace.spineNode).toMatchObject({ title: 'Spine', role: 'spine' });
+    expect(workspace.todosNode).toMatchObject({ title: 'Todos', role: 'todos' });
+    expect(workspace.collectionNode('scenes')).toMatchObject({ title: 'Scenes', role: 'navigator_collection' });
+    expect(workspace.todoNode('todo-legacy')).toMatchObject({ title: 'Review opening', role: 'navigator_todo' });
+    expect(facade.createDocument).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not allow the protected Spine or Todos identities to be renamed', async () => {
+    const facade = fakeFacade();
+    facade.saveDocument = vi.fn();
+    const workspace = new WorkspaceState(facade);
+    workspace.documents = [
+      { ...document(), id: 'spine', title: 'Spine', role: 'spine' },
+      { ...document(), id: 'todos', title: 'Todos', role: 'todos' }
+    ];
+
+    await workspace.renameDocument('spine', 'Test');
+    await workspace.renameDocument('todos', 'Tasks');
+
+    expect(workspace.documents.map((item) => item.title)).toEqual(['Spine', 'Todos']);
+    expect(facade.saveDocument).not.toHaveBeenCalled();
+  });
+
   it('creates and persists a user-defined Collection from Svelte-owned state', async () => {
     const facade = fakeFacade();
     facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), revision: 2, extensions: extensions ?? {} }));
+    facade.createDocument = vi.fn(async (input) => ({
+      id: input.id!, projectId: input.projectId, parentId: null, title: input.title, order: 1, revision: 1,
+      role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const, content: '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.projects = [project()];
     workspace.documents = [document()];
 
-    const collection = await workspace.createCollection({ name: 'Characters', itemName: 'Character', icon: 'character' });
+    const collection = await workspace.createCollection({
+      name: 'Scenes', singularName: 'Scene', icon: 'folder', numbering: { enabled: true, start: 1 }
+    });
 
-    expect(collection).toMatchObject({ name: 'Characters', itemName: 'Character', icon: 'character' });
+    expect(collection).toMatchObject({ name: 'Scenes', singularName: 'Scene', icon: 'folder', numbering: { enabled: true, start: 1 } });
     expect(workspace.navigator.collections).toEqual([collection]);
+    expect(workspace.collectionNode(collection!.id)).toMatchObject({ id: collection!.id, title: 'Scenes', role: 'navigator_collection' });
     expect(workspace.navigator.revision).toBe(1);
     expect(facade.saveProject).toHaveBeenCalledWith(
       'project',
@@ -332,22 +394,90 @@ describe('Navigator workspace transactions', () => {
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.projects = [project()];
-    workspace.documents = [document()];
+    workspace.documents = [document(), {
+      ...document(), id: 'characters', title: 'Characters', role: 'navigator_collection', order: 1,
+      extensions: { navigator: { collectionId: 'characters', optionalTitle: '', kind: 'collection' } }
+    }];
     workspace.navigator.collections = [{
-      id: 'characters', name: 'Characters', itemName: 'Character', order: 0, icon: 'character',
+      id: 'characters', name: 'Characters', singularName: 'Character', order: 0, icon: 'folder',
+      numbering: { enabled: false, start: 1 },
       capabilities: { contentBearing: true, mayContainChildren: false }
     }];
 
     const created = await workspace.createNavigatorNode('characters', 'Mara');
 
     expect(created?.id).toBe('mara');
-    expect(created?.extensions.navigator).toEqual({ collectionId: 'characters' });
+    expect(created?.extensions.navigator).toEqual({ collectionId: 'characters', optionalTitle: 'Mara', kind: 'item' });
     expect(workspace.documents.at(-1)?.id).toBe('mara');
+  });
+
+  it('updates Collection configuration and its durable content document together', async () => {
+    const facade = fakeFacade();
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    facade.saveDocument = vi.fn(async (input) => {
+      const current = workspace.documents.find((node) => node.id === input.id)!;
+      return { ...current, ...input, revision: current.revision + 1, updatedAt: '2026-08-18T00:00:01Z' } as WorkspaceDocument;
+    });
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator.collections = [{
+      id: 'scenes', name: 'Scenes', singularName: 'Scene', order: 0, icon: 'folder',
+      numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true }
+    }];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'scenes', title: 'Scenes', role: 'navigator_collection' },
+      { ...document(), id: 'arrival', parentId: 'scenes', title: 'Scene 1 — Arrival', role: 'navigator_node', extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Arrival', kind: 'item' } } }
+    ];
+
+    await workspace.updateCollection('scenes', {
+      name: 'Sequences', singularName: 'Sequence', icon: 'file', numbering: { enabled: true, start: 3 }
+    });
+
+    expect(workspace.navigator.collections[0]).toMatchObject({ name: 'Sequences', singularName: 'Sequence', icon: 'file', numbering: { enabled: true, start: 3 } });
+    expect(workspace.collectionNode('scenes')?.title).toBe('Sequences');
+    expect(workspace.documents.find((node) => node.id === 'arrival')?.title).toBe('Sequence 3 — Arrival');
+  });
+
+  it('deletes a Collection while preserving its child content in Archived/Unowned', async () => {
+    const facade = fakeFacade();
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    facade.saveDocument = vi.fn(async (input) => {
+      const current = workspace.documents.find((node) => node.id === input.id)!;
+      return { ...current, ...input, revision: current.revision + 1, updatedAt: '2026-08-18T00:00:01Z' } as WorkspaceDocument;
+    });
+    facade.deleteDocument = vi.fn(async () => undefined);
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator.collections = [{
+      id: 'notes', name: 'Notes', singularName: 'Note', order: 0, icon: 'folder',
+      numbering: { enabled: false, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true }
+    }];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'notes', title: 'Notes', role: 'navigator_collection' },
+      { ...document(), id: 'clue', parentId: 'notes', title: 'Clue', role: 'navigator_node', extensions: { navigator: { collectionId: 'notes', optionalTitle: 'Clue', kind: 'item' } } }
+    ];
+
+    await workspace.deleteCollection('notes');
+
+    expect(workspace.navigator.collections).toEqual([]);
+    expect(workspace.documents.some((node) => node.id === 'notes')).toBe(false);
+    expect(workspace.documents.find((node) => node.id === 'clue')).toMatchObject({ parentId: null, extensions: { navigator: expect.objectContaining({ archived: true }) } });
+    expect(workspace.archivedOrUnownedNodes.map((node) => node.id)).toContain('clue');
+    expect(facade.deleteDocument).toHaveBeenCalledWith('notes');
   });
 
   it('persists canonical Todos and confirmed typed relationships', async () => {
     const facade = fakeFacade();
     facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    facade.createDocument = vi.fn(async (input) => ({
+      id: input.id!, projectId: input.projectId, parentId: input.parentId ?? null, title: input.title,
+      order: 2, revision: 1, role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const,
+      content: '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'main';
@@ -358,8 +488,96 @@ describe('Navigator workspace transactions', () => {
     const relationship = await workspace.createNavigatorRelationship('mara', 'features', 'appears in');
 
     expect(todo?.targetNodeIds).toEqual(['main', 'mara']);
+    expect(workspace.todoNode(todo!.id)).toMatchObject({ id: todo!.id, title: 'Check Mara continuity', role: 'navigator_todo', content: '' });
     expect(relationship).toMatchObject({ sourceNodeId: 'main', targetNodeId: 'mara', type: 'features', inverseType: 'appears in' });
     expect(workspace.navigator.revision).toBe(2);
     expect(facade.saveProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('renumbers optional-titled items after a stable-identity move', async () => {
+    const facade = fakeFacade();
+    facade.saveDocument = vi.fn(async (input) => {
+      const current = workspace.documents.find((node) => node.id === input.id)!;
+      return { ...current, ...input, revision: current.revision + 1, updatedAt: '2026-08-18T00:00:01Z' } as WorkspaceDocument;
+    });
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator.collections = [{
+      id: 'scenes', name: 'Scenes', singularName: 'Scene', order: 0, icon: 'folder',
+      numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true }
+    }];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'scenes', title: 'Scenes', role: 'navigator_collection', order: 1 },
+      { ...document(), id: 'first', parentId: 'scenes', title: 'Scene 1 — Arrival', role: 'navigator_node', order: 0, extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Arrival', kind: 'item' } } },
+      { ...document('Claire challenges the doctor.'), id: 'second', parentId: 'scenes', title: 'Scene 2 — Discovery', role: 'navigator_node', order: 1, extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Discovery', kind: 'item' } } }
+    ];
+
+    await workspace.moveNavigatorNode('second', { parentId: 'scenes', beforeNodeId: 'first' });
+
+    expect(workspace.documents.find((node) => node.id === 'second')).toMatchObject({
+      id: 'second', order: 0, title: 'Scene 1 — Discovery', content: 'Claire challenges the doctor.',
+      extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Discovery', kind: 'item' } }
+    });
+    expect(workspace.documents.find((node) => node.id === 'first')).toMatchObject({ order: 1, title: 'Scene 2 — Arrival' });
+    expect(facade.saveDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses drag ordering across Collections instead of silently converting a Node', async () => {
+    const facade = fakeFacade();
+    facade.saveDocument = vi.fn();
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator.collections = [
+      { id: 'chapters', name: 'Chapters', singularName: 'Chapter', order: 0, icon: 'folder', numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true } },
+      { id: 'beats', name: 'Scene Beats', singularName: 'Scene Beat', order: 1, icon: 'folder', numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true } }
+    ];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'chapter', parentId: 'chapters', title: 'Chapter 1', role: 'navigator_node', extensions: { navigator: { collectionId: 'chapters', optionalTitle: '', kind: 'item' } } },
+      { ...document('Claire challenges the doctor.'), id: 'beat', parentId: 'chapter', title: 'Scene Beat 1 — Claire and the doctor', role: 'navigator_node', extensions: { navigator: { collectionId: 'beats', optionalTitle: 'Claire and the doctor', kind: 'item' } } }
+    ];
+
+    await workspace.moveNavigatorNode('beat', { parentId: 'chapters', beforeNodeId: 'chapter' });
+
+    expect(workspace.documents.find((node) => node.id === 'beat')).toMatchObject({
+      parentId: 'chapter', title: 'Scene Beat 1 — Claire and the doctor', content: 'Claire challenges the doctor.',
+      extensions: { navigator: { collectionId: 'beats', optionalTitle: 'Claire and the doctor', kind: 'item' } }
+    });
+    expect(workspace.notice).toContain('explicit conversion');
+    expect(facade.saveDocument).not.toHaveBeenCalled();
+  });
+
+  it('keeps Navigator focus history separate from the active document projection', async () => {
+    const facade = fakeFacade();
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'spine';
+    workspace.projects = [project()];
+    workspace.documents = [
+      { ...document(), id: 'spine', title: 'Spine', role: 'spine' },
+      { ...document(), id: 'chapter', parentId: 'chapters', title: 'Chapter 1', role: 'navigator_node', extensions: { navigator: { collectionId: 'chapters', optionalTitle: '', kind: 'item' } } },
+      { ...document(), id: 'scene', parentId: 'chapter', title: 'Scene Beat 1', role: 'navigator_node', extensions: { navigator: { collectionId: 'beats', optionalTitle: '', kind: 'item' } } },
+      { ...document(), id: 'todo', parentId: 'todos', title: 'Strengthen the scene', role: 'navigator_todo' }
+    ];
+
+    await workspace.openNavigatorNode('chapter');
+    await workspace.openNavigatorNode('scene');
+
+    expect(workspace.navigatorMemory.mode).toBe('context');
+    expect(workspace.navigatorFocusNode?.id).toBe('scene');
+    expect(workspace.selectedNodeParent?.id).toBe('chapter');
+    expect(workspace.navigatorBackId).toBe('chapter');
+
+    await workspace.openNavigatorNode('todo');
+    expect(workspace.currentDocument?.id).toBe('todo');
+    expect(workspace.navigatorFocusNode?.id).toBe('scene');
+
+    await workspace.openNavigatorNode('chapter', 'back');
+    expect(workspace.navigatorFocusNode?.id).toBe('chapter');
+    expect(workspace.navigatorForwardId).toBe('scene');
   });
 });

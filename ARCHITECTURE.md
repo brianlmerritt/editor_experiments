@@ -34,13 +34,14 @@ its formatting, its inputs, and undo/redo.
    global drafting/reviewing mode that hides part of the workspace.
 9. The **Navigator** is a derived structural and relationship projection over the
    Svelte workspace. It is not the domain model and does not own copied node data.
-10. Collections are project-configurable categories and generated Navigator headings;
-    Nodes are their stable, potentially content-bearing members. `chapter`, `scene`,
+10. Collections are project-configurable, content-bearing Navigator Nodes that also
+    organise stable, potentially content-bearing child Nodes. `chapter`, `scene`,
     `character`, and `location` are examples, not compulsory built-in hierarchy.
 11. Every work has a protected, editable, versioned, fork-aware **Spine** establishing
     its scope, direction, narrative contract, and central knowledge.
-12. Every work has a fixed **Todos** Navigator element backed by canonical Todo
-    records. AI may propose a Todo through an Input but does not own the Todo.
+12. Every work has a protected **Todos** root as well as canonical, content-bearing
+    Todo records. A Todo title opens its durable document; its checkbox alone changes
+    state. AI may propose a Todo through an Input but does not own the Todo.
 13. One work may be viewed through multiple panes and forks. The focused pane selects
     the Navigator and Inputs/review projection; it does not create another source of
     truth.
@@ -158,12 +159,14 @@ decision. Relationship cardinality, inverse relations, lifecycle ownership, dele
 and ordering policy belong to Collection/relation definitions and the domain
 reducer—not individual components. A domain graph does not imply a graph database.
 
-A Collection heading is a generated Navigator projection, not a content-bearing Node.
-An overview that needs content is represented by a Node or the Spine. Nodes from one
-Collection may appear beneath a Node from another Collection through primary
-containment without requiring another visible Collection heading.
+A Collection is itself a stable, content-bearing Node as well as an ordered container.
+Selecting it opens its own content; expanding it reveals its children. Collection and
+child identities do not include their displayed ordinal numbers. Optional numbering
+is derived from sibling order and a configured start value, while an optional title is
+stored independently. Nodes from one Collection may still appear beneath a Node from
+another Collection through primary containment.
 
-The Navigator renders the fixed Spine and Todos elements, one structural projection,
+The Navigator renders the fixed, content-bearing Spine and Todos elements, one structural projection,
 and optional relationship facets.
 An alias under a scene points to the same character or location node that appears in
 its primary collection. Additional smart views are queries and indexes, not copied
@@ -193,13 +196,21 @@ may render different Nodes or forks, but all accepted changes enter the same wor
 command and transaction path. Exact pointer, touch, keyboard, and split gestures are
 deferred until the basic pane manager can be tested.
 
-Traditional view derives the stable hierarchy from primary containment. Context view
-derives an explainable neighbourhood from the focused pane and selection: ancestors,
-children, configured direct relationships, applicable Spine material, and confirmed
-Todos. Context relevance never creates or reorders canonical graph records, and
+Traditional view derives the stable hierarchy from primary containment. Opening a
+structural Node establishes a remembered Navigator focus and enters Context
+automatically. Context view derives an explainable one-hop neighbourhood from that
+focus: direct parent, siblings, children, configured bidirectional relationships,
+applicable Spine material, and confirmed Todos. Opening a Todo or supporting document
+does not discard the structural focus. Context relevance never creates or reorders canonical graph records, and
 unconfirmed AI relationships remain Inputs. Context changes respond to meaningful
 targets rather than every caret movement, preserve editor focus and Navigator scroll,
 and key remembered state by stable identities rather than current display positions.
+
+Back/Forward traverses structural focus history. A per-Node neighbourhood disclosure
+can expose another Node's one-hop vicinity without changing focus. Dragging changes
+order or containment only and preserves Node ID, content, Collection membership,
+optional title, relations, Inputs, and formats. Cross-Collection conversion is an
+explicit future command, never an incidental result of drop position.
 
 Selecting a collapsed content-bearing container expands it and opens that container's
 own content in the focused pane. More elaborate combined-descendant views are deferred.
@@ -294,6 +305,9 @@ interface TodoRecord {
 
 This is illustrative rather than a frozen contract. Todos may relate to the Spine,
 multiple containers or Nodes, manuscript selections, decisions, impacts, and forks.
+The same stable Todo ID addresses its editable Todo document; long-form planning is
+not packed into `detail` metadata or reduced to a card. The title is a Navigator
+projection, and the checkbox is the only direct done/open control.
 Prioritised and target-filtered Todo lists are derived views over the canonical
 records. `parentTodoId` preserves a path to nested subtasks, although nested Todo UI is
 not part of day one.
@@ -513,15 +527,21 @@ untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal an
 creates input IDs and targets, and decides whether a delayed result remains applicable.
 
 The Navigator POC intentionally starts fresh. A new visible workspace contains the
-protected empty Spine, fixed empty Todos view, and state needed to create Collections
+protected empty Spine, protected empty Todos document and view, and state needed to create Collections
 and Nodes—no static/generated manuscript, Collections, Nodes, Inputs, cards, or other
 demonstration content. Existing reducer and editor tests must construct explicit
 fixtures; the current demo content is not migrated into the Navigator workspace.
 
-This remains a proof of concept rather than the completed model above. In particular,
-the active document is still a single ProseMirror text tree rather than stable,
-user-defined Collection Nodes and graph relations; the Navigator, protected Spine,
-canonical Todos, fork-aware graph, and terminal-style split-pane projection are not
+On every project open, Svelte verifies the fixed Spine and Todos identities and
+materialises durable documents for legacy Collection definitions. This repair is
+idempotent and non-destructive. A separate, project-name-confirmed Start over command
+is the only operation that deliberately clears the project's working material and
+recreates its empty fixed roots.
+
+This remains a proof of concept rather than the completed model above. The Navigator,
+protected content-bearing Spine and Todos, user-defined content-bearing Collections,
+stable Nodes, and confirmed graph relationships now have a first vertical slice.
+Fork-aware graph variance and the terminal-style split-pane projection are not
 implemented; history stores complete snapshots instead of compact forward and inverse
 patches; current session undo is not restored after reload; and collaborative
 transaction reconciliation is not implemented. Regression evidence and the exact next cases are

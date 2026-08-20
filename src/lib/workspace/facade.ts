@@ -189,6 +189,11 @@ export class WorkspaceFacade {
     return result.project;
   }
 
+  async resetProject(id: string): Promise<PersistentWorkspace> {
+    const result = await this.post<{ workspace: PersistentWorkspace }>('/api/workspace', { action: 'reset_project', id });
+    return result.workspace;
+  }
+
   async createDocument(input: {
     id?: string;
     projectId: string;
@@ -204,9 +209,13 @@ export class WorkspaceFacade {
     return result.document;
   }
 
-  async saveDocument(input: { id: string; title?: string; content?: string; extensions?: ExtensionData; createdBy?: string; reason?: string }): Promise<WorkspaceDocument> {
+  async saveDocument(input: { id: string; title?: string; content?: string; extensions?: ExtensionData; parentId?: string | null; order?: number; createdBy?: string; reason?: string }): Promise<WorkspaceDocument> {
     const result = await this.post<{ document: WorkspaceDocument }>('/api/workspace', { action: 'save_document', input });
     return result.document;
+  }
+
+  async deleteDocument(id: string): Promise<void> {
+    await this.post('/api/workspace', { action: 'delete_document', id });
   }
 
   async restoreDocument(documentId: string, revisionId: string, sessionId: string): Promise<WorkspaceDocument> {

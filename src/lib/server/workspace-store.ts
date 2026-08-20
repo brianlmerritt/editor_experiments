@@ -91,6 +91,8 @@ export interface SaveDocumentInput {
   title?: string;
   content?: string;
   extensions?: ExtensionData;
+  parentId?: string | null;
+  order?: number;
   createdBy?: string;
   reason?: string;
 }
@@ -278,14 +280,23 @@ export class WorkspaceRepository {
         INSERT OR IGNORE INTO workspace_projects (id, title) VALUES (?, ?)
       `).run(defaultProjectId, 'My writing project');
 
-      const hasDocument = this.database.prepare('SELECT 1 FROM workspace_documents WHERE project_id = ? LIMIT 1').get(defaultProjectId);
-      if (!hasDocument) {
+      const hasSpine = this.database.prepare("SELECT 1 FROM workspace_documents WHERE project_id = ? AND role = 'spine' LIMIT 1").get(defaultProjectId);
+      if (!hasSpine) {
         const inserted = this.database.prepare(`
           INSERT OR IGNORE INTO workspace_documents
             (id, project_id, parent_id, title, sort_order, role, content)
           VALUES ('spine_default', ?, NULL, 'Spine', 0, 'spine', '')
         `).run(defaultProjectId);
         if (inserted.changes) this.insertDocumentRevision('spine_default', 1, 'Spine', '', {}, 'system', 'Initial project Spine');
+      }
+      const hasTodos = this.database.prepare("SELECT 1 FROM workspace_documents WHERE project_id = ? AND role = 'todos' LIMIT 1").get(defaultProjectId);
+      if (!hasTodos) {
+        const inserted = this.database.prepare(`
+          INSERT OR IGNORE INTO workspace_documents
+            (id, project_id, parent_id, title, sort_order, role, content)
+          VALUES ('todos_default', ?, NULL, 'Todos', 1, 'todos', '')
+        `).run(defaultProjectId);
+        if (inserted.changes) this.insertDocumentRevision('todos_default', 1, 'Todos', '', {}, 'system', 'Initial project Todos');
       }
     });
     ensure();
@@ -319,6 +330,42 @@ export class WorkspaceRepository {
     return projectFromRow(this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow);
   }
 
+  resetProject(projectId: string): PersistentWorkspace {
+    const current = this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
+    if (!current) throw new Error('Project not found');
+    const reset = this.database.transaction(() => {
+      this.database.prepare(`
+        DELETE FROM workspace_context_bucket_revisions
+        WHERE bucket_id IN (SELECT id FROM workspace_context_buckets WHERE project_id = ?)
+      `).run(projectId);
+      this.database.prepare('DELETE FROM workspace_context_buckets WHERE project_id = ?').run(projectId);
+      this.database.prepare(`
+        DELETE FROM workspace_document_revisions
+        WHERE document_id IN (SELECT id FROM workspace_documents WHERE project_id = ?)
+      `).run(projectId);
+      this.database.prepare('DELETE FROM workspace_documents WHERE project_id = ?').run(projectId);
+      this.database.prepare(`
+        UPDATE workspace_projects
+        SET extensions = '{}', revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ?
+      `).run(projectId);
+      const spineId = id('document');
+      const todosId = id('document');
+      this.database.prepare(`
+        INSERT INTO workspace_documents (id, project_id, parent_id, title, sort_order, role, content)
+        VALUES (?, ?, NULL, 'Spine', 0, 'spine', '')
+      `).run(spineId, projectId);
+      this.insertDocumentRevision(spineId, 1, 'Spine', '', {}, 'system', 'Reset project Spine');
+      this.database.prepare(`
+        INSERT INTO workspace_documents (id, project_id, parent_id, title, sort_order, role, content)
+        VALUES (?, ?, NULL, 'Todos', 1, 'todos', '')
+      `).run(todosId, projectId);
+      this.insertDocumentRevision(todosId, 1, 'Todos', '', {}, 'system', 'Reset project Todos');
+    });
+    reset();
+    return this.workspace();
+  }
+
   createDocument(input: CreateDocumentInput): WorkspaceDocument {
     if (!input.projectId) throw new Error('Document project is required');
     if (!input.title?.trim()) throw new Error('Document title is required');
@@ -344,18 +391,37 @@ export class WorkspaceRepository {
     if (!title) throw new Error('Document title is required');
     const content = input.content ?? current.content;
     const nextExtensions = input.extensions ?? current.extensions;
-    if (title === current.title && content === current.content && JSON.stringify(nextExtensions) === JSON.stringify(current.extensions)) return current;
+    const parentId = input.parentId === undefined ? current.parentId : input.parentId;
+    const order = input.order ?? current.order;
+    if (title === current.title && content === current.content && parentId === current.parentId && order === current.order
+      && JSON.stringify(nextExtensions) === JSON.stringify(current.extensions)) return current;
     const number = current.revision + 1;
     const save = this.database.transaction(() => {
       this.database.prepare(`
         UPDATE workspace_documents
-        SET title = ?, content = ?, extensions = ?, revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        SET title = ?, content = ?, parent_id = ?, sort_order = ?, extensions = ?, revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
-      `).run(title, content, JSON.stringify(nextExtensions), number, input.id);
+      `).run(title, content, parentId, order, JSON.stringify(nextExtensions), number, input.id);
       this.insertDocumentRevision(input.id, number, title, content, nextExtensions, input.createdBy, input.reason ?? 'Saved document');
     });
     save();
     return this.document(input.id);
+  }
+
+  deleteDocument(documentId: string): void {
+    const current = this.document(documentId);
+    if (current.role === 'spine' || current.role === 'todos') throw new Error(`Protected ${current.title} cannot be deleted`);
+    const remove = this.database.transaction(() => {
+      this.database.prepare('UPDATE workspace_documents SET parent_id = NULL WHERE parent_id = ?').run(documentId);
+      this.database.prepare(`
+        DELETE FROM workspace_context_bucket_revisions
+        WHERE bucket_id IN (SELECT id FROM workspace_context_buckets WHERE document_id = ?)
+      `).run(documentId);
+      this.database.prepare('DELETE FROM workspace_context_buckets WHERE document_id = ?').run(documentId);
+      this.database.prepare('DELETE FROM workspace_document_revisions WHERE document_id = ?').run(documentId);
+      this.database.prepare('DELETE FROM workspace_documents WHERE id = ?').run(documentId);
+    });
+    remove();
   }
 
   restoreDocument(documentId: string, revisionId: string, createdBy?: string): WorkspaceDocument {

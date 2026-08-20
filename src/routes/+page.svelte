@@ -48,6 +48,8 @@
   let revisionSuggestionId = $state<string | null>(null);
   let customRequestOpen = $state(false);
   let customRequest = $state('');
+  let projectDialogKind = $state<'create' | 'rename' | 'reset' | null>(null);
+  let projectDialogValue = $state('');
 
   let selectedPrompt = $derived(workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0]);
   let currentDocumentText = $derived(workspace.currentDocument?.content ?? '');
@@ -468,8 +470,11 @@
     await switchDocument(id);
   }
 
-  async function switchDocument(id: string): Promise<void> {
-    if (id === workspace.branchId) return;
+  async function switchDocument(id: string, navigation: 'push' | 'back' | 'forward' = 'push'): Promise<void> {
+    if (id === workspace.branchId && navigation === 'push') {
+      await workspace.openNavigatorNode(id, navigation);
+      return;
+    }
     if (documentSaveTimer) {
       clearTimeout(documentSaveTimer);
       documentSaveTimer = null;
@@ -478,7 +483,7 @@
     }
     editorReady = false;
     selection = { from: 1, to: 1, text: '' };
-    await workspace.switchBranch(id);
+    await workspace.openNavigatorNode(id, navigation);
     displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
   }
@@ -498,11 +503,58 @@
     refreshLiveSuggestions();
   }
 
-  async function createProject(): Promise<void> {
-    const title = window.prompt('Project name')?.trim();
-    if (!title) return;
+  function createProject(): void {
+    projectDialogKind = 'create';
+    projectDialogValue = '';
+  }
+
+  function renameProject(): void {
+    const current = workspace.currentProject;
+    if (!current) return;
+    projectDialogKind = 'rename';
+    projectDialogValue = current.title;
+  }
+
+  function resetProject(): void {
+    const current = workspace.currentProject;
+    if (!current) return;
+    projectDialogKind = 'reset';
+    projectDialogValue = '';
+  }
+
+  async function submitProjectDialog(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const kind = projectDialogKind;
+    const value = projectDialogValue.trim();
+    const current = workspace.currentProject;
+    if (!kind || !current) return;
+    if (kind === 'rename') {
+      if (!value) return;
+      await workspace.renameProject(value);
+      projectDialogKind = null;
+      return;
+    }
+    if (kind === 'create') {
+      if (!value) return;
+      if (documentSaveTimer) {
+        clearTimeout(documentSaveTimer);
+        documentSaveTimer = null;
+        await workspace.persistCurrentDocument('Saved before creating project');
+      }
+      editorReady = false;
+      await workspace.createProject(value);
+      projectDialogKind = null;
+      refreshLiveSuggestions();
+      return;
+    }
+    if (value !== current.title) return;
+    if (documentSaveTimer) clearTimeout(documentSaveTimer);
+    documentSaveTimer = null;
     editorReady = false;
-    await workspace.createProject(title);
+    selection = { from: 1, to: 1, text: '' };
+    await workspace.resetCurrentProject();
+    projectDialogKind = null;
+    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
   }
 
@@ -516,8 +568,10 @@
   async function renameDocument(): Promise<void> {
     const current = workspace.currentDocument;
     if (!current) return;
-    const title = window.prompt('Document name', current.title)?.trim();
-    if (!title || title === current.title) return;
+    const previous = workspace.navigatorNodeEditableTitle(current);
+    const title = window.prompt('Document name', previous)?.trim();
+    if (title === undefined || title === previous) return;
+    if (!title && current.role !== 'navigator_node') return;
     await workspace.renameDocument(current.id, title);
   }
 
@@ -609,8 +663,10 @@
               {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
             </select>
             <button onclick={createProject} title="Create project">+ Project</button>
-            <span aria-hidden="true">/</span><strong>{workspace.currentDocument?.title}</strong>
-            <button onclick={renameDocument}>Rename</button>
+            <button onclick={renameProject} title="Rename current project">Rename project</button>
+            <button onclick={resetProject} title="Remove this project's material and recreate an empty Spine and Todos">Start over</button>
+            <span aria-hidden="true">/</span><small>Editing</small><strong>{workspace.currentDocument ? workspace.navigatorNodeLabel(workspace.currentDocument) : ''}</strong>
+            {#if workspace.currentDocument && !['spine', 'todos'].includes(workspace.currentDocument.role ?? '')}<button onclick={renameDocument}>Rename</button>{/if}
             <button onclick={forkBranch}>Fork from here</button>
           </div>
           <div><span>{wordCount(currentDocumentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button onclick={exportMarkdown}>Export .md</button></div>
@@ -767,6 +823,23 @@
           <label>OpenRouter model ID<small>Exact OpenRouter model slug</small><input name="openrouter-model" required bind:value={providerSettings.openRouterModel} /></label>
           {#if providerSettings.error}<p class="provider-error" role="alert">{providerSettings.error}</p>{/if}
           <footer><p>The masked key confirms which credential is active without exposing it.</p><button type="button" onclick={() => providerSettings.closeOpenRouter()}>Cancel</button><button type="submit" class="primary" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
+        </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if projectDialogKind}
+    <div class="modal-backdrop" role="presentation" onclick={() => projectDialogKind = null}>
+      <div class="settings project-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="project-dialog-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <form onsubmit={submitProjectDialog}>
+          <header><div><small>Project</small><h2 id="project-dialog-title">{projectDialogKind === 'create' ? 'Create project' : projectDialogKind === 'rename' ? 'Rename project' : 'Start over'}</h2></div><button type="button" onclick={() => projectDialogKind = null}>×</button></header>
+          {#if projectDialogKind === 'reset'}
+            <p class="reset-warning">This permanently removes the current project's documents, Collections, Todo records and content, Inputs, formats, and context. The project will restart with empty Spine and Todos documents.</p>
+            <label>Type <strong>{workspace.currentProject?.title}</strong> to confirm<input aria-label="Project name confirmation" autocomplete="off" bind:value={projectDialogValue} /></label>
+          {:else}
+            <label>Project name<input aria-label="Project name" autocomplete="off" bind:value={projectDialogValue} /></label>
+          {/if}
+          <footer><p>{projectDialogKind === 'reset' ? 'This cannot be undone.' : 'The project name is separate from its fixed Spine and Todos.'}</p><button type="button" onclick={() => projectDialogKind = null}>Cancel</button><button class:danger={projectDialogKind === 'reset'} class="primary" disabled={!projectDialogValue.trim() || (projectDialogKind === 'reset' && projectDialogValue.trim() !== workspace.currentProject?.title)}>{projectDialogKind === 'reset' ? 'Start over' : projectDialogKind === 'rename' ? 'Rename' : 'Create'}</button></footer>
         </form>
       </div>
     </div>
@@ -968,6 +1041,10 @@
   .undo-toast { position: fixed; z-index: 61; left: 50%; bottom: 22px; transform: translateX(-50%); display: flex; align-items: center; gap: 18px; border-radius: 3px; background: #282723; color: white; padding: 10px 13px; box-shadow: 0 10px 30px rgb(0 0 0 / .2); font-size: 10px; }
   .undo-toast button { border: 0; background: transparent; color: #8cd5bc; font-weight: 700; cursor: pointer; }
   .modal-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 22px; background: rgb(34 31 27 / .38); backdrop-filter: blur(3px); }
+  .project-settings { width: min(500px, 100%); }
+  .project-settings form > header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 20px; }
+  .project-settings .reset-warning { margin: 0; padding: 12px; border-left: 3px solid #9a4439; background: #9a44390d; color: var(--ink-soft); font: 11px/1.55 var(--font-ui); }
+  .project-settings footer button.danger { border-color: #8d3329; background: #8d3329; }
   .input-manager { width: min(820px, 100%); max-height: calc(100vh - 44px); overflow: hidden; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 5px; background: var(--paper); box-shadow: 0 30px 80px rgb(26 22 17 / .22); padding: 24px; }
   .input-manager > header, .input-list article > header, .input-list article > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .input-manager h2 { margin: 3px 0 0; font: 500 24px/1.2 var(--font-reading); }
@@ -1016,6 +1093,7 @@
   .context-bucket > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding-top: 3px; }
   .context-bucket > footer small { flex: 1; color: var(--muted); font: 9px/1.4 var(--font-ui); }
   .settings footer .danger { border-color: #d9b9b3; color: var(--reject); }
+  .project-settings footer button.primary.danger { border-color: #8d3329; background: #8d3329; color: #fff; }
   .new-context { margin-top: 18px; padding: 16px; border: 1px dashed var(--line-strong); border-radius: 4px; }
   .new-context h3 { margin: 0 0 12px; font: 600 14px/1.2 var(--font-ui); }
   .new-context > button { float: right; border: 1px solid var(--accent); border-radius: 3px; background: var(--accent); color: white; padding: 8px 12px; font-size: 10px; cursor: pointer; }

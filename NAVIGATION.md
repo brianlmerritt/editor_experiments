@@ -120,7 +120,10 @@ independent capabilities.
 
 The Navigator is fluid without making the project structure unstable. Most visible
 elements retain fixed identity and ordering; expansion and contraction are the normal
-changes. A named view switch chooses between **Traditional** and **Context** views.
+changes. **Traditional** and **Context** remain available views, but opening a
+structural Node establishes its focus and enters Context automatically. Back and
+Forward traverse stable focus history without requiring a permanently visible
+breadcrumb.
 
 ### Traditional view
 
@@ -139,9 +142,10 @@ the writer moves the caret.
 
 Context view is a persistent contextual projection, analogous to the awareness offered
 by a right-click menu but kept visible and navigable. It is influenced by the focused
-pane and what is selected there. It may surface:
+structural Node rather than every document temporarily opened from that context. It
+surfaces:
 
-- the selected Node and its structural ancestors and children;
+- the focused Node, its direct parent, direct siblings, and direct children;
 - directly related Nodes grouped by Collection;
 - applicable Spine material;
 - confirmed Todos related to the Spine, selected Node, one or more containers,
@@ -153,16 +157,19 @@ It changes only the projection. Derived relevance must be explainable—for exam
 `shown because Mara is selected` or `Todo applies to Chapter 1`—and AI-inferred but
 unconfirmed relationships remain Inputs rather than Navigator structure.
 
-Context is driven by meaningful selection state: the focused Node, an explicitly
-selected text target, Todo, Input target, or relationship. It must not steal editor
-focus, jump the Navigator scroll position, or rebuild itself on every caret movement.
-Remembered items are keyed by stable identities rather than display positions, so a
-renamed or reordered Node remains the same remembered item.
+Opening a structural Node changes the Navigator focus. Opening a Todo or another
+supporting document from that neighbourhood does not discard the structural focus.
+It must not steal editor focus, jump the Navigator scroll position, or rebuild itself
+on every caret movement. Remembered items are keyed by stable identities rather than
+display positions, so a renamed or reordered Node remains the same remembered item.
 
-Spine and Todos remain available in both views. A writer can return to Traditional
-view at any time without losing its expansion or scroll state. Context view keeps its
-own expansion, scroll, and recent-context memory so switching views or focused panes
-does not reset the working arrangement.
+A writer can return to Traditional view at any time without losing its expansion or
+scroll state. Context view shows applicable Todos rather than the entire global Todo
+list and keeps its own expansion, focus history, scroll, and recent-context memory.
+Back and Forward restore earlier structural focuses; they do not mutate containment.
+The applicable-Todo section can create a Todo already targeted to the focused Node;
+opening that Todo leaves the structural Context visible while its long-form content is
+edited centrally.
 
 Example Traditional view:
 
@@ -181,30 +188,30 @@ Locations
   Hospital
 ```
 
-Example Context view while Scene 2 is selected:
+Example Context view while Scene 2 is focused:
 
 ```text
-Spine
-Todos
-Manuscript
+‹  ›
+Focused
+  Scene 2
+Parent
   Chapter 1
-    Scene 1
-  ▾ Scene 2                     3 inputs · 1 todo
-      Characters (2)
-        ↗ Mara
-        ↗ Edna
-      Location
-        ↗ Hospital café
-      Work (1)
-      Variants (1)
-    Scene 3
-Characters
+Siblings
+  Scene 1
+  Scene 3
+Related
   Mara
   Edna
+  Hospital café
+Applicable Todos
+  Resolve the transition into the café
 ```
 
-`↗ Mara` is an alias/projection of the same Mara node, not copied character data.
-Renaming or changing Mara updates one stable entity.
+The neighbourhood control on a visible item reveals that item's direct parent,
+siblings, confirmed relationships, and applicable Todos without changing focus.
+Structural disclosure independently reveals children. Indirect exploration therefore
+grows one explainable hop at a time rather than displaying the whole graph. Every
+appearance of Mara remains a projection of the same stable Node.
 
 ### Fixed elements and smart views
 
@@ -219,11 +226,16 @@ empty because writing continuously creates work to consider, perform, defer, or
 resolve. Todos are canonical project records, not AI cards. They can be created by the
 writer or adopted from a proposed Input, impact assessment, local check, or import.
 They may target the Spine, one or more Nodes or containers, manuscript content, a
-decision, or a fork.
+decision, or a fork. Every Todo has a durable, editable document for long-form plans,
+evidence, alternatives, and notes. Selecting its title opens that content; only its
+checkbox changes done/open state. Complex planning is therefore not forced into a
+stack of cards or one-line labels.
 
-Spine and Todos are the only fixed Navigator elements. Manuscript, Chapters, Scenes,
-Research, Characters, References, and other structures are Collections supplied by a
-template or created by the writer.
+Spine and Todos are the only fixed Navigator elements. In Traditional view the Spine
+is followed by the writer's Collections and the **Add Collection** action, then Todos.
+An **Archived/Unowned** recovery area remains at the bottom. Archived material and
+material without a primary owner retain distinct domain states even though the UI
+groups them in one recovery area.
 
 The Todo model reserves a parent-Todo relationship so nested subtasks can be added
 without migration, but nested Todo UI is not required on day one. AI-created tasks are
@@ -242,9 +254,17 @@ These are queries over authoritative state, not additional copies of it.
 
 ### Icons and status
 
-Icons should distinguish a restrained set of broad material types, such as text,
-character, location, research, Spine, Todo, and smart collection. A disclosure
-control independently indicates that a node has children.
+Optional icons describe structural presentation only, with neutral choices such as
+folder, file, link, Todo, or no icon. They never define or constrain what a Collection
+means. A disclosure control independently indicates that a node has children, a move
+handle owns reordering gestures, and row selection opens content. The Spine does not
+use a diamond merely to indicate that it is selectable; selection is conveyed by the
+same row state used everywhere else.
+
+Navigator leaves use one quiet visual grammar rather than separate card treatments:
+move handle, disclosure or status control, structural icon, title, and optional count
+or scope. The controls do double duty, so every non-obvious icon and action requires a
+plain-language tooltip and accessible label.
 
 Transient state belongs in small badges or secondary marks: open work, unresolved
 inputs, changed-since-review, active activity, alias, or fork. Dozens of subtly
@@ -253,10 +273,12 @@ the target.
 
 ## Collections and Nodes
 
-A **Collection** is a project-defined category and generated Navigator heading. A
-**Node** is an individual member of a Collection. `Characters` is a Collection;
-`Mara` is a Node. The Collection heading is not itself content-bearing. An overview
-that needs content is represented by a Node or by the Spine.
+A **Collection** is a first-class, content-bearing, connectable Navigator Node that
+also owns an ordered set of children. `Characters` is a Collection; `Mara` can be one
+of its child Nodes. Selecting `Characters` opens its own content while its independent
+disclosure control expands or contracts the children. A Collection may remain useful
+with no children—for example, one `Location` Collection may hold the complete location
+material directly.
 
 Internally, a `CollectionDefinition` stores the Collection's configuration. This
 technical term is not required in the ordinary UI, which can say **New Collection**,
@@ -278,9 +300,13 @@ making the core application understand every literary concept:
 ```ts
 interface CollectionDefinition {
   id: CollectionId;
-  name: string;
-  itemName: string;
+  name: string;             // explicit plural, e.g. Scenes
+  singularName: string;     // explicit editable suggestion, e.g. Scene
   icon?: IconReference;
+  numbering?: {
+    enabled: boolean;
+    start: number;
+  };
   capabilities: {
     contentBearing: boolean;
     mayContainChildren: boolean;
@@ -294,15 +320,40 @@ interface CollectionDefinition {
 
 This is illustrative, not a frozen TypeScript contract.
 
-The UX needs a mechanism to create, edit, reorder, hide, and possibly clone
-Collections. Project templates may supply useful initial Collections without making
-`chapter` and `scene` mandatory architecture.
+Collection creation asks for an explicit plural name and an explicit singular name.
+Typing the plural may populate a suggested singular value, but the suggestion remains
+an ordinary editable field and must not overwrite a manual change. Content-specific
+icon presets such as character, scene, or location are prohibited because they would
+quietly recreate a fixed ontology.
 
-A Collection heading is a generated projection of its Nodes. A Node may be
-content-bearing, may contain child Nodes, and may appear under a structural parent
-without requiring its Collection heading to appear at that location. For example,
-Scene Nodes can appear beneath Chapter 1 while still using the `Scenes` Collection
-definition.
+Collections and child Nodes have stable identities. Optional numbering is derived
+from sibling order and the configured start number. It never becomes part of the
+identity: moving `Scene 3 — The Visit` before Scene 1 may display it as
+`Scene 1 — The Visit` without breaking relationships, Inputs, Todos, history, or
+forks. The suffix is an optional user title stored separately from the generated
+singular name and number.
+
+The UX needs mechanisms to edit, reorder, move, archive, and eventually clone
+Collections and Nodes. A move handle owns drag/reorder behaviour; disclosure and row
+selection remain separate controls. Project templates may supply useful initial
+Collections without making chapter, scene, or any other literary concept compulsory.
+
+A drag transaction changes ordering or primary containment only. It must preserve the
+Node ID, durable content, Collection membership, optional title, relationships, and
+Inputs. Dropping near another Collection must never silently convert the Node.
+Changing Collection membership requires a future explicit **Move to Collection** or
+**Convert** command with its own consequences and confirmation.
+
+Collection management can update its plural and singular names, structural icon, and
+numbering. Deleting a Collection deletes the Collection document but moves its child
+Nodes to Archived/Unowned rather than erasing their content. The item field uses the
+action-oriented prompt **Create new {singular name}**; when numbering is enabled its
+name may be left blank because the generated number is sufficient.
+
+Selecting the Todos heading opens source-maintained instructions while selecting an
+individual Todo opens its durable content in the editor. A future consolidated view
+over Todo records may still use the editor, a modal, or a split pane; the data and
+command model does not assume that later presentation.
 
 ### Relationship vocabulary
 
@@ -363,7 +414,10 @@ The initial interaction direction is:
   split;
 - selecting a collapsed content-bearing container such as Chapter 1 expands it and
   shows that container's own content in the focused central pane;
-- back/forward location history returns to the previous manuscript location;
+- selecting a structural Node enters its Context projection automatically;
+- back/forward focus history returns to the previous structural location;
+- opening a Todo from that Context changes the editor document but retains the
+  structural focus;
 - opening related content does not repurpose the right-side Inputs/review panel.
 
 The central split workspace is the preferred way to keep the manuscript and detailed
@@ -619,6 +673,12 @@ Navigator structure have been proved.
 - how relationship confirmation and contradiction are represented;
 - whether and how a local graph visualisation is useful.
 
+### Navigator contextual header
+
+- determine whether the project name should disappear from the Navigator in
+  Traditional view and become a genuinely useful contextual label, path, or scope
+  indicator in Context view; do not keep duplicate project chrome merely for symmetry.
+
 ### Fork and split-view rules
 
 - whether Navigator view state follows focus immediately or can be pinned;
@@ -638,8 +698,16 @@ current POC sample into the new workspace.
 A new project initially contains only:
 
 - the protected, editable Spine;
-- the fixed, empty Todos view;
+- the protected, editable Todos document and its empty Todo-record view;
 - the project and workspace state required to create Collections and Nodes.
+
+Existing projects are repaired on open rather than seeded with guessed material:
+missing Spine, Todos, or content-bearing Collection documents are materialised from
+their canonical roles and Collection definitions. The fixed Spine and Todos names are
+restored if older code allowed either identity to be renamed. The user may explicitly
+choose **Start over** by typing the project name; this clears that project's documents,
+Collections, Todo records, Inputs, formats, and context, then recreates only empty
+Spine and Todos documents. Migration never performs this destructive reset silently.
 
 Existing tests and implementation evidence remain valuable for the editor reducer,
 targets, formats, Inputs, persistence, and undo/redo, but the visible demo content is
@@ -654,28 +722,46 @@ The first Navigator POC now proves:
 
 - a fresh project starts with an empty, protected Spine and empty Todos rather than
   generated manuscript or context content;
-- project-defined Collections and content-bearing Nodes are created from Svelte-owned
-  state and persisted through the workspace facade;
+- Spine and Todos have protected names but editable, durable content, and legacy
+  projects repair missing or misnamed fixed documents when opened;
+- project-defined Collections are themselves content-bearing, selectable Nodes and
+  are persisted with their children through the workspace facade;
 - a Node may contain child Nodes while retaining its own editable content;
+- plural/singular naming, structural icons, optional numbering, optional titles, move
+  handles, stable-identity reordering, and derived renumbering are implemented;
 - confirmed typed relationships are stored once and projected with inverse labels;
 - canonical Todos can target one or more Nodes, with `parentTodoId` reserved for later
-  nested-task UI;
+  nested-task UI, and every Todo title opens its own durable content document while
+  its checkbox alone controls state;
 - Traditional and Context views keep independent expansion and selection memory;
-- Context view derives focused ancestors, children, direct relationships, and
-  applicable Todos without mutating the graph;
+- opening a structural Node enters Context automatically and records Back/Forward
+  focus history, while opening a Todo retains the current structural focus;
+- Context view derives the direct parent, siblings, children, bidirectional direct
+  relationships, and applicable Todos without mutating the graph;
+- applicable Todos can be created and opened from Context without replacing its
+  structural focus;
+- per-row neighbourhood expansion reveals another Node's immediate structural and
+  relationship vicinity without changing focus;
+- Navigator drag transactions preserve Node identity, Collection membership, optional
+  title, and content; cross-Collection drops are refused rather than converted;
 - selecting any structural or related Node opens its one durable document in the
   existing editor and Input workflow.
+- Collections, Todos, and Archived/Unowned headings open concise instructions kept as
+  editable HTML source under `src/lib/content/navigator/` rather than inline UI text;
+- Collections can be edited or deleted; deleted Collection children are recovered
+  under Archived/Unowned, while an explicit project-name-confirmed Start over action
+  provides a genuinely clean project when that is what the writer chooses.
 
 The current persistence adapter stores Collection definitions, relationships, and
 Todos in the project's Navigator extension while content-bearing Nodes use durable
 workspace documents. This is deliberately behind the facade and is not a commitment
 to that storage representation.
 
-Still deferred from this first slice are Collection management beyond creation,
-moving/reordering/deleting Nodes, multi-target Todo editing UI, relationship-definition
-administration, impact cascades, fork-aware graph variance, and the terminal-style
-multi-pane manager. Existing AI review and Input behaviour remains available but has
-not yet been redesigned around Navigator context.
+Still deferred from this first slice are Collection cloning and restoration,
+richer reparenting gestures, multi-target Todo editing UI,
+relationship-definition administration, impact cascades, fork-aware graph variance,
+and the terminal-style multi-pane manager. Existing AI review and Input behaviour
+remains available but has not yet been redesigned around Navigator context.
 
 The next implementation should test the smallest vertical slice that proves the
 Navigator direction without attempting recipes, collaboration, or a complete literary

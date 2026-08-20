@@ -6,6 +6,7 @@ import {
   navigatorExtensions,
   nodeCollectionId,
   nodeExtensions,
+  itemDisplayName,
   readNavigatorState,
   relationNeighbours,
   type NavigatorProjectState
@@ -32,7 +33,8 @@ describe('Navigator domain projection', () => {
       version: 1,
       revision: 2,
       collections: [{
-        id: 'characters', name: 'Characters', itemName: 'Character', order: 0, icon: 'character',
+        id: 'characters', name: 'Characters', singularName: 'Character', order: 0, icon: 'folder',
+        numbering: { enabled: false, start: 1 },
         capabilities: { contentBearing: true, mayContainChildren: false }
       }],
       relationships: [],
@@ -43,10 +45,23 @@ describe('Navigator domain projection', () => {
   });
 
   it('keeps collection membership on the node without replacing other extensions', () => {
-    const extensions = nodeExtensions({ margin_note: { revision: 3 } }, 'scenes');
+    const extensions = nodeExtensions({ margin_note: { revision: 3 } }, 'scenes', 'Arrival');
     const scene = { ...node('scene'), extensions };
     expect(nodeCollectionId(scene)).toBe('scenes');
     expect(scene.extensions.margin_note).toEqual({ revision: 3 });
+  });
+
+  it('derives numbered labels from sibling order while retaining optional titles', () => {
+    const first = { ...node('first'), order: 0, extensions: nodeExtensions({}, 'scenes', 'Arrival') };
+    const second = { ...node('second'), order: 1, extensions: nodeExtensions({}, 'scenes') };
+    const collection = {
+      id: 'scenes', name: 'Scenes', singularName: 'Scene', order: 0, icon: 'folder' as const,
+      numbering: { enabled: true, start: 3 }, capabilities: { contentBearing: true, mayContainChildren: true }
+    };
+
+    expect(itemDisplayName(first, collection, [first, second])).toBe('Scene 3 — Arrival');
+    expect(itemDisplayName(second, collection, [first, second])).toBe('Scene 4');
+    expect(itemDisplayName(first, collection, [second, { ...first, order: 2 }])).toBe('Scene 4 — Arrival');
   });
 
   it('projects inverse relationship labels without copying nodes', () => {

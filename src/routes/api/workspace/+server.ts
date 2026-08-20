@@ -52,6 +52,9 @@ export const POST: RequestHandler = async ({ request }) => {
           throw new Error('Project extensions must be an object');
         }
         return json({ project: workspaceRepository.saveProject(body.id, body.title, body.extensions as ExtensionData | undefined) });
+      case 'reset_project':
+        if (typeof body.id !== 'string') throw new Error('Project ID is required');
+        return json({ workspace: workspaceRepository.resetProject(body.id) });
       case 'create_document':
       {
         const input = inputObject(body);
@@ -64,6 +67,10 @@ export const POST: RequestHandler = async ({ request }) => {
         requiredString(input, 'id', 'Document ID');
         return json({ document: workspaceRepository.saveDocument(input as unknown as SaveDocumentInput) });
       }
+      case 'delete_document':
+        if (typeof body.id !== 'string') throw new Error('Document ID is required');
+        workspaceRepository.deleteDocument(body.id);
+        return json({ ok: true });
       case 'restore_document':
         if (typeof body.documentId !== 'string' || typeof body.revisionId !== 'string') throw new Error('Document and revision IDs are required');
         return json({ document: workspaceRepository.restoreDocument(body.documentId, body.revisionId, body.sessionId) });
