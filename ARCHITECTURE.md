@@ -155,9 +155,11 @@ Each ordinary Node has at most one primary structural parent. This containment i
 acyclic and ordered. Typed cross-links, scopes, aliases, and derivation relations may
 be many-to-many and circular. Removing an alias never deletes its target. Deleting a
 parent with children requires an explicit delete-descendants, rehome, or cancel
-decision. Relationship cardinality, inverse relations, lifecycle ownership, deletion,
-and ordering policy belong to Collection/relation definitions and the domain
-reducer—not individual components. A domain graph does not imply a graph database.
+decision. Readable inverse labels and ordering belong to project-owned relationship
+definitions, while lifecycle, deletion, and graph integrity belong to the domain
+reducer—not individual components. Cardinality and endpoint constraints remain
+deliberately deferred until the initial writing vocabularies have been exercised. A
+domain graph does not imply a graph database.
 
 A Collection is itself a stable, content-bearing Node as well as an ordered container.
 Selecting it opens its own content; expanding it reveals its children. Collection and
@@ -540,7 +542,10 @@ recreates its empty fixed roots.
 
 This remains a proof of concept rather than the completed model above. The Navigator,
 protected content-bearing Spine and Todos, user-defined content-bearing Collections,
-stable Nodes, and confirmed graph relationships now have a first vertical slice.
+stable Nodes, project-owned relationship definitions, and confirmed scoped graph
+relationships now have a first vertical slice. Relationship definitions can be
+installed from editable writing sets or created directly; installing vocabulary does
+not create links or content.
 Fork-aware graph variance and the terminal-style split-pane projection are not
 implemented; history stores complete snapshots instead of compact forward and inverse
 patches; current session undo is not restored after reload; and collaborative

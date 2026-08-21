@@ -1,5 +1,12 @@
 <script lang="ts">
   import { workspace } from '$lib/state/workspace.svelte';
+  import RelationshipManager from '$lib/components/RelationshipManager.svelte';
+  import {
+    collectionSetDrafts,
+    collectionSets,
+    sameCollectionName,
+    type CollectionSetDraft
+  } from '$lib/workspace/collection-sets';
   import { nodeArchived, nodeCollectionId, type CollectionDefinition } from '$lib/workspace/navigator';
   import type { WorkspaceDocument } from '$lib/workspace/model';
   import collectionsInstructions from '$lib/content/navigator/collections-instructions.html?raw';
@@ -10,6 +17,8 @@
     onOpenNode: (id: string, navigation?: 'push' | 'back' | 'forward') => Promise<void>
   } = $props();
 
+  let collectionManagerOpen = $state(false);
+  let collectionManagerPurpose = $state<'manage' | 'create-child' | 'proactive'>('manage');
   let collectionFormOpen = $state(false);
   let collectionName = $state('');
   let singularName = $state('');
@@ -17,12 +26,8 @@
   let collectionIcon = $state<CollectionDefinition['icon']>('folder');
   let numberingEnabled = $state(false);
   let numberingStart = $state(1);
-  let nodeDrafts = $state<Record<string, string>>({});
   let todoDraft = $state('');
-  let relationOpen = $state(false);
-  let relationTarget = $state('');
-  let relationType = $state('features');
-  let relationInverseType = $state('appears in');
+  let relationshipManagerOpen = $state(false);
   let childCollection = $state('');
   let childTitle = $state('');
   let dragged = $state<{ kind: 'collection' | 'node'; id: string } | null>(null);
@@ -34,10 +39,21 @@
   let editNumberingStart = $state(1);
   let deletingCollectionId = $state<string | null>(null);
   let helpTopic = $state<'collections' | 'todos' | 'archived' | null>(null);
+  let expandedSetIds = $state<string[]>([]);
+  let setDrafts = $state<Record<string, CollectionSetDraft>>(collectionSetDrafts());
+  let applyingSets = $state(false);
+  let addMenuOpen = $state(false);
+  let addKind = $state<'material' | 'todo' | null>(null);
+  let removalMode = $state(false);
+  let removalConfirm = $state(false);
+  let removeNodeIds = $state<string[]>([]);
+  let removeTodoIds = $state<string[]>([]);
+  let removeRelationshipIds = $state<string[]>([]);
+  let dropTarget = $state<{ nodeId: string; placement: 'before' | 'inside' } | null>(null);
+  const promptedEmptyProjects = new Set<string>();
 
   let current = $derived(workspace.currentDocument);
   let focused = $derived(workspace.navigatorFocusNode);
-  let availableRelationTargets = $derived(workspace.projectNodes.filter((node) => node.id !== workspace.navigatorFocusId));
   let helpContent = $derived(helpTopic === 'collections'
     ? collectionsInstructions
     : helpTopic === 'todos'
@@ -45,6 +61,24 @@
       : helpTopic === 'archived'
         ? archivedInstructions
         : '');
+  let selectedSetItemCount = $derived(Object.values(setDrafts).filter((item) => item.selected && !setTemplateExists(item.id)).length);
+  let selectedSetHasErrors = $derived(Object.values(setDrafts).some((item) =>
+    item.selected && (!item.name.trim() || !item.singularName.trim() || draftNameConflict(item.id))));
+  let removalCount = $derived(removeNodeIds.length + removeTodoIds.length + removeRelationshipIds.length);
+
+  $effect(() => {
+    const projectId = workspace.projectId;
+    const collectionCount = workspace.navigator.collections.length;
+    if (!projectId || workspace.loading) return;
+    if (collectionCount > 0) {
+      promptedEmptyProjects.delete(projectId);
+      return;
+    }
+    if (!promptedEmptyProjects.has(projectId)) {
+      promptedEmptyProjects.add(projectId);
+      openCollectionManager('proactive');
+    }
+  });
 
   const iconGlyphs: Record<CollectionDefinition['icon'], string> = {
     folder: '▰', file: '▤', link: '↗', todo: '✓', none: ''
@@ -71,8 +105,36 @@
     return labels.length ? labels.join(', ') : 'Work';
   }
 
-  function nearbyNodes(node: WorkspaceDocument): WorkspaceDocument[] {
-    return workspace.navigatorNeighbourhood(node.id);
+  function previewChildren(node: WorkspaceDocument, path: string[]): WorkspaceDocument[] {
+    const excluded = new Set(path);
+    return childrenOf(node.id).filter((child) => !excluded.has(child.id)).slice(0, 3);
+  }
+
+  function previewTodos(node: WorkspaceDocument) {
+    return [...workspace.navigatorTodosFor(node.id)]
+      .sort((left, right) => Number(left.state === 'done') - Number(right.state === 'done') || left.createdAt.localeCompare(right.createdAt))
+      .slice(0, 3);
+  }
+
+  function previewRelations(node: WorkspaceDocument, path: string[]) {
+    const excluded = new Set([
+      ...path,
+      ...(focused ? [focused.id] : []),
+      ...workspace.selectedNodeChildren.map((child) => child.id),
+      ...workspace.selectedNodeRelations.map((relation) => relation.node.id)
+    ]);
+    return workspace.navigatorRelationsFor(node.id).filter((relation) => !excluded.has(relation.node.id)).slice(0, 3);
+  }
+
+  function hasPreview(node: WorkspaceDocument, path: string[]): boolean {
+    return Boolean(previewChildren(node, path).length || previewTodos(node).length || previewRelations(node, path).length);
+  }
+
+  function contextPeers(): WorkspaceDocument[] {
+    if (!focused?.parentId) return focused ? [focused] : [];
+    return workspace.navigatorNodes
+      .filter((node) => node.parentId === focused?.parentId && !nodeArchived(node))
+      .sort((left, right) => left.order - right.order);
   }
 
   async function navigateHistory(direction: 'back' | 'forward'): Promise<void> {
@@ -104,24 +166,110 @@
     collectionFormOpen = false;
   }
 
+  function collectionExists(name: string): boolean {
+    return workspace.navigator.collections.some((collection) => sameCollectionName(collection.name, name));
+  }
+
+  function setTemplateExists(itemId: string): boolean {
+    const template = collectionSets.flatMap((set) => set.items).find((item) => item.id === itemId);
+    return template ? collectionExists(template.name) : false;
+  }
+
+  function draftNameConflict(itemId: string): boolean {
+    const draft = setDrafts[itemId];
+    if (!draft?.selected) return false;
+    if (collectionExists(draft.name)) return true;
+    return Object.values(setDrafts).some((candidate) =>
+      candidate.id !== itemId && candidate.selected && sameCollectionName(candidate.name, draft.name));
+  }
+
+  function resetSetSelection(): void {
+    setDrafts = collectionSetDrafts();
+    expandedSetIds = [];
+  }
+
+  function openCollectionManager(
+    purpose: 'manage' | 'create-child' | 'proactive' = 'manage',
+    collection?: CollectionDefinition
+  ): void {
+    collectionManagerPurpose = purpose;
+    collectionManagerOpen = true;
+    collectionFormOpen = false;
+    editingCollectionId = null;
+    deletingCollectionId = null;
+    resetSetSelection();
+    if (collection) beginCollectionEdit(collection);
+  }
+
+  function closeCollectionManager(): void {
+    collectionManagerOpen = false;
+    collectionFormOpen = false;
+    editingCollectionId = null;
+    deletingCollectionId = null;
+  }
+
+  function setExpanded(setId: string, expanded: boolean): void {
+    expandedSetIds = expanded
+      ? [...new Set([...expandedSetIds, setId])]
+      : expandedSetIds.filter((id) => id !== setId);
+  }
+
+  function toggleSetSelection(setId: string, selected: boolean): void {
+    const set = collectionSets.find((candidate) => candidate.id === setId);
+    if (!set) return;
+    setDrafts = { ...setDrafts };
+    for (const item of set.items) {
+      const draft = setDrafts[item.id];
+      if (draft && !setTemplateExists(item.id)) setDrafts[item.id] = { ...draft, selected };
+    }
+    if (selected) setExpanded(setId, true);
+  }
+
+  function updateSetDraft(itemId: string, update: Partial<CollectionSetDraft>): void {
+    const current = setDrafts[itemId];
+    if (current) setDrafts = { ...setDrafts, [itemId]: { ...current, ...update } };
+  }
+
+  function setSelectionState(setId: string): { checked: boolean; indeterminate: boolean; disabled: boolean } {
+    const set = collectionSets.find((candidate) => candidate.id === setId);
+    const available = set?.items.map((item) => setDrafts[item.id]).filter((item) => item && !setTemplateExists(item.id)) ?? [];
+    const selected = available.filter((item) => item.selected).length;
+    return { checked: Boolean(available.length) && selected === available.length, indeterminate: selected > 0 && selected < available.length, disabled: !available.length };
+  }
+
   async function addCollection(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    const created = await workspace.createCollection({
+    const created = await workspace.recordNavigatorChange(`Create ${collectionName.trim()} Collection`, () => workspace.createCollection({
       name: collectionName,
       singularName,
       icon: collectionIcon,
       numbering: { enabled: numberingEnabled, start: Math.trunc(numberingStart) }
-    });
+    }));
     if (!created) return;
+    if (collectionManagerPurpose === 'create-child' || workspace.navigatorMemory.mode === 'context') childCollection = created.id;
     resetCollectionForm();
-    await onOpenNode(created.id);
+    closeCollectionManager();
   }
 
-  async function addNode(collection: CollectionDefinition): Promise<void> {
-    const created = await workspace.createNavigatorNode(collection.id, nodeDrafts[collection.id] ?? '');
-    if (!created) return;
-    nodeDrafts = { ...nodeDrafts, [collection.id]: '' };
-    await onOpenNode(created.id);
+  async function applyCollectionSets(): Promise<void> {
+    if (!selectedSetItemCount || selectedSetHasErrors || applyingSets) return;
+    applyingSets = true;
+    let firstCreatedId = '';
+    await workspace.recordNavigatorChange('Add Collection set', async () => {
+      for (const item of Object.values(setDrafts).filter((draft) => draft.selected)) {
+        if (collectionExists(item.name)) continue;
+        const created = await workspace.createCollection({
+          name: item.name,
+          singularName: item.singularName,
+          icon: item.icon,
+          numbering: { ...item.numbering }
+        });
+        if (created && !firstCreatedId) firstCreatedId = created.id;
+      }
+    });
+    applyingSets = false;
+    if (firstCreatedId && collectionManagerPurpose === 'create-child') childCollection = firstCreatedId;
+    if (firstCreatedId) closeCollectionManager();
   }
 
   function beginCollectionEdit(collection: CollectionDefinition): void {
@@ -137,12 +285,12 @@
   async function saveCollectionEdit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!editingCollectionId) return;
-    await workspace.updateCollection(editingCollectionId, {
+    await workspace.recordNavigatorChange(`Update ${editCollectionName.trim()} Collection`, () => workspace.updateCollection(editingCollectionId!, {
       name: editCollectionName,
       singularName: editSingularName,
       icon: editCollectionIcon,
       numbering: { enabled: editNumberingEnabled, start: Math.trunc(editNumberingStart) }
-    });
+    }));
     editingCollectionId = null;
   }
 
@@ -152,34 +300,37 @@
       return;
     }
     if (workspace.branchId === collection.id && workspace.spineNode) await onOpenNode(workspace.spineNode.id);
-    await workspace.deleteCollection(collection.id);
+    await workspace.recordNavigatorChange(`Delete ${collection.name} Collection`, () => workspace.deleteCollection(collection.id));
     if (editingCollectionId === collection.id) editingCollectionId = null;
     deletingCollectionId = null;
   }
 
   async function addTodo(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    const created = await workspace.createNavigatorTodo(todoDraft);
+    const title = todoDraft.trim();
+    const created = await workspace.recordNavigatorChange(`Create Todo: ${title}`, () => workspace.createNavigatorTodo(title));
     if (!created) return;
     todoDraft = '';
+    addKind = null;
+    addMenuOpen = false;
     await onOpenNode(created.id);
   }
 
-  async function addRelationship(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    if (!await workspace.createNavigatorRelationship(relationTarget, relationType, relationInverseType)) return;
-    relationTarget = '';
-    relationOpen = false;
+  async function toggleTodo(id: string, title: string): Promise<void> {
+    await workspace.recordNavigatorChange(`Update Todo: ${title}`, () => workspace.toggleNavigatorTodo(id));
   }
 
   async function addChild(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!focused) return;
-    const created = await workspace.createNavigatorNode(childCollection, childTitle, focused.id);
+    const collection = workspace.navigator.collections.find((item) => item.id === childCollection);
+    const created = await workspace.recordNavigatorChange(`Create ${collection?.singularName ?? 'material'}`, () => workspace.createNavigatorNode(childCollection, childTitle, focused.id));
     if (!created) return;
     workspace.setNavigatorExpanded(`node:${focused.id}`, true, 'context');
     workspace.setNavigatorExpanded(`node:${focused.id}`, true, 'traditional');
     childTitle = '';
+    addKind = null;
+    addMenuOpen = false;
   }
 
   function startDrag(event: DragEvent, kind: 'collection' | 'node', id: string): void {
@@ -196,13 +347,22 @@
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
   }
 
+  function markNodeDrop(event: DragEvent, nodeId: string): void {
+    if (!dragged || dragged.kind !== 'node' || dragged.id === nodeId) return;
+    event.preventDefault();
+    const box = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : null;
+    const placement = box && event.clientY < box.top + box.height * 0.28 ? 'before' : 'inside';
+    dropTarget = { nodeId, placement };
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
   async function dropOnCollection(event: DragEvent, collection: CollectionDefinition): Promise<void> {
     event.preventDefault();
     const moving = dragged;
     dragged = null;
     if (!moving) return;
     if (moving.kind === 'collection') {
-      await workspace.moveCollection(moving.id, collection.id);
+      await workspace.recordNavigatorChange('Reorder Collections', () => workspace.moveCollection(moving.id, collection.id));
       return;
     }
     const node = workspace.navigatorNodes.find((candidate) => candidate.id === moving.id);
@@ -210,49 +370,133 @@
       workspace.notice = 'Dragging does not convert an item into another Collection.';
       return;
     }
-    await workspace.moveNavigatorNode(moving.id, { parentId: collection.id });
+    await workspace.recordNavigatorChange('Move material to Collection root', () => workspace.moveNavigatorNode(moving.id, { parentId: collection.id }));
   }
 
-  async function dropBeforeNode(event: DragEvent, node: WorkspaceDocument): Promise<void> {
+  async function dropOnNode(event: DragEvent, node: WorkspaceDocument): Promise<void> {
     event.preventDefault();
     const moving = dragged;
+    const placement = dropTarget?.nodeId === node.id ? dropTarget.placement : 'inside';
     dragged = null;
-    if (!moving || moving.kind !== 'node' || !node.parentId) return;
-    await workspace.moveNavigatorNode(moving.id, { parentId: node.parentId, beforeNodeId: node.id });
+    dropTarget = null;
+    if (!moving || moving.kind !== 'node') return;
+    if (placement === 'before' && node.parentId) {
+      await workspace.recordNavigatorChange(`Move material before ${workspace.navigatorNodeLabel(node)}`, () => workspace.moveNavigatorNode(moving.id, { parentId: node.parentId!, beforeNodeId: node.id }));
+      return;
+    }
+    await workspace.recordNavigatorChange(`Move material inside ${workspace.navigatorNodeLabel(node)}`, () => workspace.moveNavigatorNode(moving.id, { parentId: node.id }));
+  }
+
+  function toggleRemoval(kind: 'node' | 'todo' | 'relationship', id: string, checked: boolean): void {
+    const current = kind === 'node' ? removeNodeIds : kind === 'todo' ? removeTodoIds : removeRelationshipIds;
+    const next = checked ? [...new Set([...current, id])] : current.filter((item) => item !== id);
+    if (kind === 'node') removeNodeIds = next;
+    else if (kind === 'todo') removeTodoIds = next;
+    else removeRelationshipIds = next;
+    removalConfirm = false;
+  }
+
+  function closeRemovalMode(): void {
+    removalMode = false;
+    removalConfirm = false;
+    removeNodeIds = [];
+    removeTodoIds = [];
+    removeRelationshipIds = [];
+  }
+
+  async function removeSelectedEntries(): Promise<void> {
+    if (!removalCount) return;
+    if (!removalConfirm) {
+      removalConfirm = true;
+      return;
+    }
+    await workspace.recordNavigatorChange(`Remove ${removalCount} Navigator ${removalCount === 1 ? 'entry' : 'entries'}`, () => workspace.removeNavigatorEntries({
+      nodeIds: removeNodeIds,
+      todoIds: removeTodoIds,
+      relationshipIds: removeRelationshipIds
+    }));
+    closeRemovalMode();
   }
 </script>
 
-{#snippet nodeRow(node: WorkspaceDocument, depth = 0, contextual = false)}
+{#snippet nodeRow(node: WorkspaceDocument, depth = 0)}
   {@const children = childrenOf(node.id)}
   {@const key = `node:${node.id}`}
-  {@const nearby = contextual ? nearbyNodes(node) : []}
-  {@const nearbyTodos = contextual ? workspace.navigatorTodosFor(node.id) : []}
-  {@const neighbourhoodKey = `context:neighbourhood:${node.id}`}
   {@const label = workspace.navigatorNodeLabel(node)}
-  <div role="treeitem" tabindex="-1" aria-selected={node.id === workspace.branchId} class="navigator-node" class:selected={node.id === workspace.branchId} class:dragging={dragged?.id === node.id} style={`--depth:${depth}`} ondragover={allowDrop} ondrop={(event) => dropBeforeNode(event, node)}>
-    <button class="drag-handle" draggable="true" aria-label={`Move ${label}`} title={`Move ${label}`} ondragstart={(event) => startDrag(event, 'node', node.id)} ondragend={() => dragged = null}>⠿</button>
-    {#if children.length && !contextual}
+  <div role="treeitem" tabindex="-1" aria-selected={node.id === workspace.branchId} class="navigator-node" class:selected={node.id === workspace.branchId} class:dragging={dragged?.id === node.id} class:drop-before={dropTarget?.nodeId === node.id && dropTarget.placement === 'before'} class:drop-inside={dropTarget?.nodeId === node.id && dropTarget.placement === 'inside'} data-drop-label={dropTarget?.nodeId === node.id ? dropTarget.placement === 'before' ? `Insert before ${label}` : `Place inside ${label}` : undefined} style={`--depth:${depth}`} ondragover={(event) => markNodeDrop(event, node.id)} ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) dropTarget = null; }} ondrop={(event) => dropOnNode(event, node)}>
+    <button class="drag-handle" draggable="true" aria-label={`Move ${label}`} title={`Move ${label}`} ondragstart={(event) => startDrag(event, 'node', node.id)} ondragend={() => { dragged = null; dropTarget = null; }}>⠿</button>
+    {#if children.length}
       <button class="disclosure" title={`${workspace.navigatorExpanded(key) ? 'Collapse' : 'Expand'} ${label}`} aria-label={`${workspace.navigatorExpanded(key) ? 'Collapse' : 'Expand'} ${label}`} onclick={() => workspace.toggleNavigatorExpanded(key)}>{workspace.navigatorExpanded(key) ? '⌄' : '›'}</button>
     {:else}
       <span class="disclosure placeholder"></span>
     {/if}
     <span class="structural-icon" title={node.role === 'spine' ? 'Project Spine' : 'Document'} aria-hidden="true">{node.role === 'spine' ? '▥' : '▤'}</span>
-    <button class="node-link" onclick={() => onOpenNode(node.id)} title={label}><span>{label}</span></button>
-    {#if contextual && (nearby.length || nearbyTodos.length)}
-      <button class="neighbourhood-toggle" title={`${workspace.navigatorExpanded(neighbourhoodKey, 'context') ? 'Hide' : 'Show'} nearby material for ${label}`} aria-label={`${workspace.navigatorExpanded(neighbourhoodKey, 'context') ? 'Hide' : 'Show'} nearby material for ${label}`} onclick={() => workspace.setNavigatorExpanded(neighbourhoodKey, !workspace.navigatorExpanded(neighbourhoodKey, 'context'), 'context')}>⌁</button>
-    {/if}
+    <button class="node-link" onclick={() => onOpenNode(node.id)} title={`${label} · ${workspace.navigatorNodeType(node)}`}><span>{label}</span><small>{workspace.navigatorNodeType(node)}</small></button>
   </div>
-  {#if !contextual && children.length && workspace.navigatorExpanded(key)}
+  {#if children.length && workspace.navigatorExpanded(key)}
     {#each children as child (child.id)}{@render nodeRow(child, depth + 1)}{/each}
   {/if}
-  {#if contextual && workspace.navigatorExpanded(neighbourhoodKey, 'context')}
-    <div class="neighbourhood" style={`--depth:${depth + 1}`}>
-      {#each nearby as neighbour (neighbour.id)}{@render nodeRow(neighbour, depth + 1)}{/each}
-      {#each nearbyTodos as todo (todo.id)}
-        <button class="neighbourhood-todo" class:done={todo.state === 'done'} onclick={() => onOpenNode(todo.id)} title={`Open Todo: ${todo.title}`}><span aria-hidden="true">☑</span>{todo.title}</button>
-      {/each}
-    </div>
+{/snippet}
+
+{#snippet contextTodoRow(todo: (typeof workspace.navigator.todos)[number], depth = 1)}
+  <div class="context-entry todo-entry" class:done={todo.state === 'done'} style={`--context-depth:${depth}`}>
+    {#if removalMode}<input type="checkbox" aria-label={`Remove Todo ${todo.title}`} checked={removeTodoIds.includes(todo.id)} onchange={(event) => toggleRemoval('todo', todo.id, event.currentTarget.checked)} />{/if}
+    <span class="context-entry-icon" aria-hidden="true">☑</span>
+    <button onclick={() => onOpenNode(todo.id)}><span>{todo.title}</span><small>Todo</small></button>
+    <input class="todo-complete" aria-label={`${todo.state === 'done' ? 'Reopen' : 'Complete'} ${todo.title}`} type="checkbox" checked={todo.state === 'done'} onchange={() => toggleTodo(todo.id, todo.title)} />
+  </div>
+{/snippet}
+
+{#snippet contextRelationshipRow(relation: { node: WorkspaceDocument; label: string; relationshipId: string }, depth = 1)}
+  <div class="context-entry relationship-entry" style={`--context-depth:${depth}`}>
+    {#if removalMode}<input type="checkbox" aria-label={`Remove relationship ${relation.label} ${workspace.navigatorNodeLabel(relation.node)}`} checked={removeRelationshipIds.includes(relation.relationshipId)} onchange={(event) => toggleRemoval('relationship', relation.relationshipId, event.currentTarget.checked)} />{/if}
+    <span class="context-entry-icon" aria-hidden="true">↗</span>
+    <button onclick={() => onOpenNode(relation.node.id)}><span>{workspace.navigatorNodeLabel(relation.node)}</span><small>{relation.label}</small></button>
+    {#if hasPreview(relation.node, [focused?.id ?? '', relation.node.id])}
+      <button class="context-expander" aria-label={`${workspace.navigatorExpanded(`context:preview:${relation.node.id}`, 'context') ? 'Contract' : 'Expand'} ${workspace.navigatorNodeLabel(relation.node)}`} onclick={() => workspace.setNavigatorExpanded(`context:preview:${relation.node.id}`, !workspace.navigatorExpanded(`context:preview:${relation.node.id}`, 'context'), 'context')}>{workspace.navigatorExpanded(`context:preview:${relation.node.id}`, 'context') ? '⌄' : '›'}</button>
+    {/if}
+  </div>
+  {#if workspace.navigatorExpanded(`context:preview:${relation.node.id}`, 'context')}
+    {@render contextPreviewGroups(relation.node, depth + 1, [focused?.id ?? '', relation.node.id])}
   {/if}
+{/snippet}
+
+{#snippet contextMaterialRow(node: WorkspaceDocument, depth = 1, path: string[] = [], forced = false)}
+  {@const key = `context:preview:${node.id}`}
+  {@const expanded = forced || workspace.navigatorExpanded(key, 'context')}
+  {@const label = workspace.navigatorNodeLabel(node)}
+  <div role="listitem" class="context-entry material-entry" class:drop-before={dropTarget?.nodeId === node.id && dropTarget.placement === 'before'} class:drop-inside={dropTarget?.nodeId === node.id && dropTarget.placement === 'inside'} data-drop-label={dropTarget?.nodeId === node.id ? dropTarget.placement === 'before' ? `Insert before ${label}` : `Place inside ${label}` : undefined} style={`--context-depth:${depth}`} ondragover={(event) => markNodeDrop(event, node.id)} ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) dropTarget = null; }} ondrop={(event) => dropOnNode(event, node)}>
+    {#if removalMode}<input type="checkbox" aria-label={`Remove material ${label}`} checked={removeNodeIds.includes(node.id)} onchange={(event) => toggleRemoval('node', node.id, event.currentTarget.checked)} />{/if}
+    <button class="context-drag" draggable="true" aria-label={`Move ${label}`} title={`Move ${label}`} ondragstart={(event) => startDrag(event, 'node', node.id)} ondragend={() => { dragged = null; dropTarget = null; }}>⠿</button>
+    <span class="context-entry-icon" aria-hidden="true">▤</span>
+    <button onclick={() => onOpenNode(node.id)}><span>{label}</span><small>{workspace.navigatorNodeType(node)}</small></button>
+    {#if !forced && hasPreview(node, [...path, node.id])}
+      <button class="context-expander" aria-label={`${expanded ? 'Contract' : 'Expand'} ${label}`} onclick={() => workspace.setNavigatorExpanded(key, !workspace.navigatorExpanded(key, 'context'), 'context')}>{expanded ? '⌄' : '›'}</button>
+    {/if}
+  </div>
+  {#if expanded}{@render contextPreviewGroups(node, depth + 1, [...path, node.id])}{/if}
+{/snippet}
+
+{#snippet contextPreviewGroups(node: WorkspaceDocument, depth: number, path: string[])}
+  {@const material = previewChildren(node, path)}
+  {@const todos = previewTodos(node)}
+  {@const relations = previewRelations(node, path)}
+  <div class="context-preview" style={`--context-depth:${depth}`}>
+    {#if material.length}<div class="preview-label">Material</div>{#each material as child (child.id)}{@render contextMaterialRow(child, depth, path)}{/each}{/if}
+    {#if todos.length}<div class="preview-label">Todos</div>{#each todos as todo (todo.id)}{@render contextTodoRow(todo, depth)}{/each}{/if}
+    {#if relations.length}<div class="preview-label">Relationships</div>{#each relations as relation (relation.relationshipId)}{@render contextRelationshipRow(relation, depth)}{/each}{/if}
+  </div>
+{/snippet}
+
+{#snippet collectionCreationForm()}
+  <form class="collection-form" onsubmit={addCollection}>
+    <label>Collection name <span>plural — e.g. Characters, Chapters, Locations</span><input aria-label="Collection name (plural)" placeholder="Characters, Chapters, Locations…" value={collectionName} oninput={(event) => updateCollectionName(event.currentTarget.value)} /></label>
+    <label>Singular name <input aria-label="Singular name" placeholder="Character" value={singularName} oninput={(event) => { singularEdited = true; singularName = event.currentTarget.value; }} /></label>
+    <label>Icon <select aria-label="Collection icon" bind:value={collectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
+    <label class="numbering"><input type="checkbox" bind:checked={numberingEnabled} /> Number items</label>
+    {#if numberingEnabled}<label>Start number <input aria-label="Start number" type="number" step="1" bind:value={numberingStart} /></label>{/if}
+    <div><button type="button" onclick={resetCollectionForm}>Cancel</button><button class="primary" disabled={!collectionName.trim() || !singularName.trim()}>Create Collection</button></div>
+  </form>
 {/snippet}
 
 {#snippet todoSection()}
@@ -268,7 +512,7 @@
         {#each workspace.navigator.todos as todo (todo.id)}
           <div class="navigator-node todo-row" class:selected={workspace.branchId === todo.id} class:done={todo.state === 'done'}>
             <span class="drag-handle placeholder"></span>
-            <span class="todo-checkbox"><input aria-label={`${todo.state === 'done' ? 'Reopen' : 'Complete'} ${todo.title}`} title={`${todo.state === 'done' ? 'Mark open' : 'Mark done'} — ${todo.title}`} type="checkbox" checked={todo.state === 'done'} onchange={() => workspace.toggleNavigatorTodo(todo.id)} /></span>
+            <span class="todo-checkbox"><input aria-label={`${todo.state === 'done' ? 'Reopen' : 'Complete'} ${todo.title}`} title={`${todo.state === 'done' ? 'Mark open' : 'Mark done'} — ${todo.title}`} type="checkbox" checked={todo.state === 'done'} onchange={() => toggleTodo(todo.id, todo.title)} /></span>
             <span class="structural-icon" title="Todo document" aria-hidden="true">▤</span>
             <button class="node-link todo-link" title={`Open ${todo.title}`} onclick={() => onOpenNode(todo.id)}><span>{todo.title}</span><small title={`Applies to ${targetLabels(todo.targetNodeIds)}`}>{targetLabels(todo.targetNodeIds)}</small></button>
           </div>
@@ -285,7 +529,14 @@
 
 <nav class="navigator" aria-label="Project Navigator">
   <header class="navigator-header">
-    <div><strong>Navigator</strong><small title="Current project">{workspace.currentProject?.title}</small></div>
+    <div class="navigator-title">
+      <strong>Navigator</strong>
+      <div class="navigator-history" aria-label="Navigator undo and redo">
+        <button disabled={!workspace.canUndoNavigator} title={workspace.navigatorUndoLabel ? `Undo: ${workspace.navigatorUndoLabel}` : 'Nothing to undo in the Navigator'} aria-label={workspace.navigatorUndoLabel ? `Undo ${workspace.navigatorUndoLabel}` : 'Navigator Undo'} onclick={() => workspace.undoNavigator()}>⟲</button>
+        <button disabled={!workspace.canRedoNavigator} title={workspace.navigatorRedoLabel ? `Redo: ${workspace.navigatorRedoLabel}` : 'Nothing to redo in the Navigator'} aria-label={workspace.navigatorRedoLabel ? `Redo ${workspace.navigatorRedoLabel}` : 'Navigator Redo'} onclick={() => workspace.redoNavigator()}>⟳</button>
+      </div>
+      <small title="Current project">{workspace.currentProject?.title}</small>
+    </div>
     <div class="navigator-controls">
       <div class="history-controls" aria-label="Navigator history">
         <button disabled={!workspace.navigatorBackId} title="Back to the previous Navigator focus" aria-label="Back" onclick={() => navigateHistory('back')}>‹</button>
@@ -303,101 +554,99 @@
 
     {#if workspace.navigatorMemory.mode === 'traditional'}
       <div class="collection-list">
-        <button class="group-title" title="About Collections" onclick={() => helpTopic = 'collections'}><span>Collections</span><span aria-hidden="true">?</span></button>
+        <div class="collection-group-header">
+          <button class="group-title" title="About Collections" onclick={() => helpTopic = 'collections'}><span>Collections</span><span aria-hidden="true">?</span></button>
+          <button class="manage-collections" title="Manage Collections" aria-label="Manage Collections" onclick={() => openCollectionManager()}>•••</button>
+        </div>
         {#each [...workspace.navigator.collections].sort((a, b) => a.order - b.order) as collection (collection.id)}
           {@const collectionKey = `collection:${collection.id}`}
           {@const roots = rootsForCollection(collection.id)}
+          {@const members = workspace.navigatorNodes.filter((node) => nodeCollectionId(node) === collection.id && !nodeArchived(node))}
           <section role="group" class="collection" class:dragging={dragged?.id === collection.id} ondragover={allowDrop} ondrop={(event) => dropOnCollection(event, collection)}>
             <div class="section-heading" class:selected={workspace.branchId === collection.id}>
               <button class="drag-handle" draggable="true" aria-label={`Move ${collection.name}`} title="Move Collection" ondragstart={(event) => startDrag(event, 'collection', collection.id)} ondragend={() => dragged = null}>⠿</button>
               <button class="disclosure" title={`${workspace.navigatorExpanded(collectionKey) ? 'Collapse' : 'Expand'} ${collection.name}`} aria-label={`${workspace.navigatorExpanded(collectionKey) ? 'Collapse' : 'Expand'} ${collection.name}`} onclick={() => workspace.toggleNavigatorExpanded(collectionKey)}>{workspace.navigatorExpanded(collectionKey) ? '⌄' : '›'}</button>
               <span class="structural-icon" title={`${collection.icon === 'none' ? 'Collection' : `${collection.icon} Collection`}`} aria-hidden="true">{collection.icon === 'none' ? '·' : iconGlyphs[collection.icon]}</span>
-              <button class="heading-label collection-link" title={`Open ${collection.name}`} onclick={() => onOpenNode(collection.id)}>{collection.name} <em>{workspace.navigatorNodes.filter((node) => nodeCollectionId(node) === collection.id && !nodeArchived(node)).length}</em></button>
-              <button class="collection-action" aria-label={`Manage ${collection.name}`} title="Manage Collection" onclick={() => beginCollectionEdit(collection)}>•••</button>
+              <button class="heading-label collection-link" title={`Open ${collection.name}`} onclick={() => onOpenNode(collection.id)}>{collection.name} <em>{members.length}</em></button>
+              <button class="collection-action" aria-label={`Manage ${collection.name}`} title="Manage Collection" onclick={() => openCollectionManager('manage', collection)}>•••</button>
             </div>
-            {#if editingCollectionId === collection.id}
-              <form class="collection-form edit-collection" onsubmit={saveCollectionEdit}>
-                <label>Collection name <span>plural</span><input aria-label="Edit Collection name" bind:value={editCollectionName} /></label>
-                <label>Singular name <input aria-label="Edit singular name" bind:value={editSingularName} /></label>
-                <label>Icon <select aria-label="Edit Collection icon" bind:value={editCollectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
-                <label class="numbering"><input type="checkbox" bind:checked={editNumberingEnabled} /> Number items</label>
-                {#if editNumberingEnabled}<label>Start number <input aria-label="Edit start number" type="number" step="1" bind:value={editNumberingStart} /></label>{/if}
-                {#if deletingCollectionId === collection.id}<p class="delete-warning">Delete this Collection? Its items will move to Archived/Unowned rather than be erased.</p>{/if}
-                <div class="collection-edit-actions"><button type="button" class="danger" onclick={() => deleteCollection(collection)}>{deletingCollectionId === collection.id ? 'Confirm delete' : 'Delete Collection'}</button><span></span><button type="button" onclick={() => { editingCollectionId = null; deletingCollectionId = null; }}>Cancel</button><button class="primary" disabled={!editCollectionName.trim() || !editSingularName.trim()}>Save</button></div>
-              </form>
-            {/if}
             {#if workspace.navigatorExpanded(collectionKey)}
               <div class="collection-contents">
                 {#each roots as node (node.id)}{@render nodeRow(node, 1)}{/each}
-                {#if !roots.length}<p class="empty">No {collection.name.toLowerCase()} yet.</p>{/if}
-                <div class="quick-add">
-                  <input
-                    aria-label={`Create new ${collection.singularName}`}
-                    placeholder={`Create new ${collection.singularName.toLowerCase()}`}
-                    title={collection.numbering.enabled ? 'A name is optional because numbering is enabled.' : `Name the new ${collection.singularName}.`}
-                    value={nodeDrafts[collection.id] ?? ''}
-                    oninput={(event) => nodeDrafts = { ...nodeDrafts, [collection.id]: event.currentTarget.value }}
-                    onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addNode(collection); } }}
-                  />
-                  <button disabled={!collection.numbering.enabled && !nodeDrafts[collection.id]?.trim()} onclick={() => addNode(collection)} aria-label={`Add ${collection.singularName}`}>+</button>
-                </div>
               </div>
             {/if}
           </section>
         {/each}
 
-        {#if collectionFormOpen}
-          <form class="collection-form" onsubmit={addCollection}>
-            <label>Collection name <span>plural — e.g. Characters, Chapters, Locations</span><input aria-label="Collection name (plural)" placeholder="Characters, Chapters, Locations…" value={collectionName} oninput={(event) => updateCollectionName(event.currentTarget.value)} /></label>
-            <label>Singular name <input aria-label="Singular name" placeholder="Character" value={singularName} oninput={(event) => { singularEdited = true; singularName = event.currentTarget.value; }} /></label>
-            <label>Icon <select aria-label="Collection icon" bind:value={collectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
-            <label class="numbering"><input type="checkbox" bind:checked={numberingEnabled} /> Number items</label>
-            {#if numberingEnabled}<label>Start number <input aria-label="Start number" type="number" step="1" bind:value={numberingStart} /></label>{/if}
-            <div><button type="button" onclick={resetCollectionForm}>Cancel</button><button class="primary" disabled={!collectionName.trim() || !singularName.trim()}>Create Collection</button></div>
-          </form>
-        {:else}
-          <button class="new-collection" title="Create a new Collection" onclick={() => collectionFormOpen = true}><span aria-hidden="true">＋</span> Add Collection</button>
-        {/if}
+        <button class="new-collection" title="Create or manage Collections" onclick={() => openCollectionManager()}><span aria-hidden="true">＋</span> Manage Collections…</button>
+        <button class="new-collection" title="Manage writing relationship vocabulary and links" onclick={() => relationshipManagerOpen = true}><span aria-hidden="true">↗</span> Manage Relationships…</button>
       </div>
     {:else}
       <div class="context-view">
         {#if focused}
-          <section><div class="context-label">Focused</div>{@render nodeRow(focused, 0, true)}</section>
-          {#if workspace.selectedNodeParent}<section><div class="context-label">Parent</div>{@render nodeRow(workspace.selectedNodeParent, 0, true)}</section>{/if}
-          {#if workspace.selectedNodeSiblings.length}<section><div class="context-label">Siblings</div>{#each workspace.selectedNodeSiblings as node (node.id)}{@render nodeRow(node, 0, true)}{/each}</section>{/if}
-          {#if workspace.selectedNodeChildren.length}<section><div class="context-label">Contains</div>{#each workspace.selectedNodeChildren as node (node.id)}{@render nodeRow(node, 0, true)}{/each}</section>{/if}
-          <section>
-            <div class="context-label">Related</div>
-            {#each workspace.selectedNodeRelations as relation (relation.relationshipId)}<div class="related-row"><small>{relation.label}</small>{@render nodeRow(relation.node, 0, true)}</div>{/each}
-            {#if !workspace.selectedNodeRelations.length}<p class="empty">No confirmed relationships.</p>{/if}
-            {#if relationOpen}
-              <form class="relation-form" onsubmit={addRelationship}>
-                <select aria-label="Related item" bind:value={relationTarget}><option value="">Choose an item</option>{#each availableRelationTargets as node}<option value={node.id}>{workspace.navigatorNodeLabel(node)}</option>{/each}</select>
-                <input aria-label="Relationship" bind:value={relationType} />
-                <input aria-label="Inverse relationship" bind:value={relationInverseType} />
-                <div><button type="button" onclick={() => relationOpen = false}>Cancel</button><button class="primary" disabled={!relationTarget || !relationType.trim() || !relationInverseType.trim()}>Link</button></div>
-              </form>
-            {:else if availableRelationTargets.length}<button class="new-collection" onclick={() => relationOpen = true}>+ Link related material</button>{/if}
-          </section>
-          <section>
-            <div class="context-label">Add inside {workspace.navigatorNodeLabel(focused)}</div>
-            <form class="relation-form" onsubmit={addChild}>
-              <select aria-label="Child collection" bind:value={childCollection}><option value="">Choose a Collection</option>{#each workspace.navigator.collections as collection}<option value={collection.id}>{collection.singularName}</option>{/each}</select>
-              <input aria-label="Child title" placeholder="Title (optional when numbered)" bind:value={childTitle} />
-              <div><button class="primary" disabled={!childCollection}>Add inside</button></div>
-            </form>
-          </section>
-          <section>
-            <div class="context-label">Applicable Todos</div>
-            {#each workspace.selectedNodeTodos as todo (todo.id)}<button class="context-todo" class:done={todo.state === 'done'} onclick={() => onOpenNode(todo.id)}>{todo.title}</button>{/each}
-            {#if !workspace.selectedNodeTodos.length}<p class="empty">No Todos target this item.</p>{/if}
-            <form class="quick-add" onsubmit={addTodo}>
-              <input aria-label="New contextual Todo" placeholder={`Todo for ${workspace.navigatorNodeLabel(focused)}`} bind:value={todoDraft} />
-              <button disabled={!todoDraft.trim()} aria-label="Add contextual Todo" title="Create a Todo for the focused item">+</button>
-            </form>
+          {@const peers = contextPeers()}
+          {@const peerIndex = peers.findIndex((node) => node.id === focused.id)}
+          {@const cascadeKey = `context:cascade:${focused.id}`}
+          {@const cascadeExpanded = workspace.navigatorExpanded(cascadeKey, 'context')}
+          <div class="context-navigation">
+            <div class="context-breadcrumb">
+              {#each workspace.selectedNodeAncestors as ancestor (ancestor.id)}<button onclick={() => onOpenNode(ancestor.id)}>{workspace.navigatorNodeLabel(ancestor)}</button><span>/</span>{/each}
+              <strong>{workspace.navigatorNodeType(focused)}</strong>
+            </div>
+            {#if peers.length > 1}<div class="peer-navigation"><button disabled={peerIndex <= 0} aria-label="Previous sibling" title={peerIndex > 0 ? `Previous: ${workspace.navigatorNodeLabel(peers[peerIndex - 1])}` : 'No previous sibling'} onclick={() => peerIndex > 0 && onOpenNode(peers[peerIndex - 1].id)}>‹</button><span>{peerIndex + 1} of {peers.length}</span><button disabled={peerIndex >= peers.length - 1} aria-label="Next sibling" title={peerIndex < peers.length - 1 ? `Next: ${workspace.navigatorNodeLabel(peers[peerIndex + 1])}` : 'No next sibling'} onclick={() => peerIndex < peers.length - 1 && onOpenNode(peers[peerIndex + 1].id)}>›</button></div>{/if}
+          </div>
+
+          <section class="selected-context">
+            <div class="context-label">Selected</div>
+            <div class="selected-row">
+              <span class="context-entry-icon" aria-hidden="true">{focused.role === 'spine' ? '▥' : '▤'}</span>
+              <div><strong>{workspace.navigatorNodeLabel(focused)}</strong><small>{workspace.navigatorNodeType(focused)}</small></div>
+              {#if workspace.selectedNodeChildren.some((child) => hasPreview(child, [focused.id, child.id]))}
+                <button class="context-expander" aria-label={`${cascadeExpanded ? 'Contract' : 'Expand'} material beneath ${workspace.navigatorNodeLabel(focused)}`} onclick={() => workspace.setNavigatorExpanded(cascadeKey, !cascadeExpanded, 'context')}>{cascadeExpanded ? '⌄' : '›'}</button>
+              {/if}
+            </div>
+
+            <div class="selected-attachments">
+              {#each workspace.selectedNodeChildren as node (node.id)}{@render contextMaterialRow(node, 1, [focused.id], cascadeExpanded)}{/each}
+              {#if !workspace.selectedNodeChildren.length}<p class="context-empty-entry">No material attached.</p>{/if}
+
+              <div class="context-divider"></div>
+              <div class="attachment-heading">Todos <em>{workspace.selectedNodeTodos.filter((todo) => todo.state === 'open').length}</em></div>
+              {#each workspace.selectedNodeTodos as todo (todo.id)}{@render contextTodoRow(todo, 1)}{/each}
+              {#if !workspace.selectedNodeTodos.length}<p class="context-empty-entry">No Todos attached.</p>{/if}
+
+              <div class="context-divider"></div>
+              <div class="attachment-heading">Relationships <em>{workspace.selectedNodeRelations.length}</em></div>
+              {#each workspace.selectedNodeRelations as relation (relation.relationshipId)}{@render contextRelationshipRow(relation, 1)}{/each}
+              {#if !workspace.selectedNodeRelations.length}<p class="context-empty-entry">No confirmed relationships.</p>{/if}
+
+              <div class="context-divider"></div>
+              <div class="context-actions">
+                {#if removalMode}
+                  <button type="button" onclick={closeRemovalMode}>Cancel</button>
+                  <button type="button" class="danger" disabled={!removalCount} onclick={removeSelectedEntries}>{removalConfirm ? `Confirm removal of ${removalCount}` : `Remove ${removalCount || ''} selected`}</button>
+                {:else}
+                  <button type="button" class="context-add" onclick={() => { addMenuOpen = !addMenuOpen; addKind = null; }}>＋ Add…</button>
+                  <button type="button" class="context-remove" aria-label="Remove Navigator entries" title="Select material, Todos, or relationships to remove" onclick={() => { removalMode = true; addMenuOpen = false; addKind = null; }}>−</button>
+                {/if}
+              </div>
+
+              {#if addMenuOpen && !removalMode}
+                <div class="add-panel">
+                  <div class="add-kind-choices"><button class:active={addKind === 'material'} onclick={() => addKind = 'material'}>Material child</button><button class:active={addKind === 'todo'} onclick={() => addKind = 'todo'}>Todo</button><button onclick={() => { relationshipManagerOpen = true; addKind = null; addMenuOpen = false; }}>Relationship</button></div>
+                  {#if addKind === 'material'}
+                    <form class="relation-form" onsubmit={addChild}><label>Material type<select aria-label="Child collection" bind:value={childCollection}><option value="">Choose a Collection</option>{#each workspace.navigator.collections as collection}<option value={collection.id}>{collection.singularName}</option>{/each}</select></label><label>Optional title<input aria-label="Child title" placeholder="Title (optional when numbered)" bind:value={childTitle} /></label><div class="create-within-actions"><button type="button" onclick={() => openCollectionManager('create-child')}>Manage Collections…</button><span></span><button class="primary" disabled={!childCollection}>Create {workspace.navigator.collections.find((collection) => collection.id === childCollection)?.singularName ?? 'material'}</button></div></form>
+                  {:else if addKind === 'todo'}
+                    <form class="relation-form" onsubmit={addTodo}><label>Todo<input aria-label="New contextual Todo" placeholder={`Todo for ${workspace.navigatorNodeLabel(focused)}`} bind:value={todoDraft} /></label><div><button class="primary" disabled={!todoDraft.trim()}>Create Todo</button></div></form>
+                  {/if}
+                </div>
+              {/if}
+
+              {#if removalConfirm}<p class="removal-warning">Remove the selected entries? Material moves to Archived/Unowned with its nested material, Todos are removed, and relationships are unlinked. Navigator Undo will restore the complete operation.</p>{/if}
+            </div>
           </section>
         {:else}
-          <p class="empty context-empty">Select a structural item to establish a Navigator focus.</p>
+          <p class="empty context-empty">Select a structural item to establish a Navigator selection.</p>
         {/if}
       </div>
     {/if}
@@ -414,6 +663,109 @@
   </div>
 </nav>
 
+{#if collectionManagerOpen}
+  <div class="collection-manager-backdrop" role="presentation" onclick={closeCollectionManager}>
+    <div class="collection-manager" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="collection-manager-title" onclick={(event) => event.stopPropagation()} onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') closeCollectionManager(); }}>
+      <header>
+        <div>
+          <small>Navigator</small>
+          <h2 id="collection-manager-title">Manage Collections</h2>
+        </div>
+        <button type="button" class="manager-close" title="Close Collection Manager" aria-label="Close Collection Manager" onclick={closeCollectionManager}>×</button>
+      </header>
+
+      {#if collectionManagerPurpose === 'proactive'}
+        <div class="collection-welcome">
+          <strong>Build your project</strong>
+          <p>This project has no Collections yet. Start with a Collection set or create your own. Nothing here creates sample content.</p>
+        </div>
+      {/if}
+
+      <section class="manager-section collection-sets">
+        <div class="manager-section-heading">
+          <div><h3>Collection sets</h3><p>Select a complete set, then adjust or remove individual Collections.</p></div>
+          <button type="button" onclick={() => collectionFormOpen = !collectionFormOpen}>{collectionFormOpen ? 'Hide custom form' : 'Create custom Collection'}</button>
+        </div>
+
+        {#if collectionFormOpen}{@render collectionCreationForm()}{/if}
+
+        <div class="set-list">
+          {#each collectionSets as set (set.id)}
+            {@const selection = setSelectionState(set.id)}
+            {@const expanded = expandedSetIds.includes(set.id)}
+            <section class="collection-set">
+              <div class="set-heading">
+                <button type="button" class="set-disclosure" title={`${expanded ? 'Collapse' : 'Expand'} ${set.name}`} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${set.name}`} onclick={() => setExpanded(set.id, !expanded)}>{expanded ? '⌄' : '›'}</button>
+                <input
+                  type="checkbox"
+                  aria-label={`Select all Collections in ${set.name}`}
+                  checked={selection.checked}
+                  indeterminate={selection.indeterminate}
+                  disabled={selection.disabled}
+                  onchange={(event) => toggleSetSelection(set.id, event.currentTarget.checked)}
+                />
+                <button type="button" class="set-title" onclick={() => setExpanded(set.id, !expanded)}><strong>{set.name}</strong><span>{set.description}</span></button>
+                <small>{set.items.length}</small>
+              </div>
+              {#if expanded}
+                <div class="set-items">
+                  {#each set.items as template (template.id)}
+                    {@const draft = setDrafts[template.id]}
+                    {@const exists = setTemplateExists(template.id)}
+                    {@const conflict = !exists && draftNameConflict(template.id)}
+                    <div class="set-item" class:existing={exists} class:conflict>
+                      <input type="checkbox" aria-label={`Add ${draft.name}`} checked={draft.selected} disabled={exists} onchange={(event) => updateSetDraft(template.id, { selected: event.currentTarget.checked })} />
+                      <label>Plural name<input aria-label={`${set.name} ${template.name} plural name`} value={draft.name} disabled={!draft.selected || exists} oninput={(event) => updateSetDraft(template.id, { name: event.currentTarget.value })} /></label>
+                      <label>Singular name<input aria-label={`${set.name} ${template.name} singular name`} value={draft.singularName} disabled={!draft.selected || exists} oninput={(event) => updateSetDraft(template.id, { singularName: event.currentTarget.value })} /></label>
+                      <label>Icon<select aria-label={`${set.name} ${template.name} icon`} value={draft.icon} disabled={!draft.selected || exists} onchange={(event) => updateSetDraft(template.id, { icon: event.currentTarget.value as CollectionDefinition['icon'] })}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
+                      <label class="set-numbering"><input type="checkbox" checked={draft.numbering.enabled} disabled={!draft.selected || exists} onchange={(event) => updateSetDraft(template.id, { numbering: { ...draft.numbering, enabled: event.currentTarget.checked } })} /> Number</label>
+                      {#if draft.numbering.enabled}<label>Start<input aria-label={`${set.name} ${template.name} start number`} type="number" min="0" step="1" value={draft.numbering.start} disabled={!draft.selected || exists} oninput={(event) => updateSetDraft(template.id, { numbering: { ...draft.numbering, start: Math.trunc(Number(event.currentTarget.value)) } })} /></label>{/if}
+                      {#if exists}<span class="already-added">Already added</span>{:else if conflict}<span class="name-conflict">Name already in use</span>{/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      </section>
+
+      {#if workspace.navigator.collections.length}
+        <section class="manager-section existing-collections">
+          <div class="manager-section-heading"><div><h3>Existing Collections</h3><p>Edit their presentation or safely remove a Collection.</p></div></div>
+          {#each [...workspace.navigator.collections].sort((a, b) => a.order - b.order) as collection (collection.id)}
+            <div class="existing-collection-row">
+              <span class="structural-icon" aria-hidden="true">{collection.icon === 'none' ? '·' : iconGlyphs[collection.icon]}</span>
+              <strong>{collection.name}</strong>
+              <small>{collection.singularName}</small>
+              <button type="button" onclick={() => editingCollectionId === collection.id ? editingCollectionId = null : beginCollectionEdit(collection)}>{editingCollectionId === collection.id ? 'Close' : 'Edit'}</button>
+            </div>
+            {#if editingCollectionId === collection.id}
+              <form class="collection-form edit-collection" onsubmit={saveCollectionEdit}>
+                <label>Collection name <span>plural</span><input aria-label="Edit Collection name" bind:value={editCollectionName} /></label>
+                <label>Singular name <input aria-label="Edit singular name" bind:value={editSingularName} /></label>
+                <label>Icon <select aria-label="Edit Collection icon" bind:value={editCollectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
+                <label class="numbering"><input type="checkbox" bind:checked={editNumberingEnabled} /> Number items</label>
+                {#if editNumberingEnabled}<label>Start number <input aria-label="Edit start number" type="number" step="1" bind:value={editNumberingStart} /></label>{/if}
+                {#if deletingCollectionId === collection.id}<p class="delete-warning">Delete this Collection? Its items will move to Archived/Unowned rather than be erased.</p>{/if}
+                <div class="collection-edit-actions"><button type="button" class="danger" onclick={() => deleteCollection(collection)}>{deletingCollectionId === collection.id ? 'Confirm delete' : 'Delete Collection'}</button><span></span><button type="button" onclick={() => { editingCollectionId = null; deletingCollectionId = null; }}>Cancel</button><button class="primary" disabled={!editCollectionName.trim() || !editSingularName.trim()}>Save</button></div>
+              </form>
+            {/if}
+          {/each}
+        </section>
+      {/if}
+
+      <footer>
+        <span>{selectedSetHasErrors ? 'Resolve duplicate or missing names before creating Collections' : selectedSetItemCount ? `${selectedSetItemCount} Collection${selectedSetItemCount === 1 ? '' : 's'} selected` : 'Select Collections from one or more sets'}</span>
+        <button type="button" onclick={closeCollectionManager}>Cancel</button>
+        <button type="button" class="primary" disabled={!selectedSetItemCount || selectedSetHasErrors || applyingSets} onclick={applyCollectionSets}>{applyingSets ? 'Creating…' : 'Create selected Collections'}</button>
+      </footer>
+    </div>
+  </div>
+{/if}
+
+<RelationshipManager open={relationshipManagerOpen} sourceNodeId={workspace.navigatorFocusId} onClose={() => relationshipManagerOpen = false} />
+
 {#if helpTopic}
   <div class="navigator-help-backdrop" role="presentation" onclick={() => helpTopic = null}>
     <div class="navigator-help" role="dialog" tabindex="-1" aria-modal="true" aria-label="Navigator instructions" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
@@ -426,9 +778,13 @@
 <style>
   .navigator { position: sticky; top: 104px; display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; height: calc(100vh - 104px); border-right: 1px solid var(--line); background: color-mix(in srgb, var(--paper-deep) 70%, var(--canvas)); color: var(--ink-soft); }
   .navigator-header { display: grid; gap: 12px; padding: 16px 14px 12px; border-bottom: 1px solid var(--line); }
-  .navigator-header > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .navigator-title { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 7px; }
   .navigator-header strong { color: var(--ink); font: 700 11px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
   .navigator-header small { overflow: hidden; color: var(--muted); font: 10px/1.2 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .navigator-history { display: flex; align-items: center; }
+  .navigator-history button { display: grid; width: 23px; height: 23px; place-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 16px/1 var(--font-ui); }
+  .navigator-history button:not(:disabled):hover { background: var(--paper); color: var(--accent); }
+  .navigator-history button:disabled { cursor: default; opacity: .25; }
   .navigator-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; }
   .history-controls, .mode-switch { display: grid; padding: 2px; border: 1px solid var(--line); border-radius: 5px; background: var(--canvas); }
   .history-controls { grid-template-columns: 28px 28px; }
@@ -442,9 +798,12 @@
   .fixed-section, .todo-section { padding-bottom: 5px; border-bottom: 1px solid var(--line); }
   .todo-section { padding-top: 7px; }
   .archive-section { margin-top: 12px; padding-top: 7px; border-top: 1px solid var(--line); }
+  .collection-group-header { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; }
   .group-title { display: flex; width: 100%; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 8px 0 58px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 700 9px/1 var(--font-ui); letter-spacing: .05em; text-align: left; text-transform: uppercase; }
   .group-title:hover { background: color-mix(in srgb, var(--paper) 72%, transparent); color: var(--ink-soft); }
   .group-title span:last-child { opacity: .55; font-size: 10px; }
+  .manage-collections { width: 27px; height: 27px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 10px/1 var(--font-ui); }
+  .manage-collections:hover { background: var(--paper); color: var(--ink); }
   .section-heading, .navigator-node { display: flex; align-items: center; min-height: 31px; padding-left: calc(var(--depth, 0) * 14px); border-radius: 3px; }
   .section-heading.selected, .navigator-node.selected { background: var(--accent-soft); color: var(--accent); }
   .section-heading:hover, .navigator-node:hover { background: color-mix(in srgb, var(--accent-soft) 48%, transparent); }
@@ -461,17 +820,16 @@
   .heading-label em { margin-left: auto; color: var(--muted); font-style: normal; font-weight: 500; }
   .node-link { overflow: hidden; font-weight: 500; font-size: 12px; }
   .node-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .neighbourhood-toggle { display: grid; flex: 0 0 24px; width: 24px; height: 25px; place-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 13px/1 var(--font-ui); }
-  .neighbourhood-toggle:hover { background: var(--paper); color: var(--accent); }
-  .neighbourhood { margin-left: 14px; padding-left: 5px; border-left: 1px solid var(--line); }
-  .neighbourhood-todo { display: flex; width: calc(100% - 8px); align-items: center; gap: 7px; min-height: 29px; margin-left: calc(var(--depth, 0) * 14px + 40px); border: 0; background: transparent; color: var(--ink-soft); font: 500 10px/1.3 var(--font-ui); text-align: left; }
-  .neighbourhood-todo.done { color: var(--muted); text-decoration: line-through; }
+  .node-link small { overflow: hidden; max-width: 72px; margin-left: auto; color: var(--muted); font: 8px/1 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .navigator-node, .context-entry { position: relative; }
+  .navigator-node.drop-before::before, .context-entry.drop-before::before { position: absolute; z-index: 2; right: 4px; bottom: auto; left: 18px; height: 2px; border-radius: 2px; background: var(--accent); content: ''; top: -1px; }
+  .navigator-node.drop-inside, .context-entry.drop-inside { outline: 1px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
+  .navigator-node.drop-before::after, .navigator-node.drop-inside::after, .context-entry.drop-before::after, .context-entry.drop-inside::after { position: absolute; z-index: 4; right: 4px; bottom: calc(100% - 3px); padding: 3px 5px; border-radius: 3px; background: var(--accent); color: white; content: attr(data-drop-label); font: 700 8px/1 var(--font-ui); pointer-events: none; white-space: nowrap; }
   .todo-list, .collection-contents { padding: 0 0 6px; }
   .todo-checkbox { display: grid; flex: 0 0 22px; width: 22px; place-items: center; }
   .todo-row { padding-left: 14px; }
   .todo-checkbox input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
   .todo-row.done .todo-link > span { color: var(--muted); text-decoration: line-through; }
-  .todo-link small { overflow: hidden; max-width: 72px; margin-left: auto; color: var(--muted); font: 8px/1 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
   .empty { margin: 5px 8px 8px 40px; color: var(--muted); font: 10px/1.4 var(--font-ui); }
   .quick-add { display: flex; gap: 4px; margin: 4px 5px 0 58px; }
   .quick-add input { min-width: 0; flex: 1; height: 29px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); font: 10px/1 var(--font-ui); }
@@ -483,25 +841,115 @@
   .new-collection { display: flex; width: 100%; align-items: center; gap: 8px; min-height: 31px; margin: 0; padding: 0 8px 0 58px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 600 10px/1 var(--font-ui); text-align: left; }
   .new-collection:hover { background: color-mix(in srgb, var(--paper) 72%, transparent); color: var(--accent); }
   .collection-form, .relation-form { display: grid; gap: 8px; margin: 8px 4px; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); }
-  .collection-form label { display: grid; gap: 4px; color: var(--ink-soft); font: 600 9px/1.2 var(--font-ui); }
+  .collection-form label, .relation-form label { display: grid; gap: 4px; color: var(--ink-soft); font: 600 9px/1.2 var(--font-ui); }
   .collection-form label > span { justify-self: end; margin-top: -12px; color: var(--muted); font-weight: 400; }
   .collection-form label.numbering { display: flex; align-items: center; }
   .collection-form input:not([type='checkbox']), .collection-form select, .relation-form input, .relation-form select { width: 100%; height: 31px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: #fff; font: 10px/1 var(--font-ui); }
   .collection-form > div, .relation-form > div { display: flex; justify-content: flex-end; gap: 5px; }
+  .relation-form .create-within-actions span { flex: 1; }
   .collection-form .collection-edit-actions { align-items: center; }
   .collection-edit-actions span { flex: 1; }
   .collection-form button, .relation-form button { min-height: 28px; border: 1px solid var(--line); border-radius: 3px; background: transparent; font: 600 9px/1 var(--font-ui); }
   .collection-form button.primary, .relation-form button.primary { background: var(--accent); color: white; }
   .collection-form button.danger { color: #8d3329; }
   .delete-warning { margin: 0; padding: 7px 8px; border-left: 2px solid #8d3329; background: #8d33290b; color: #773129; font: 9px/1.45 var(--font-ui); }
-  .context-view { padding-top: 7px; }
-  .context-view section { padding: 6px 0 9px; border-bottom: 1px solid var(--line); }
-  .context-label { margin: 0 6px 5px 40px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .1em; }
-  .related-row { display: grid; grid-template-columns: 68px minmax(0, 1fr); align-items: center; }
-  .related-row > small { overflow: hidden; color: var(--muted); font: 9px/1.2 var(--font-ui); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-  .context-todo { display: block; width: calc(100% - 48px); margin: 5px 8px 5px 40px; padding: 0; border: 0; background: transparent; color: var(--ink-soft); font: 11px/1.35 var(--font-ui); text-align: left; }
-  .context-todo.done { color: var(--muted); text-decoration: line-through; }
+  .context-view { padding: 7px 3px 12px; }
+  .context-navigation { display: grid; gap: 5px; padding: 2px 6px 9px; border-bottom: 1px solid var(--line); }
+  .context-breadcrumb { display: flex; min-width: 0; align-items: center; gap: 4px; overflow: hidden; color: var(--muted); font: 9px/1.2 var(--font-ui); white-space: nowrap; }
+  .context-breadcrumb button { overflow: hidden; padding: 2px 0; border: 0; background: transparent; color: var(--muted); font: inherit; text-overflow: ellipsis; }
+  .context-breadcrumb button:hover { color: var(--accent); }
+  .context-breadcrumb strong { overflow: hidden; color: var(--ink-soft); font: 700 9px/1.2 var(--font-ui); text-overflow: ellipsis; text-transform: none; letter-spacing: 0; }
+  .peer-navigation { display: flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--muted); font: 8px/1 var(--font-ui); }
+  .peer-navigation button { display: grid; width: 22px; height: 20px; place-items: center; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink-soft); font: 15px/1 var(--font-ui); }
+  .peer-navigation button:disabled { cursor: default; opacity: .28; }
+  .selected-context { padding: 9px 0 0; }
+  .context-label { margin: 0 6px 5px 6px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .1em; }
+  .selected-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 25px; min-height: 39px; align-items: center; padding: 3px 5px; border-radius: 3px; background: var(--accent-soft); color: var(--ink); }
+  .selected-row > div { display: grid; min-width: 0; gap: 2px; }
+  .selected-row strong, .selected-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .selected-row strong { font: 650 11px/1.2 var(--font-ui); }
+  .selected-row small { color: var(--muted); font: 8px/1 var(--font-ui); }
+  .selected-attachments { margin-left: 13px; padding: 3px 0 0 7px; border-left: 1px solid var(--line); }
+  .context-entry { display: flex; min-width: 0; min-height: 32px; margin-left: calc((var(--context-depth, 1) - 1) * 13px); align-items: center; border-radius: 3px; color: var(--ink-soft); }
+  .context-entry:hover { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
+  .context-entry > input:first-child { flex: 0 0 14px; width: 13px; height: 13px; margin: 0 4px; accent-color: var(--accent); }
+  .context-entry-icon { display: grid; flex: 0 0 20px; width: 20px; place-items: center; color: var(--muted); font: 10px/1 var(--font-ui); }
+  .context-entry > button:not(.context-drag):not(.context-expander) { display: flex; min-width: 0; min-height: 30px; flex: 1; align-items: center; gap: 7px; padding: 0 4px; border: 0; background: transparent; color: inherit; font: 500 10px/1.25 var(--font-ui); text-align: left; }
+  .context-entry > button:not(.context-drag):not(.context-expander) span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .context-entry > button:not(.context-drag):not(.context-expander) small { overflow: hidden; max-width: 74px; margin-left: auto; color: var(--muted); font: 8px/1 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .context-drag { display: grid; flex: 0 0 17px; width: 17px; height: 27px; place-items: center; border: 0; background: transparent; color: color-mix(in srgb, var(--muted) 52%, transparent); font: 11px/1 var(--font-ui); cursor: grab; }
+  .context-drag:active { cursor: grabbing; }
+  .context-expander { display: grid; flex: 0 0 25px; width: 25px; height: 27px; place-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 15px/1 var(--font-ui); }
+  .context-expander:hover { background: var(--paper); color: var(--accent); }
+  .todo-complete { flex: 0 0 13px; width: 13px; height: 13px; margin: 0 6px 0 2px; accent-color: var(--accent); }
+  .todo-entry.done > button span { color: var(--muted); text-decoration: line-through; }
+  .context-preview { min-width: 0; }
+  .preview-label { margin: 3px 3px 2px calc((var(--context-depth, 1) - 1) * 13px + 37px); color: var(--muted); font: 700 7px/1 var(--font-ui); letter-spacing: .08em; text-transform: uppercase; }
+  .context-divider { height: 1px; margin: 7px 5px 6px 21px; background: var(--line); }
+  .attachment-heading { display: flex; align-items: center; min-height: 23px; margin-left: 21px; color: var(--muted); font: 700 8px/1 var(--font-ui); letter-spacing: .08em; text-transform: uppercase; }
+  .attachment-heading em { margin-left: auto; padding-right: 7px; font-style: normal; font-weight: 500; }
+  .context-empty-entry { margin: 5px 7px 7px 42px; color: var(--muted); font: 9px/1.35 var(--font-ui); }
+  .context-actions { display: flex; gap: 5px; padding: 2px 5px 0 21px; }
+  .context-actions button, .add-kind-choices button { min-height: 29px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink-soft); font: 600 9px/1 var(--font-ui); }
+  .context-actions .context-add { flex: 1; text-align: left; padding-left: 9px; }
+  .context-actions .context-remove { width: 30px; color: #8d3329; font-size: 15px; }
+  .context-actions .danger { flex: 1; border-color: #8d33294f; color: #8d3329; }
+  .context-actions button:disabled { cursor: default; opacity: .38; }
+  .add-panel { margin: 7px 5px 0 21px; padding: 7px; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--paper) 82%, var(--canvas)); }
+  .add-kind-choices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+  .add-kind-choices button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .add-panel .relation-form { margin: 7px 0 0; background: var(--canvas); }
+  .removal-warning { margin: 7px 5px 0 21px; padding: 8px; border-left: 2px solid #8d3329; background: #8d33290b; color: #773129; font: 9px/1.45 var(--font-ui); }
   .context-empty { margin-top: 16px; }
+  .collection-manager-backdrop { position: fixed; z-index: 95; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(34 31 27 / .38); backdrop-filter: blur(3px); }
+  .collection-manager { display: flex; width: min(920px, 100%); max-height: calc(100vh - 48px); flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); box-shadow: 0 24px 80px rgb(25 22 17 / .24); }
+  .collection-manager > header { display: flex; align-items: center; justify-content: space-between; padding: 19px 22px 16px; border-bottom: 1px solid var(--line); }
+  .collection-manager > header small { color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .12em; }
+  .collection-manager h2 { margin: 4px 0 0; color: var(--ink); font: 500 25px/1.1 var(--font-reading); }
+  .manager-close { width: 32px; height: 32px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font: 24px/1 var(--font-ui); }
+  .manager-close:hover { background: var(--paper-deep); color: var(--ink); }
+  .collection-welcome { margin: 16px 22px 0; padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
+  .collection-welcome strong { color: var(--ink); font: 700 12px/1.2 var(--font-ui); }
+  .collection-welcome p { margin: 4px 0 0; color: var(--ink-soft); font: 11px/1.45 var(--font-ui); }
+  .manager-section { min-height: 0; overflow: auto; padding: 18px 22px; }
+  .collection-sets { flex: 1 1 auto; }
+  .manager-section + .manager-section { border-top: 1px solid var(--line); }
+  .manager-section-heading { display: flex; align-items: start; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
+  .manager-section-heading h3 { margin: 0; color: var(--ink); font: 700 11px/1.2 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
+  .manager-section-heading p { margin: 4px 0 0; color: var(--muted); font: 10px/1.4 var(--font-ui); }
+  .manager-section-heading > button, .existing-collection-row button { min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); font: 600 9px/1 var(--font-ui); }
+  .manager-section-heading > button:hover, .existing-collection-row button:hover { background: var(--paper-deep); }
+  .set-list { display: grid; gap: 7px; }
+  .collection-set { overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--canvas) 45%, var(--paper)); }
+  .set-heading { display: grid; grid-template-columns: 28px 22px minmax(0, 1fr) auto; min-height: 48px; align-items: center; padding: 0 11px 0 6px; }
+  .set-disclosure { width: 28px; height: 32px; border: 0; background: transparent; color: var(--muted); font: 18px/1 var(--font-ui); }
+  .set-heading > input, .set-item > input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .set-title { display: grid; min-width: 0; gap: 3px; padding: 7px 9px; border: 0; background: transparent; text-align: left; }
+  .set-title strong { color: var(--ink); font: 700 11px/1.2 var(--font-ui); }
+  .set-title span { overflow: hidden; color: var(--muted); font: 9px/1.25 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .set-heading > small { color: var(--muted); font: 9px/1 var(--font-ui); }
+  .set-items { border-top: 1px solid var(--line); background: var(--paper); }
+  .set-item { display: grid; grid-template-columns: 22px minmax(125px, 1.2fr) minmax(115px, 1fr) 92px 72px 58px; gap: 8px; align-items: end; padding: 10px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
+  .set-item:last-child { border-bottom: 0; }
+  .set-item > input { align-self: center; }
+  .set-item label { display: grid; gap: 4px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
+  .set-item label.set-numbering { display: flex; align-items: center; align-self: center; gap: 5px; }
+  .set-item label.set-numbering input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+  .set-item input:not([type='checkbox']), .set-item select { min-width: 0; width: 100%; height: 29px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: #fff; color: var(--ink); font: 10px/1 var(--font-ui); text-transform: none; }
+  .set-item input:disabled, .set-item select:disabled { background: var(--paper-deep); color: var(--muted); opacity: .72; }
+  .set-item.existing, .set-item.conflict { grid-template-columns: 22px minmax(125px, 1.2fr) minmax(115px, 1fr) 92px 72px 58px auto; }
+  .already-added, .name-conflict { align-self: center; color: var(--accent); font: 700 8px/1 var(--font-ui); text-transform: uppercase; white-space: nowrap; }
+  .name-conflict { color: #8d3329; }
+  .existing-collections { flex: 0 0 auto; max-height: 34vh; }
+  .existing-collection-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 36px; border-bottom: 1px solid var(--line); }
+  .existing-collection-row strong { color: var(--ink); font: 600 11px/1.2 var(--font-ui); }
+  .existing-collection-row small { color: var(--muted); font: 10px/1.2 var(--font-ui); }
+  .collection-manager .collection-form { margin: 10px 0 14px; background: var(--canvas); }
+  .collection-manager > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-height: 57px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--paper-deep); }
+  .collection-manager > footer span { margin-right: auto; color: var(--muted); font: 10px/1.3 var(--font-ui); }
+  .collection-manager > footer button { min-height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink-soft); font: 600 9px/1 var(--font-ui); }
+  .collection-manager > footer button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+  .collection-manager > footer button:disabled { cursor: default; opacity: .42; }
   .navigator-help-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(34 31 27 / .30); backdrop-filter: blur(2px); }
   .navigator-help { position: relative; width: min(560px, 100%); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); padding: 26px 30px; box-shadow: 0 24px 70px rgb(25 22 17 / .22); }
   .help-close { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font-size: 22px; }
@@ -510,5 +958,11 @@
   .help-content :global(p), .help-content :global(li) { color: var(--ink-soft); font: 12px/1.6 var(--font-ui); }
   .help-content :global(ul) { margin: 14px 0 0; padding-left: 20px; }
   .help-content :global(li + li) { margin-top: 7px; }
-  @media (max-width: 680px) { .navigator { position: static; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); } }
+  @media (max-width: 760px) {
+    .navigator { position: static; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+    .collection-manager-backdrop { padding: 10px; }
+    .collection-manager { max-height: calc(100vh - 20px); }
+    .set-item, .set-item.existing, .set-item.conflict { grid-template-columns: 22px 1fr 1fr; align-items: end; }
+    .already-added, .name-conflict { grid-column: 2 / -1; }
+  }
 </style>

@@ -382,6 +382,10 @@ describe('Navigator workspace transactions', () => {
       'Writing project',
       expect.objectContaining({ navigator: expect.objectContaining({ revision: 1, collections: [collection] }) })
     );
+
+    expect(await workspace.createCollection({ name: ' scenes ', singularName: 'Scene' })).toBeNull();
+    expect(workspace.navigator.collections).toHaveLength(1);
+    expect(workspace.notice).toBe('scenes already exists.');
   });
 
   it('creates content-bearing Nodes with collection membership behind the facade', async () => {
@@ -494,6 +498,48 @@ describe('Navigator workspace transactions', () => {
     expect(facade.saveProject).toHaveBeenCalledTimes(2);
   });
 
+  it('owns editable relationship vocabulary and scoped relationship notes', async () => {
+    const facade = fakeFacade();
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'scene';
+    workspace.projects = [project()];
+    workspace.documents = [
+      { ...document(), id: 'scene', title: 'Scene 1', role: 'navigator_node' },
+      { ...document(), id: 'mara', title: 'Mara', role: 'navigator_node' },
+      { ...document(), id: 'chapter', title: 'Chapter 1', role: 'navigator_node' }
+    ];
+
+    const definition = await workspace.createRelationshipDefinition({
+      forwardLabel: 'features', inverseLabel: 'appears in', description: 'Narrative participation.', symmetric: false
+    });
+    const relationship = await workspace.createNavigatorRelationship({
+      sourceNodeId: 'scene', targetNodeId: 'mara', definitionId: definition!.id,
+      type: definition!.forwardLabel, inverseType: definition!.inverseLabel,
+      scopeNodeIds: ['chapter'], note: 'Mara arrives after the doctor.'
+    });
+
+    expect(relationship).toMatchObject({
+      definitionId: definition!.id,
+      scopeNodeIds: ['chapter'],
+      note: 'Mara arrives after the doctor.'
+    });
+    expect(workspace.navigatorRelationsFor('mara')[0]).toMatchObject({
+      label: 'appears in', scopeNodeIds: ['chapter'], note: 'Mara arrives after the doctor.'
+    });
+
+    await workspace.updateRelationshipDefinition(definition!.id, {
+      forwardLabel: 'includes', inverseLabel: 'participates in', description: 'Revised participation label.', symmetric: false
+    });
+    expect(workspace.navigator.relationships[0]).toMatchObject({ type: 'includes', inverseType: 'participates in' });
+
+    await workspace.deleteRelationshipDefinition(definition!.id);
+    expect(workspace.navigator.relationshipDefinitions).toEqual([]);
+    expect(workspace.navigator.relationships[0]).toMatchObject({ type: 'includes', inverseType: 'participates in' });
+    expect(workspace.navigator.relationships[0].definitionId).toBeUndefined();
+  });
+
   it('renumbers optional-titled items after a stable-identity move', async () => {
     const facade = fakeFacade();
     facade.saveDocument = vi.fn(async (input) => {
@@ -553,6 +599,12 @@ describe('Navigator workspace transactions', () => {
   it('keeps Navigator focus history separate from the active document projection', async () => {
     const facade = fakeFacade();
     facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.createDocument = vi.fn(async (input) => ({
+      id: input.id!, projectId: input.projectId, parentId: input.parentId ?? null, title: input.title,
+      order: 3, revision: 1, role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const,
+      content: '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'spine';
@@ -579,5 +631,87 @@ describe('Navigator workspace transactions', () => {
     await workspace.openNavigatorNode('chapter', 'back');
     expect(workspace.navigatorFocusNode?.id).toBe('chapter');
     expect(workspace.navigatorForwardId).toBe('scene');
+
+    await workspace.openNavigatorNode('spine');
+    const spineTodo = await workspace.createNavigatorTodo('Review the project premise');
+    expect(workspace.navigatorFocusNode?.id).toBe('spine');
+    expect(spineTodo?.targetNodeIds).toEqual(['spine']);
+  });
+
+  it('undoes and redoes a persisted Navigator move as one named transaction', async () => {
+    const facade = fakeFacade();
+    const workspace = new WorkspaceState(facade);
+    facade.saveDocument = vi.fn(async (input) => {
+      const current = workspace.documents.find((node) => node.id === input.id)!;
+      return { ...current, ...input, revision: current.revision + 1, updatedAt: '2026-08-18T00:00:01Z' } as WorkspaceDocument;
+    });
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator.collections = [{
+      id: 'scenes', name: 'Scenes', singularName: 'Scene', order: 0, icon: 'folder',
+      numbering: { enabled: true, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true }
+    }];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'scenes', title: 'Scenes', role: 'navigator_collection' },
+      { ...document(), id: 'chapter', parentId: 'scenes', title: 'Scene 1 — Chapter', role: 'navigator_node', order: 0, extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Chapter', kind: 'item' } } },
+      { ...document(), id: 'arrival', parentId: 'scenes', title: 'Scene 2 — Arrival', role: 'navigator_node', order: 1, extensions: { navigator: { collectionId: 'scenes', optionalTitle: 'Arrival', kind: 'item' } } }
+    ];
+
+    await workspace.recordNavigatorChange('Place Arrival inside Chapter', () => workspace.moveNavigatorNode('arrival', { parentId: 'chapter' }));
+
+    expect(workspace.documents.find((node) => node.id === 'arrival')?.parentId).toBe('chapter');
+    expect(workspace.navigatorUndoLabel).toBe('Place Arrival inside Chapter');
+    await workspace.undoNavigator();
+    expect(workspace.documents.find((node) => node.id === 'arrival')?.parentId).toBe('scenes');
+    expect(workspace.canRedoNavigator).toBe(true);
+    await workspace.redoNavigator();
+    expect(workspace.documents.find((node) => node.id === 'arrival')?.parentId).toBe('chapter');
+    expect(facade.saveProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('restores removed material, Todos, and relationships with Navigator Undo', async () => {
+    const facade = fakeFacade();
+    const workspace = new WorkspaceState(facade);
+    facade.saveDocument = vi.fn(async (input) => {
+      const current = workspace.documents.find((node) => node.id === input.id) ?? { ...document(), id: input.id };
+      return { ...current, ...input, revision: current.revision + 1, updatedAt: '2026-08-18T00:00:01Z' } as WorkspaceDocument;
+    });
+    facade.createDocument = vi.fn(async (input) => ({
+      id: input.id!, projectId: input.projectId, parentId: input.parentId ?? null, title: input.title,
+      order: 0, revision: 1, role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const,
+      content: input.content ?? '', updatedAt: '2026-08-18T00:00:00Z'
+    }));
+    facade.deleteDocument = vi.fn(async () => undefined);
+    facade.saveProject = vi.fn(async (_id, _title, extensions) => ({ ...project(), extensions: extensions ?? {} }));
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.navigator = {
+      version: 1,
+      revision: 1,
+      collections: [{ id: 'notes', name: 'Notes', singularName: 'Note', order: 0, icon: 'folder', numbering: { enabled: false, start: 1 }, capabilities: { contentBearing: true, mayContainChildren: true } }],
+      relationshipDefinitions: [],
+      todos: [{ id: 'todo', title: 'Check clue', targetNodeIds: ['clue'], state: 'open', createdAt: '2026-08-18T00:00:00Z' }],
+      relationships: [{ id: 'relation', sourceNodeId: 'clue', targetNodeId: 'main', type: 'supports', inverseType: 'supported by', confirmed: true }]
+    };
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'notes', title: 'Notes', role: 'navigator_collection' },
+      { ...document(), id: 'clue', parentId: 'notes', title: 'Clue', role: 'navigator_node', extensions: { navigator: { collectionId: 'notes', optionalTitle: 'Clue', kind: 'item' } } },
+      { ...document(), id: 'todo', parentId: 'clue', title: 'Check clue', role: 'navigator_todo' }
+    ];
+
+    await workspace.recordNavigatorChange('Remove selected Navigator entries', () => workspace.removeNavigatorEntries({ nodeIds: ['clue'], todoIds: ['todo'], relationshipIds: ['relation'] }));
+
+    expect(workspace.documents.find((node) => node.id === 'clue')?.extensions.navigator).toMatchObject({ archived: true });
+    expect(workspace.documents.some((node) => node.id === 'todo')).toBe(false);
+    expect(workspace.navigator.relationships).toHaveLength(0);
+    await workspace.undoNavigator();
+    expect(workspace.documents.find((node) => node.id === 'clue')?.parentId).toBe('notes');
+    expect(workspace.documents.find((node) => node.id === 'clue')?.extensions.navigator).not.toHaveProperty('archived');
+    expect(workspace.documents.find((node) => node.id === 'todo')?.title).toBe('Check clue');
+    expect(workspace.navigator.todos).toHaveLength(1);
+    expect(workspace.navigator.relationships).toHaveLength(1);
   });
 });

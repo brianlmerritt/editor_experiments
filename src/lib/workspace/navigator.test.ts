@@ -37,11 +37,38 @@ describe('Navigator domain projection', () => {
         numbering: { enabled: false, start: 1 },
         capabilities: { contentBearing: true, mayContainChildren: false }
       }],
-      relationships: [],
+      relationshipDefinitions: [{
+        id: 'features', forwardLabel: 'features', inverseLabel: 'appears in',
+        description: 'Participation in a narrative unit.', symmetric: false, order: 0
+      }],
+      relationships: [{
+        id: 'relation', sourceNodeId: 'scene', targetNodeId: 'mara', definitionId: 'features',
+        type: 'features', inverseType: 'appears in', scopeNodeIds: ['chapter'], note: 'Mara arrives late.', confirmed: true
+      }],
       todos: []
     };
     const stored = { ...project, extensions: navigatorExtensions({}, state) };
     expect(readNavigatorState(stored)).toEqual(state);
+  });
+
+  it('loads legacy free-text relationships while defaulting the new vocabulary and scope fields', () => {
+    const stored = {
+      ...project,
+      extensions: {
+        navigator: {
+          version: 1,
+          revision: 3,
+          collections: [],
+          relationships: [{ id: 'legacy', sourceNodeId: 'scene', targetNodeId: 'mara', type: 'features', inverseType: 'appears in', confirmed: true }],
+          todos: []
+        }
+      }
+    };
+
+    expect(readNavigatorState(stored)).toMatchObject({
+      relationshipDefinitions: [],
+      relationships: [{ id: 'legacy', definitionId: undefined, scopeNodeIds: [], note: '' }]
+    });
   });
 
   it('keeps collection membership on the node without replacing other extensions', () => {

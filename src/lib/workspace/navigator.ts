@@ -24,9 +24,21 @@ export interface NavigatorRelationship {
   id: string;
   sourceNodeId: string;
   targetNodeId: string;
+  definitionId?: string;
   type: string;
   inverseType: string;
+  scopeNodeIds?: string[];
+  note?: string;
   confirmed: true;
+}
+
+export interface RelationshipDefinition {
+  id: string;
+  forwardLabel: string;
+  inverseLabel: string;
+  description: string;
+  symmetric: boolean;
+  order: number;
 }
 
 export interface NavigatorTodo {
@@ -42,6 +54,7 @@ export interface NavigatorProjectState {
   version: 1;
   revision: number;
   collections: CollectionDefinition[];
+  relationshipDefinitions: RelationshipDefinition[];
   relationships: NavigatorRelationship[];
   todos: NavigatorTodo[];
 }
@@ -67,6 +80,7 @@ export const emptyNavigatorState = (): NavigatorProjectState => ({
   version: 1,
   revision: 0,
   collections: [],
+  relationshipDefinitions: [],
   relationships: [],
   todos: []
 });
@@ -115,7 +129,31 @@ export function readNavigatorState(project: WorkspaceProject | null): NavigatorP
             : { contentBearing: true, mayContainChildren: true }
         })).filter((collection) => collection.id)
       : [],
-    relationships: Array.isArray(stored.relationships) ? stored.relationships as unknown as NavigatorRelationship[] : [],
+    relationshipDefinitions: Array.isArray(stored.relationshipDefinitions)
+      ? (stored.relationshipDefinitions as unknown[]).filter(isRecord).map((definition, index) => ({
+          id: String(definition.id ?? ''),
+          forwardLabel: String(definition.forwardLabel ?? '').trim(),
+          inverseLabel: String(definition.inverseLabel ?? '').trim(),
+          description: String(definition.description ?? '').trim(),
+          symmetric: definition.symmetric === true,
+          order: typeof definition.order === 'number' ? definition.order : index
+        })).filter((definition) => definition.id && definition.forwardLabel && definition.inverseLabel)
+      : [],
+    relationships: Array.isArray(stored.relationships)
+      ? (stored.relationships as unknown[]).filter(isRecord).map((relationship) => ({
+          id: String(relationship.id ?? ''),
+          sourceNodeId: String(relationship.sourceNodeId ?? ''),
+          targetNodeId: String(relationship.targetNodeId ?? ''),
+          definitionId: typeof relationship.definitionId === 'string' ? relationship.definitionId : undefined,
+          type: String(relationship.type ?? '').trim(),
+          inverseType: String(relationship.inverseType ?? '').trim(),
+          scopeNodeIds: Array.isArray(relationship.scopeNodeIds)
+            ? relationship.scopeNodeIds.map(String).filter(Boolean)
+            : [],
+          note: typeof relationship.note === 'string' ? relationship.note : '',
+          confirmed: true as const
+        })).filter((relationship) => relationship.id && relationship.sourceNodeId && relationship.targetNodeId && relationship.type && relationship.inverseType)
+      : [],
     todos: Array.isArray(stored.todos) ? stored.todos as unknown as NavigatorTodo[] : []
   };
 }

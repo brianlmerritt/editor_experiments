@@ -23,13 +23,27 @@ import {
   type NavigatorMemory,
   type NavigatorProjectState,
   type NavigatorRelationship,
-  type NavigatorTodo
+  type NavigatorTodo,
+  type RelationshipDefinition
 } from '$lib/workspace/navigator';
 
 const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close third person', tense: 'past', distance: 'close, embodied, minimal narrator intrusion', canon: '' };
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
 const attachmentBehaviourVersion = 2;
 const authorityVersion = 2;
+
+interface NavigatorHistorySnapshot {
+  navigator: NavigatorProjectState;
+  documents: WorkspaceDocument[];
+}
+
+interface NavigatorHistoryEntry {
+  id: string;
+  label: string;
+  before: NavigatorHistorySnapshot;
+  after: NavigatorHistorySnapshot;
+  createdAt: number;
+}
 
 export class WorkspaceState {
   sessionId = $state('session_pending');
@@ -49,6 +63,8 @@ export class WorkspaceState {
   documentSnapshot = $state<EditorDocumentSnapshot | null>(null);
   undoStack = $state<WorkspaceHistoryEntry[]>([]);
   redoStack = $state<WorkspaceHistoryEntry[]>([]);
+  navigatorUndoStack = $state<NavigatorHistoryEntry[]>([]);
+  navigatorRedoStack = $state<NavigatorHistoryEntry[]>([]);
   ledger = $state<Required<LedgerEvent>[]>([]);
   brief = $state<WritingBrief>(defaultBrief);
   prompts = $state<TaskPrompt[]>([defaultPrompt]);
@@ -82,6 +98,10 @@ export class WorkspaceState {
 
   get canUndo(): boolean { return this.undoStack.length > 0; }
   get canRedo(): boolean { return this.redoStack.length > 0; }
+  get canUndoNavigator(): boolean { return this.navigatorUndoStack.length > 0; }
+  get canRedoNavigator(): boolean { return this.navigatorRedoStack.length > 0; }
+  get navigatorUndoLabel(): string | null { return this.navigatorUndoStack.at(-1)?.label ?? null; }
+  get navigatorRedoLabel(): string | null { return this.navigatorRedoStack.at(-1)?.label ?? null; }
 
   get pendingCount(): number {
     return this.suggestions.filter((suggestion) => suggestion.state === 'pending' || suggestion.state === 'hidden').length;
@@ -160,16 +180,23 @@ export class WorkspaceState {
       .sort((left, right) => left.order - right.order);
   }
 
-  get selectedNodeRelations(): { node: WorkspaceDocument; label: string; relationshipId: string }[] {
+  get selectedNodeRelations(): { node: WorkspaceDocument; label: string; relationshipId: string; scopeNodeIds: string[]; note: string }[] {
     if (!this.navigatorFocusId) return [];
     return this.navigatorRelationsFor(this.navigatorFocusId);
   }
 
-  navigatorRelationsFor(nodeId: string): { node: WorkspaceDocument; label: string; relationshipId: string }[] {
+  navigatorRelationsFor(nodeId: string): { node: WorkspaceDocument; label: string; relationshipId: string; scopeNodeIds: string[]; note: string }[] {
     const byId = new Map(this.projectNodes.map((node) => [node.id, node]));
     return relationNeighbours(nodeId, this.navigator.relationships).flatMap((relation) => {
       const node = byId.get(relation.nodeId);
-      return node ? [{ node, label: relation.label, relationshipId: relation.relationshipId }] : [];
+      const relationship = this.navigator.relationships.find((candidate) => candidate.id === relation.relationshipId);
+      return node && !nodeArchived(node) ? [{
+        node,
+        label: relation.label,
+        relationshipId: relation.relationshipId,
+        scopeNodeIds: relationship?.scopeNodeIds ?? [],
+        note: relationship?.note ?? ''
+      }] : [];
     });
   }
 
@@ -234,6 +261,13 @@ export class WorkspaceState {
       ? this.navigator.collections.find((item) => item.id === nodeCollectionId(node))
       : undefined;
     return collection?.numbering.enabled ? nodeOptionalTitle(node) : node.title;
+  }
+
+  navigatorNodeType(node: WorkspaceDocument): string {
+    if (node.role === 'spine') return 'Spine';
+    if (node.role === 'navigator_collection') return 'Collection';
+    if (node.role === 'navigator_todo') return 'Todo';
+    return this.navigator.collections.find((item) => item.id === nodeCollectionId(node))?.singularName ?? 'Document';
   }
 
   async initialize(): Promise<void> {
@@ -348,6 +382,39 @@ export class WorkspaceState {
     this.restoreHistoryState(entry.after);
     void this.persistDomainState('Redo workspace change');
     return entry.after.document;
+  }
+
+  async recordNavigatorChange<T>(label: string, change: () => Promise<T>): Promise<T> {
+    const before = this.navigatorHistorySnapshot();
+    const result = await change();
+    const after = this.navigatorHistorySnapshot();
+    if (this.navigatorSnapshotsDiffer(before, after)) {
+      this.navigatorUndoStack = [...this.navigatorUndoStack, {
+        id: makeId('navigator_history'),
+        label,
+        before,
+        after,
+        createdAt: Date.now()
+      }].slice(-100);
+      this.navigatorRedoStack = [];
+    }
+    return result;
+  }
+
+  async undoNavigator(): Promise<void> {
+    const entry = this.navigatorUndoStack.at(-1);
+    if (!entry) return;
+    await this.restoreNavigatorHistorySnapshot(entry.before, `Undo: ${entry.label}`);
+    this.navigatorUndoStack = this.navigatorUndoStack.slice(0, -1);
+    this.navigatorRedoStack = [...this.navigatorRedoStack, entry];
+  }
+
+  async redoNavigator(): Promise<void> {
+    const entry = this.navigatorRedoStack.at(-1);
+    if (!entry) return;
+    await this.restoreNavigatorHistorySnapshot(entry.after, `Redo: ${entry.label}`);
+    this.navigatorRedoStack = this.navigatorRedoStack.slice(0, -1);
+    this.navigatorUndoStack = [...this.navigatorUndoStack, entry];
   }
 
   private setStrikethrough(target: TargetSet, value: boolean, label: string): boolean {
@@ -758,6 +825,8 @@ export class WorkspaceState {
   async switchProject(id: string): Promise<void> {
     if (id === this.projectId) return;
     this.projectId = id;
+    this.navigatorUndoStack = [];
+    this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
     this.loadNavigatorMemory();
     await this.ensureProjectStructure();
@@ -791,6 +860,8 @@ export class WorkspaceState {
     this.projectId = project.id;
     this.navigator = emptyNavigatorState();
     this.navigatorMemory = emptyNavigatorMemory();
+    this.navigatorUndoStack = [];
+    this.navigatorRedoStack = [];
     this.saveNavigatorMemory();
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
     this.refreshBranches();
@@ -826,6 +897,8 @@ export class WorkspaceState {
     this.contextBuckets = persistent.contextBuckets;
     this.navigator = emptyNavigatorState();
     this.navigatorMemory = emptyNavigatorMemory();
+    this.navigatorUndoStack = [];
+    this.navigatorRedoStack = [];
     this.saveNavigatorMemory();
     this.refreshBranches();
     const spine = this.spineNode;
@@ -843,6 +916,10 @@ export class WorkspaceState {
     const name = input.name.trim();
     const singularName = input.singularName.trim();
     if (!name || !singularName) return null;
+    if (this.navigator.collections.some((collection) => collection.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      this.notice = `${name} already exists.`;
+      return null;
+    }
     const collectionId = makeId('collection');
     const collectionNode = await this.facade.createDocument({
       id: collectionId,
@@ -1111,31 +1188,132 @@ export class WorkspaceState {
     }));
   }
 
-  async createNavigatorRelationship(targetNodeId: string, type: string, inverseType: string): Promise<NavigatorRelationship | null> {
-    const sourceNodeId = this.navigatorFocusId ?? this.branchId;
+  async createRelationshipDefinition(input: Omit<RelationshipDefinition, 'id' | 'order'>): Promise<RelationshipDefinition | null> {
+    const forwardLabel = input.forwardLabel.trim();
+    const inverseLabel = (input.symmetric ? forwardLabel : input.inverseLabel).trim();
+    if (!forwardLabel || !inverseLabel) return null;
+    const duplicate = this.navigator.relationshipDefinitions.some((definition) => {
+      const forward = definition.forwardLabel.trim().toLocaleLowerCase();
+      const inverse = definition.inverseLabel.trim().toLocaleLowerCase();
+      const nextForward = forwardLabel.toLocaleLowerCase();
+      const nextInverse = inverseLabel.toLocaleLowerCase();
+      return (forward === nextForward && inverse === nextInverse)
+        || (forward === nextInverse && inverse === nextForward);
+    });
+    if (duplicate) {
+      this.notice = 'That relationship definition already exists.';
+      return null;
+    }
+    const definition: RelationshipDefinition = {
+      id: makeId('relationship_definition'),
+      forwardLabel,
+      inverseLabel,
+      description: input.description.trim(),
+      symmetric: input.symmetric,
+      order: this.navigator.relationshipDefinitions.length
+    };
+    await this.commitNavigator('Create relationship definition', (state) => ({
+      ...state,
+      relationshipDefinitions: [...state.relationshipDefinitions, definition]
+    }));
+    return definition;
+  }
+
+  async updateRelationshipDefinition(id: string, input: Omit<RelationshipDefinition, 'id' | 'order'>): Promise<void> {
+    const existing = this.navigator.relationshipDefinitions.find((definition) => definition.id === id);
+    if (!existing) return;
+    const forwardLabel = input.forwardLabel.trim();
+    const inverseLabel = (input.symmetric ? forwardLabel : input.inverseLabel).trim();
+    if (!forwardLabel || !inverseLabel) return;
+    const conflict = this.navigator.relationshipDefinitions.some((definition) => definition.id !== id && (
+      (definition.forwardLabel.trim().toLocaleLowerCase() === forwardLabel.toLocaleLowerCase()
+        && definition.inverseLabel.trim().toLocaleLowerCase() === inverseLabel.toLocaleLowerCase())
+      || (definition.forwardLabel.trim().toLocaleLowerCase() === inverseLabel.toLocaleLowerCase()
+        && definition.inverseLabel.trim().toLocaleLowerCase() === forwardLabel.toLocaleLowerCase())
+    ));
+    if (conflict) {
+      this.notice = 'That relationship definition already exists.';
+      return;
+    }
+    await this.commitNavigator('Update relationship definition', (state) => ({
+      ...state,
+      relationshipDefinitions: state.relationshipDefinitions.map((definition) => definition.id === id
+        ? { ...definition, forwardLabel, inverseLabel, description: input.description.trim(), symmetric: input.symmetric }
+        : definition),
+      relationships: state.relationships.map((relationship) => {
+        if (relationship.definitionId !== id) return relationship;
+        const usesForwardDirection = relationship.type === existing.forwardLabel && relationship.inverseType === existing.inverseLabel;
+        return {
+          ...relationship,
+          type: usesForwardDirection ? forwardLabel : inverseLabel,
+          inverseType: usesForwardDirection ? inverseLabel : forwardLabel
+        };
+      })
+    }));
+  }
+
+  async deleteRelationshipDefinition(id: string): Promise<void> {
+    if (!this.navigator.relationshipDefinitions.some((definition) => definition.id === id)) return;
+    await this.commitNavigator('Delete relationship definition', (state) => ({
+      ...state,
+      relationshipDefinitions: state.relationshipDefinitions.filter((definition) => definition.id !== id),
+      relationships: state.relationships.map((relationship) => relationship.definitionId === id
+        ? { ...relationship, definitionId: undefined }
+        : relationship)
+    }));
+  }
+
+  async createNavigatorRelationship(
+    targetOrInput: string | {
+      targetNodeId: string;
+      definitionId?: string;
+      type: string;
+      inverseType: string;
+      scopeNodeIds?: string[];
+      note?: string;
+      sourceNodeId?: string;
+    },
+    legacyType?: string,
+    legacyInverseType?: string
+  ): Promise<NavigatorRelationship | null> {
+    const input = typeof targetOrInput === 'string'
+      ? { targetNodeId: targetOrInput, type: legacyType ?? '', inverseType: legacyInverseType ?? '' }
+      : targetOrInput;
+    const sourceNodeId = input.sourceNodeId ?? this.navigatorFocusId ?? this.branchId;
+    const targetNodeId = input.targetNodeId;
+    const type = input.type;
+    const inverseType = input.inverseType;
     if (targetNodeId === sourceNodeId || !type.trim() || !inverseType.trim()) return null;
     if (!this.projectNodes.some((node) => node.id === targetNodeId)) return null;
+    if (!this.projectNodes.some((node) => node.id === sourceNodeId)) return null;
+    if (input.definitionId && !this.navigator.relationshipDefinitions.some((definition) => definition.id === input.definitionId)) return null;
     const nextType = type.trim();
     const nextInverseType = inverseType.trim();
+    const scopeNodeIds = [...new Set(input.scopeNodeIds ?? [])]
+      .filter((id) => this.projectNodes.some((node) => node.id === id));
     const duplicate = this.navigator.relationships.some((relationship) =>
-      (relationship.sourceNodeId === sourceNodeId
+      ((relationship.sourceNodeId === sourceNodeId
         && relationship.targetNodeId === targetNodeId
         && relationship.type === nextType
         && relationship.inverseType === nextInverseType)
       || (relationship.sourceNodeId === targetNodeId
         && relationship.targetNodeId === sourceNodeId
         && relationship.type === nextInverseType
-        && relationship.inverseType === nextType));
+        && relationship.inverseType === nextType))
+      && JSON.stringify([...(relationship.scopeNodeIds ?? [])].sort()) === JSON.stringify([...scopeNodeIds].sort()));
     if (duplicate) {
-      this.notice = 'Those items are already directly related.';
+      this.notice = 'Those items already have that relationship in the same scope.';
       return null;
     }
     const relationship: NavigatorRelationship = {
       id: makeId('relationship'),
       sourceNodeId,
       targetNodeId,
+      definitionId: input.definitionId,
       type: nextType,
       inverseType: nextInverseType,
+      scopeNodeIds,
+      note: input.note?.trim() ?? '',
       confirmed: true
     };
     await this.commitNavigator('Create Navigator relationship', (state) => ({
@@ -1143,6 +1321,51 @@ export class WorkspaceState {
       relationships: [...state.relationships, relationship]
     }));
     return relationship;
+  }
+
+  async removeNavigatorEntries(input: {
+    nodeIds?: string[];
+    todoIds?: string[];
+    relationshipIds?: string[];
+  }): Promise<void> {
+    const selectedNodeIds = new Set(input.nodeIds ?? []);
+    const archivedNodeIds = new Set<string>();
+    const visit = (id: string): void => {
+      if (archivedNodeIds.has(id)) return;
+      const node = this.navigatorNodes.find((candidate) => candidate.id === id);
+      if (!node) return;
+      archivedNodeIds.add(id);
+      for (const child of this.navigatorNodes.filter((candidate) => candidate.parentId === id)) visit(child.id);
+    };
+    for (const id of selectedNodeIds) visit(id);
+
+    for (const id of archivedNodeIds) {
+      const node = this.documents.find((document) => document.id === id);
+      if (!node) continue;
+      const saved = await this.facade.saveDocument({
+        id,
+        parentId: selectedNodeIds.has(id) ? null : node.parentId,
+        extensions: nodeArchivedExtensions(node.extensions, true),
+        createdBy: this.sessionId,
+        reason: 'Remove Navigator material'
+      });
+      this.documents = this.documents.map((document) => document.id === id ? saved : document);
+    }
+
+    const todoIds = new Set(input.todoIds ?? []);
+    for (const id of todoIds) {
+      await this.facade.deleteDocument(id);
+      this.documents = this.documents.filter((document) => document.id !== id);
+    }
+    const relationshipIds = new Set(input.relationshipIds ?? []);
+    if (todoIds.size || relationshipIds.size) {
+      await this.commitNavigator('Remove Navigator entries', (state) => ({
+        ...state,
+        todos: state.todos.filter((todo) => !todoIds.has(todo.id)),
+        relationships: state.relationships.filter((relationship) => !relationshipIds.has(relationship.id))
+      }));
+    }
+    this.refreshBranches();
   }
 
   async openNavigatorNode(id: string, navigation: 'push' | 'back' | 'forward' = 'push'): Promise<void> {
@@ -1173,7 +1396,7 @@ export class WorkspaceState {
       if (historyKeys.at(-1) !== targetKey) historyKeys.push(targetKey);
       historyIndex = historyKeys.length - 1;
     }
-    const focusKey = target.role === 'navigator_node' ? targetKey : memory.focusKey;
+    const focusKey = structural ? targetKey : memory.focusKey;
     const nextMode = target.role === 'navigator_node'
       ? 'context'
       : target.role === 'spine' || target.role === 'navigator_collection'
@@ -1423,6 +1646,93 @@ export class WorkspaceState {
   private saveNavigatorMemory(): void {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(this.navigatorMemoryKey(), JSON.stringify(this.navigatorMemory));
+    }
+  }
+
+  private navigatorHistorySnapshot(): NavigatorHistorySnapshot {
+    return {
+      navigator: JSON.parse(JSON.stringify(this.navigator)) as NavigatorProjectState,
+      documents: this.documents
+        .filter((document) => document.projectId === this.projectId
+          && ['navigator_collection', 'navigator_node', 'navigator_todo'].includes(document.role ?? ''))
+        .map((document) => ({ ...document, extensions: JSON.parse(JSON.stringify(document.extensions)) }))
+    };
+  }
+
+  private navigatorSnapshotsDiffer(left: NavigatorHistorySnapshot, right: NavigatorHistorySnapshot): boolean {
+    const comparable = (snapshot: NavigatorHistorySnapshot) => ({
+      navigator: snapshot.navigator,
+      documents: snapshot.documents.map(({ revision: _revision, updatedAt: _updatedAt, content: _content, ...document }) => document)
+    });
+    return JSON.stringify(comparable(left)) !== JSON.stringify(comparable(right));
+  }
+
+  private async restoreNavigatorHistorySnapshot(snapshot: NavigatorHistorySnapshot, reason: string): Promise<void> {
+    const currentDocuments = this.documents.filter((document) => document.projectId === this.projectId
+      && ['navigator_collection', 'navigator_node', 'navigator_todo'].includes(document.role ?? ''));
+    const currentById = new Map(currentDocuments.map((document) => [document.id, document]));
+    const targetById = new Map(snapshot.documents.map((document) => [document.id, document]));
+
+    for (const document of currentDocuments) {
+      if (!targetById.has(document.id)) await this.facade.deleteDocument(document.id);
+    }
+
+    const restoredDocuments: WorkspaceDocument[] = [];
+    for (const target of snapshot.documents) {
+      const current = currentById.get(target.id);
+      if (!current) {
+        const created = await this.facade.createDocument({
+          id: target.id,
+          projectId: target.projectId,
+          title: target.title,
+          content: target.content,
+          role: target.role,
+          parentId: target.parentId,
+          extensions: target.extensions,
+          createdBy: this.sessionId,
+          reason
+        });
+        const ordered = created.order === target.order ? created : await this.facade.saveDocument({
+          id: created.id,
+          order: target.order,
+          createdBy: this.sessionId,
+          reason
+        });
+        restoredDocuments.push(ordered);
+        continue;
+      }
+      const changed = current.title !== target.title
+        || current.parentId !== target.parentId
+        || current.order !== target.order
+        || JSON.stringify(current.extensions) !== JSON.stringify(target.extensions);
+      restoredDocuments.push(changed ? await this.facade.saveDocument({
+        id: current.id,
+        title: target.title,
+        parentId: target.parentId,
+        order: target.order,
+        extensions: target.extensions,
+        createdBy: this.sessionId,
+        reason
+      }) : current);
+    }
+
+    this.navigator = JSON.parse(JSON.stringify(snapshot.navigator)) as NavigatorProjectState;
+    const project = this.currentProject;
+    if (!project) return;
+    const savedProject = await this.facade.saveProject(
+      project.id,
+      project.title,
+      navigatorExtensions(project.extensions, this.navigator)
+    );
+    this.projects = this.projects.map((item) => item.id === savedProject.id ? savedProject : item);
+    const restoredIds = new Set(snapshot.documents.map((document) => document.id));
+    this.documents = [
+      ...this.documents.filter((document) => document.projectId !== this.projectId || !currentById.has(document.id)),
+      ...restoredDocuments
+    ].filter((document) => document.projectId !== this.projectId || !currentById.has(document.id) || restoredIds.has(document.id));
+    this.refreshBranches();
+    if (!this.documents.some((document) => document.id === this.branchId) && this.spineNode) {
+      await this.switchBranch(this.spineNode.id);
     }
   }
 

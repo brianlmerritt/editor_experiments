@@ -242,6 +242,39 @@ without migration, but nested Todo UI is not required on day one. AI-created tas
 also outside the first Navigator scope. Provenance and actor/source fields must not
 prevent that capability from being introduced deliberately later.
 
+### Structural, Collection, and Todo projections
+
+Traditional view has now proved the intended primary-containment behaviour: a Scene
+whose parent is Chapter 1 appears beneath Chapter 1, rather than being duplicated as a
+flat child beneath the Scenes Collection. A Collection count is a query over all of
+its members regardless of their structural parents. Consequently, a Scenes Collection
+with fifteen Scenes beneath Chapter 1 has fifteen members and must never claim that no
+Scenes exist merely because it has no directly contained root members.
+
+Todos intentionally differ from structural children. Every Todo remains a canonical
+member of the global Todos set, where an initial creation-order projection is
+acceptable. The same Todo may also appear in the Context of each Node it directly
+targets. Context filtering is exact by default:
+
+- a Todo targeting the Spine does not appear in Chapter 1 Context;
+- a Todo targeting Chapter 1 does not appear in Spine Context;
+- sibling, ancestor, descendant, or indirectly related Todos are not silently mixed
+  into the focused Node's applicable list;
+- if broader Todo scope is later useful, it must be an explicit, explainable expansion
+  such as **Sibling Todos** or **Inherited Todos**, not an unlabelled relevance guess.
+
+Applicable Todos use the same complete interaction in Context and Traditional
+projections: checkbox state, content-opening title, and creation. Opening a Todo edits
+its durable content without discarding the current structural focus. The writer must
+not have to switch projections merely to complete, reopen, select, or edit a Todo.
+
+Creation and navigation remain separate commands. Creating a Chapter or Collection
+should keep the current projection available for repeated creation; it should not
+change focus or add a Back/Forward history entry. An explicit **Create and open** action
+may be added later. When **Add inside** requires a Collection that does not yet exist,
+its chooser should eventually allow that Collection to be created without leaving the
+current structural Context.
+
 The Navigator can also expose key derived views, such as:
 
 - recently changed material;
@@ -350,12 +383,62 @@ Nodes to Archived/Unowned rather than erasing their content. The item field uses
 action-oriented prompt **Create new {singular name}**; when numbering is enabled its
 name may be left blank because the generated number is sufficient.
 
+Collection definitions are created and edited in one Collection Manager modal from
+either Navigator view. Traditional and Context are presentation lenses, not separate
+capability sets: changing view must never determine whether the writer can create a
+Collection. When creation begins within a focused Node, the manager returns the new
+Collection to that child-item flow without changing Navigator focus or history.
+
+The manager offers optional **Collection sets** as well as custom creation. Each set
+has an independent disclosure control and a set checkbox. Selecting the set expands
+it and selects all available suggestions; individual suggestions can then be edited
+or removed and the parent checkbox shows a partial state. Applying a set creates
+ordinary project-owned Collection definitions. It creates no sample content, retains
+no live dependency on the set, skips existing names, and remains fully editable.
+Initial sets cover Core story, Story planning, Story world, and Research. Scene Beats
+are an optional numbered Collection in Story planning: a Beat describes intended
+story action, while a Todo describes work the writer intends to perform. Containment
+may place Beat Nodes under Scenes, but the set does not impose that relationship.
+
+A project with no Collections proactively opens the manager once for that empty
+state, offering sets or custom creation. Dismissing the invitation is valid; the same
+manager remains available later from either Navigator view.
+
 Selecting the Todos heading opens source-maintained instructions while selecting an
 individual Todo opens its durable content in the editor. A future consolidated view
 over Todo records may still use the editor, a modal, or a split pane; the data and
 command model does not assume that later presentation.
 
-### Relationship vocabulary
+### Writing relationship vocabulary and manager
+
+Relationship management uses a dedicated modal following the Collection Manager
+pattern. It is available from Traditional view and from **Add… → Relationship** in
+Context. Definitions and confirmed links are project-owned Svelte state persisted
+through the workspace facade. Containment remains separate, endpoints are stable
+Nodes, a confirmed edge is stored once and projected from either end, and unconfirmed
+AI proposals remain Inputs.
+
+The first editable writing relationship sets are:
+
+- **Narrative essentials** — participation, viewpoint, setting, causality,
+  revelation, setup, and payoff;
+- **Character knowledge and change** — knowledge, belief, desire, fear, memory,
+  and scoped states;
+- **Story world** — ownership, membership, location, use, opposition, alliance,
+  and family;
+- **Argument and evidence** — claims, support, challenge, refutation,
+  qualification, examples, definitions, and dependency;
+- **Research** — citation, quotation, provenance, corroboration, dispute,
+  verification, investigation, and synthesis;
+- **Non-fiction** — introduction, explanation, context, comparison, contrast,
+  case studies, summaries, and development.
+
+Installing a set creates ordinary editable relationship definitions. It creates no
+links, Nodes, sample content, or lasting template dependency. Writers can edit the
+forward label, inverse label, symmetry, and guidance before installation, create a
+custom definition, or later edit and delete installed vocabulary. Deleting a
+definition preserves existing links and their labels rather than silently deleting
+writing knowledge.
 
 The Laravel Eloquent analogy is useful for defining comprehensible relationships:
 
@@ -378,11 +461,64 @@ that relationship or its view ordering; it never deletes the target Node. Deleti
 parent with children requires an explicit choice to delete descendants, rehome them,
 or cancel. These rules belong to the domain reducer, not a Svelte component.
 
-A relationship definition records its name and inverse name, permitted source and
-destination Collections, cardinality, Navigator visibility, group label, ordering,
-optional scope data, and deletion behaviour. The initial Navigator shows only direct,
-confirmed relationships. AI-inferred relationships remain Inputs until explicitly
-accepted.
+A relationship definition currently records its forward label, inverse label,
+symmetry, writer/AI guidance, and project ordering. It is a reusable project-level
+function, not intrinsically a Character-to-Chapter rule. Source/target restrictions,
+cardinality, favourites, and usage-based ranking remain possible later additions; the
+current implementation does not invent or enforce them. The Navigator shows only
+direct, confirmed relationships. AI-inferred relationships remain Inputs until
+explicitly accepted.
+
+Relationship creation does not ask the writer to invent two directional phrases in
+free-text fields. Once two Nodes have been chosen, a single **Relationship** dropdown
+offers both readable orientations of the installed project vocabulary. It does not
+hide a relationship because the selected Nodes belong to an unexpected pair of
+Collections. Each option is presented as a readable sentence in the current
+orientation, for example:
+
+```text
+Claire appears in Chapter 1
+```
+
+Selecting it derives and previews both stored directions:
+
+```text
+Claire appears in Chapter 1
+Chapter 1 features Claire
+```
+
+Reversing the order in which the Nodes were selected reverses the presentation, not
+the meaning of the relationship. The forward and inverse labels belong to the
+relationship definition and are never accidental prefilled values. If no suitable
+definition exists, **Create relationship type…** opens a separate definition flow;
+ordinary linking does not fall back to arbitrary typed words. Symmetric definitions
+such as `is allied with` use the same label in both directions. Structural
+containment remains a separate command and is not offered as an ordinary relationship
+shortcut.
+
+The same pair of Nodes may have several distinct functional relationships. These are
+not reducible to one generic Character appearance:
+
+```text
+Claire is present at Location 1
+Claire appears in Chapter 1
+Claire is referenced obliquely in Chapter 1
+Claire dies in Scene 1
+```
+
+Likewise, `appears in`, `is referenced in`, `occurs in`, `supports`, `applies to`, and
+`contradicts` can be useful across many different Collection and container kinds. A
+relationship may carry a writer-readable note and optional applicability scope rather
+than multiplying almost identical predicates. This supports facts such as Geoffrey
+having one state during Scenes 1–3 and a changed state during Scenes 4–6 without
+changing Geoffrey's identity or creating copied character records.
+
+An edge is appropriate while the fact only needs two endpoints and small qualifiers.
+When a fact needs its own prose, chronology, participants, evidence, consequences, or
+relationships, it becomes a content-bearing Node. `Claire dies in Scene 1` may begin
+as a direct relationship; a detailed **Death of Claire** Event Node could later relate
+to Claire, Scene 1, its cause, witnesses, and resulting Todos. This promotion must
+preserve provenance rather than creating an unrelated duplicate fact.
 
 ### Graph underneath, focused views above
 
@@ -665,13 +801,26 @@ Navigator structure have been proved.
 
 ### Collection and graph rules
 
-- the detailed Collection creation and editing flow;
-- default Collection templates for different forms of work;
+- future user-authored, imported, or project-specific Collection sets beyond the
+  built-in editable suggestions;
 - safe evolution of Collection fields and relationship definitions;
 - aliases, symbolic-link equivalents, and additional smart Collections;
 - which graph details are user-authored, inferred, or AI-proposed;
 - how relationship confirmation and contradiction are represented;
-- whether and how a local graph visualisation is useful.
+- whether and how a local graph visualisation is useful;
+- what selecting a Collection heading opens: its editable content, an all-member
+  Collection projection, or a combined view;
+- if an all-member Collection projection is adopted, whether members are grouped by
+  structural parent, manually ordered, structurally ordered, alphabetised, or offered
+  several remembered orderings;
+- what selecting the fixed Todos heading opens and how an all-Todo view orders work:
+  creation order, manual order, priority, status, structural target, or configurable
+  saved views;
+- whether sibling or inherited Todos are useful as explicit optional Context groups.
+- the relationship model itself: which behaviours require fixed programmable
+  semantics, which meaning belongs in writer/AI-readable text, whether cardinality is
+  useful to writers, and how the interface avoids both a rigid ontology and arbitrary
+  statements that only AI can interpret.
 
 ### Navigator contextual header
 
@@ -736,14 +885,35 @@ The first Navigator POC now proves:
 - Traditional and Context views keep independent expansion and selection memory;
 - opening a structural Node enters Context automatically and records Back/Forward
   focus history, while opening a Todo retains the current structural focus;
-- Context view derives the direct parent, siblings, children, bidirectional direct
-  relationships, and applicable Todos without mutating the graph;
+- Context view keeps compact ancestor and previous/next-sibling navigation, then
+  presents the Selected Node followed by its indented Material, Todos, and direct
+  relationships without mutating the graph;
 - applicable Todos can be created and opened from Context without replacing its
   structural focus;
-- per-row neighbourhood expansion reveals another Node's immediate structural and
-  relationship vicinity without changing focus;
+- Context and Traditional Todo projections use the same open/complete controls and
+  exact target filtering;
+- creating Collections or top-level items does not change focus or enter location
+  history, supporting repeated creation;
+- Context can create a missing Collection in place and immediately select it as the
+  new child type;
+- a Collection whose members are structurally nested elsewhere reports that member
+  count instead of claiming it is empty;
+- the Selected-row disclosure expands a bounded cascade beneath each direct Material
+  child; each child can independently reveal up to three of its own Material items,
+  Todos, and relationships without repeating already-visible entries or changing
+  selection;
 - Navigator drag transactions preserve Node identity, Collection membership, optional
-  title, and content; cross-Collection drops are refused rather than converted;
+  title, and content; a horizontal insertion marker means **before**, a highlighted
+  indented row means **inside**, and cross-Collection ordering drops are refused
+  rather than converted;
+- Context uses one bottom **Add…** gate for Material children, Todos, or relationships;
+  its removal mode selects any mixture of those entries, confirms once, and archives
+  Material subtrees, deletes selected Todos, or unlinks selected relationships;
+- Navigator-owned structural changes, including creation, editing, deletion,
+  reordering, reparenting, Todo state, relationship changes, and mixed removals, enter
+  a separate named Svelte transaction stack. Navigator Undo/Redo restores both the
+  canonical Svelte graph and facade-persisted documents; view changes and disclosures
+  are deliberately not work history;
 - selecting any structural or related Node opens its one durable document in the
   existing editor and Input workflow.
 - Collections, Todos, and Archived/Unowned headings open concise instructions kept as
@@ -751,43 +921,40 @@ The first Navigator POC now proves:
 - Collections can be edited or deleted; deleted Collection children are recovered
   under Archived/Unowned, while an explicit project-name-confirmed Start over action
   provides a genuinely clean project when that is what the writer chooses.
+- Collection creation and editing use one modal available from both Navigator views;
+  fresh projects proactively offer editable Collection sets, set selection supports
+  all/partial states, and applying a set creates only ordinary Collection definitions
+  without generated content or lasting template linkage;
+- Relationship management uses its own modal from either Navigator view; six editable
+  writing sets install project-owned definitions without creating links, and actual
+  links support both readable directions, optional applicability scope, explanatory
+  notes, safe unlinking, and Navigator Undo/Redo;
 
 The current persistence adapter stores Collection definitions, relationships, and
 Todos in the project's Navigator extension while content-bearing Nodes use durable
 workspace documents. This is deliberately behind the facade and is not a commitment
 to that storage representation.
 
-Still deferred from this first slice are Collection cloning and restoration,
-richer reparenting gestures, multi-target Todo editing UI,
-relationship-definition administration, impact cascades, fork-aware graph variance,
-and the terminal-style multi-pane manager. Existing AI review and Input behaviour
-remains available but has not yet been redesigned around Navigator context.
+Still deferred from this first slice are Collection cloning, explicit restoration UI,
+multi-target Todo editing UI, relationship cardinality and endpoint hints, impact
+cascades, fork-aware graph variance, and the terminal-style multi-pane manager.
+Existing AI review and Input behaviour remains available but has not yet been
+redesigned around Navigator context.
 
-The next implementation should test the smallest vertical slice that proves the
-Navigator direction without attempting recipes, collaboration, or a complete literary
-ontology:
+The next implementation boundary should build on this proven slice without attempting
+recipes, collaboration, or a complete literary ontology:
 
-1. Add the protected, editable Spine, canonical Todo records, Svelte-owned Collection
-   definitions, stable Nodes, and typed containment/relationship edges.
-2. Render a collapsible structural Navigator with fixed Spine and Todos elements for
-   one work and active fork.
-3. Add the Traditional/Context switch with independent remembered expansion, scroll,
-   and selection state. Context view surfaces explainable aliases and applicable Todos
-   for a small number of configured relationship types.
-4. Open structural and related items in the centre. Selecting a collapsed container
-   expands it and shows its own content.
-5. Add the basic terminal-style pane manager with horizontal and vertical splits,
+1. Exercise and amend the initial writing relationship sets with real projects before
+   adding cardinality, endpoint hints, favourites, or automated AI proposals.
+2. Add explicit Archived/Unowned restoration and intentional Collection conversion
+   commands without weakening stable Node identity.
+3. Add the basic terminal-style pane manager with horizontal and vertical splits,
    focused-pane context, and per-pane Navigator/location memory; defer final gestures.
-6. Keep the right panel reserved for existing Input behaviour.
-7. Keep the existing manuscript transaction, target, format, Input, and undo paths
+4. Keep the right panel reserved for existing Input behaviour.
+5. Keep the existing manuscript transaction, target, format, Input, and undo paths
    authoritative while removing no proven behaviour.
-8. Demonstrate one content-bearing parent Node, one user-created Collection, one
-   many-to-many relationship, and one smart work view.
-9. Verify Navigator moves, relationship edits, Spine edits, Todo lifecycle changes,
-   and protected-node rules enter the Svelte transaction system and survive facade
-   persistence.
-10. Start the visible workspace without seeded content; tests create their own
-    fixtures.
+6. Define the first smart work view only after Collection, Todo, and relationship
+   selection behaviour is settled.
 
 Full split-fork interaction, recipe redesign, AI orchestration, and a complete Input
 card system should remain documented seams until this slice proves that the
