@@ -68,6 +68,17 @@ describe('WorkspaceRepository', () => {
     expect(restored.extensions).toEqual({});
   });
 
+  it('stores pasted image bytes outside the document and returns durable asset metadata', () => {
+    const projectId = repository.workspace().projects[0].id;
+    const content = Buffer.from([137, 80, 78, 71]);
+    const asset = repository.createAsset(projectId, 'hospital.png', 'image/png', content);
+    const loaded = repository.asset(asset.id);
+
+    expect(asset).toMatchObject({ projectId, fileName: 'hospital.png', mimeType: 'image/png', byteSize: 4 });
+    expect(loaded.content).toEqual(content);
+    expect(() => repository.createAsset(projectId, 'notes.txt', 'text/plain', Buffer.from('no'))).toThrow('Only image assets are supported');
+  });
+
   it('moves durable documents without changing their stable identity', () => {
     const workspace = repository.workspace();
     const child = repository.createDocument({ projectId: workspace.projects[0].id, title: 'Scene', role: 'navigator_node' });

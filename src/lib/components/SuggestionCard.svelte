@@ -4,24 +4,23 @@
   interface Props {
     suggestion: Suggestion;
     active?: boolean;
-    tray?: boolean;
     selectedVariant?: number;
     revisionBusy?: boolean;
     revisionAvailable?: boolean;
     onActivate?: () => void;
     onSelectVariant?: (index: number) => void;
-    onAccept?: (index: number, edit: boolean) => void;
+    onAccept?: (index: number) => void;
     onReject?: (viaDrag: boolean) => void;
     onPreview?: (text: string | null) => void;
     onSuggestRevision?: () => void;
     onSourceHover?: () => void;
     onMove?: (direction: -1 | 1) => void;
+    onOrderPointerDown?: (event: PointerEvent) => void;
   }
 
   let {
     suggestion,
     active = false,
-    tray = false,
     selectedVariant = 0,
     revisionBusy = false,
     revisionAvailable = true,
@@ -32,7 +31,8 @@
     onPreview = () => {},
     onSuggestRevision = () => {},
     onSourceHover = () => {},
-    onMove = () => {}
+    onMove = () => {},
+    onOrderPointerDown = () => {}
   }: Props = $props();
 
   let dragX = $state(0);
@@ -70,12 +70,18 @@
   function stopClick(action: () => void): (event: MouseEvent) => void {
     return (event) => { event.stopPropagation(); action(); };
   }
+
+  function moveWithKeyboard(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMove(event.key === 'ArrowUp' ? -1 : 1);
+  }
 </script>
 
 <article
   class="card cat-{suggestion.category}"
   class:active
-  class:tray
   class:dragging
   tabindex="-1"
   style:transform={`translateX(${dragX}px)`}
@@ -96,7 +102,7 @@
           type="button"
           class:selected={selectedVariant === index}
           title="Apply this alternative"
-          onclick={stopClick(() => { onSelectVariant(index); onAccept(index, false); })}
+          onclick={stopClick(() => { onSelectVariant(index); onAccept(index); })}
           onmouseenter={() => onPreview(variant.text)}
           onmouseleave={() => onPreview(null)}
         >
@@ -107,16 +113,18 @@
     </div>
   {/if}
   <footer>
-    {#if tray}
-      <span class="order-buttons">
-        <button type="button" aria-label="Move earlier" onclick={stopClick(() => onMove(-1))}>↑</button>
-        <button type="button" aria-label="Move later" onclick={stopClick(() => onMove(1))}>↓</button>
-      </span>
-    {/if}
+    <button
+      type="button"
+      class="order-handle"
+      aria-label="Reorder input"
+      title="Drag to reorder; use Arrow Up or Arrow Down when focused"
+      onpointerdown={onOrderPointerDown}
+      onkeydown={moveWithKeyboard}
+    ><span aria-hidden="true"></span></button>
     <span class="decisions">
       <button class="reject" type="button" title="Reject (X)" onclick={stopClick(() => onReject(false))}>×</button>
       {#if variants.length}
-        <button class="edit" type="button" title="Accept and edit (E)" onclick={stopClick(() => onAccept(selectedVariant, true))}>e</button>
+        <button class="accept" type="button" title="Accept selected replacement (Enter)" onclick={stopClick(() => onAccept(selectedVariant))}>✓</button>
       {:else}
         <button class="suggest-revision" type="button" disabled={revisionBusy} onclick={stopClick(onSuggestRevision)}>{revisionBusy ? 'Suggesting…' : revisionAvailable ? 'Suggest revisions' : 'Enable AI to revise'}</button>
       {/if}
@@ -144,14 +152,17 @@
   .variants button > span { display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font: 700 9px/1 var(--font-ui); }
   q { quotes: none; }
   footer { min-height: 25px; padding-top: 3px; }
-  .decisions, .order-buttons { display: flex; gap: 4px; }
+  .decisions { display: flex; gap: 4px; }
   footer button { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); font: 700 13px/1 var(--font-ui); cursor: pointer; }
   footer button:hover { background: var(--paper-deep); color: var(--ink); }
   footer .reject:hover { border-color: var(--reject); color: var(--reject); }
-  footer .edit { font-style: italic; }
+  footer .accept { color: var(--accept); }
+  footer .accept:hover { border-color: var(--accept); color: var(--accept); }
+  footer .order-handle { border: 0; border-radius: 3px; cursor: grab; touch-action: none; }
+  footer .order-handle:active { cursor: grabbing; }
+  footer .order-handle span { width: 13px; height: 17px; background-image: radial-gradient(circle, currentColor 1.2px, transparent 1.4px); background-position: 0 0; background-size: 6px 6px; opacity: .72; }
   footer .suggest-revision { width: auto; border-radius: 3px; padding: 0 8px; font-size: 10px; font-weight: 600; }
   footer .suggest-revision:disabled { opacity: .55; cursor: wait; }
   footer .source { width: auto; height: auto; margin-left: auto; display: flex; align-items: baseline; gap: 2px; border: 0; color: var(--ink); font: 800 13px/1 var(--font-ui); padding: 3px 2px; }
   .source b { color: var(--muted); font-size: 9px; }
-  .tray { max-width: 520px; }
 </style>

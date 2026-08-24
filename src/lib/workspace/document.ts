@@ -1,4 +1,4 @@
-import { schema } from 'prosemirror-schema-basic';
+import { editorSchema as schema } from '$lib/editor/schema';
 import type { EditorDocumentSnapshot } from './transactions';
 
 export interface DocumentRange {

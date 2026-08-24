@@ -1,6 +1,6 @@
 # Craft revision QA
 
-Updated: 20 August 2026
+Updated: 24 August 2026
 
 This records observed POC behaviour and regression evidence. It is not the source of
 architectural decisions. The authoritative target model is
@@ -33,6 +33,12 @@ workspace layout. The next Navigator proof of concept is specified in
 - Used the card keyboard flow to select variant 2 and accept it.
 - Re-ran craft passes after edits, rejection, and undo, then checked live-card counts for duplicates and stale anchors.
 - Inspected the docked margin with several cards of different heights.
+- Applied paragraph and heading styles, inline marks, lists, block quotes, and links
+  through the initial writing toolbar; exercised the standard list Enter/Tab/Shift-Tab
+  behaviours and formatting-aware Undo/Redo.
+- Normalised duplicate visible markers inside semantic bullet and numbered lists,
+  converted consecutive marker paragraphs, and changed repaired lists between bullet
+  and number styles without duplicating their markers.
 
 ## Reproduced bugs fixed
 
@@ -145,9 +151,11 @@ workspace layout. The next Navigator proof of concept is specified in
   store test.
 - Architecture-slice automated tests cover format boundary inheritance, reversible
   true/false strikethrough overrides, target mutation, and durable restore.
-- Full automated suite: 16 files passed, 82 tests passed.
+- Full automated suite: 26 files passed, 139 tests passed.
 - `npm run check`: 0 errors and 0 warnings.
 - `npm run build`: passed.
+- Browser QA changed the first paragraph to Heading 2, observed the writing Undo become
+  available, and restored the paragraph through the Svelte-owned history path.
 
 ## Historical findings addressed by this slice
 
@@ -172,13 +180,52 @@ workspace layout. The next Navigator proof of concept is specified in
 - The implemented structure is still one active ProseMirror document. Stable
   chapter/scene/paragraph node IDs, structural move/copy operations, and scoped
   formatting are not yet present.
-- Only strikethrough proves the format path. Rich text properties, precedence,
-  paragraph/section styles, editor-versus-compile presentation, and format export are
-  not implemented.
+- The initial editor formatting slice covers paragraph and heading styles, bold,
+  italic, underline, strikethrough, lists, block quotes, links, and clearing
+  formatting. Scoped chapter/work formatting, style precedence, custom named styles,
+  editor-versus-compile presentation, and rich format export are not yet implemented.
+- Automatic list inference is intentionally conservative: it recognises unambiguous
+  bullet glyphs and sequential Arabic numbers, but not hyphens, alphabetic sequences,
+  or Roman numerals. Ambiguous existing material requires **Fix list** or ordinary
+  manual formatting.
 - Existing ledgers can contain many superseded inputs. The manager exposes them, but
   needs grouping, pagination/virtualisation, bulk actions, and an explicit archival
   policy before production use.
 - Drag-to-dismiss and its five-second undo toast were not exercised in this pass; ordinary reject was verified.
+- The former Margin/Tray presentation split is removed. The unified Inputs panel uses
+  one accept tick and a pointer- and keyboard-operable drag grip; Input ordering now
+  enters the Svelte undo and facade-persistence path.
+- Review initiation, aggregate craft-activity status, category/source/density filters,
+  source participation, provider status and spend, and historical Input access now
+  live in the Inputs panel. The manuscript Sources footer and full-width filter strip
+  are removed.
+- Regression coverage proves that disabling a source for future reviews does not hide
+  its existing Inputs, while the independent **Show** filter does; multi-paragraph
+  request records are summarised as one Svelte-owned review activity through their
+  shared batch identifier.
+- The application shell is fixed to the visual viewport. Browser geometry checks
+  verify the shell reaches all four edges, the Navigator and Inputs panel reach the
+  viewport bottom, and the Inputs panel reaches the right edge.
+- Project switching and project CRUD now live in the Navigator header. The editor pane
+  header owns active-document identity, words/version/save state, writing Undo/Redo,
+  remembered view-only zoom, and secondary document actions. Browser QA verified
+  100%→120% zoom, reload persistence, and prose Undo/Redo without document formatting.
+- Rich paste browser QA preserved a heading, bold and underlined runs, and a two-row
+  table after durable save and reload. The table-and-format paste was removed in one
+  workspace Undo without disturbing earlier content.
+- Clipboard image QA stored PNG bytes through the asset facade, replaced the temporary
+  object URL with a durable asset URL, restored a one-pixel image after reload, and
+  removed/restored a second image with one-step Undo/Redo. No image binary is stored in
+  the Svelte document extension.
+- Clipboard regression coverage distinguishes macOS Word's whole-selection image
+  preview from images represented in its rich HTML, so prose is no longer replaced by
+  a screenshot of the preceding paste. Bullet and numbered lists now round-trip
+  through the editor schema and the neutral Svelte document. If Word supplies only an
+  inaccessible `file:` image reference, the prose is preserved and the image must be
+  pasted separately rather than guessed.
+- Formatting-only editor transactions now enter Svelte history and persistence even
+  when their plain text is unchanged. Console QA found and removed the final basic-
+  schema deserialisation path; rich reload produced no new browser errors.
 
 ## Next structural and UX proof of concept
 

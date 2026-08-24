@@ -1,5 +1,6 @@
 import type { Suggestion } from '$lib/domain';
 import type { FormatAttachment, TextChange } from './attachments';
+import type { RichDocument } from './rich-document';
 
 export interface EditorSelection {
   from: number;
@@ -8,6 +9,7 @@ export interface EditorSelection {
 
 export interface EditorDocumentSnapshot {
   doc: Record<string, unknown>;
+  richDocument?: RichDocument;
   text: string;
   selection: EditorSelection;
 }

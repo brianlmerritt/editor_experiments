@@ -13,8 +13,12 @@
   import todosInstructions from '$lib/content/navigator/todos-instructions.html?raw';
   import archivedInstructions from '$lib/content/navigator/archived-unowned-instructions.html?raw';
 
-  let { onOpenNode }: {
-    onOpenNode: (id: string, navigation?: 'push' | 'back' | 'forward') => Promise<void>
+  let { onOpenNode, onSwitchProject, onCreateProject, onRenameProject, onResetProject }: {
+    onOpenNode: (id: string, navigation?: 'push' | 'back' | 'forward') => Promise<void>;
+    onSwitchProject: (id: string) => Promise<void>;
+    onCreateProject: () => void;
+    onRenameProject: () => void;
+    onResetProject: () => void;
   } = $props();
 
   let collectionManagerOpen = $state(false);
@@ -239,7 +243,7 @@
 
   async function addCollection(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    const created = await workspace.recordNavigatorChange(`Create ${collectionName.trim()} Collection`, () => workspace.createCollection({
+    const created = await workspace.recordNavigatorChange(`Create ${collectionName.trim()} material type`, () => workspace.createCollection({
       name: collectionName,
       singularName,
       icon: collectionIcon,
@@ -255,7 +259,7 @@
     if (!selectedSetItemCount || selectedSetHasErrors || applyingSets) return;
     applyingSets = true;
     let firstCreatedId = '';
-    await workspace.recordNavigatorChange('Add Collection set', async () => {
+    await workspace.recordNavigatorChange('Add Material set', async () => {
       for (const item of Object.values(setDrafts).filter((draft) => draft.selected)) {
         if (collectionExists(item.name)) continue;
         const created = await workspace.createCollection({
@@ -285,7 +289,7 @@
   async function saveCollectionEdit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!editingCollectionId) return;
-    await workspace.recordNavigatorChange(`Update ${editCollectionName.trim()} Collection`, () => workspace.updateCollection(editingCollectionId!, {
+    await workspace.recordNavigatorChange(`Update ${editCollectionName.trim()} material type`, () => workspace.updateCollection(editingCollectionId!, {
       name: editCollectionName,
       singularName: editSingularName,
       icon: editCollectionIcon,
@@ -300,7 +304,7 @@
       return;
     }
     if (workspace.branchId === collection.id && workspace.spineNode) await onOpenNode(workspace.spineNode.id);
-    await workspace.recordNavigatorChange(`Delete ${collection.name} Collection`, () => workspace.deleteCollection(collection.id));
+    await workspace.recordNavigatorChange(`Delete ${collection.name} material type`, () => workspace.deleteCollection(collection.id));
     if (editingCollectionId === collection.id) editingCollectionId = null;
     deletingCollectionId = null;
   }
@@ -362,15 +366,15 @@
     dragged = null;
     if (!moving) return;
     if (moving.kind === 'collection') {
-      await workspace.recordNavigatorChange('Reorder Collections', () => workspace.moveCollection(moving.id, collection.id));
+      await workspace.recordNavigatorChange('Reorder Material types', () => workspace.moveCollection(moving.id, collection.id));
       return;
     }
     const node = workspace.navigatorNodes.find((candidate) => candidate.id === moving.id);
     if (!node || nodeCollectionId(node) !== collection.id) {
-      workspace.notice = 'Dragging does not convert an item into another Collection.';
+      workspace.notice = 'Dragging does not convert an item into another Material type.';
       return;
     }
-    await workspace.recordNavigatorChange('Move material to Collection root', () => workspace.moveNavigatorNode(moving.id, { parentId: collection.id }));
+    await workspace.recordNavigatorChange('Move item to Material root', () => workspace.moveNavigatorNode(moving.id, { parentId: collection.id }));
   }
 
   async function dropOnNode(event: DragEvent, node: WorkspaceDocument): Promise<void> {
@@ -490,12 +494,12 @@
 
 {#snippet collectionCreationForm()}
   <form class="collection-form" onsubmit={addCollection}>
-    <label>Collection name <span>plural — e.g. Characters, Chapters, Locations</span><input aria-label="Collection name (plural)" placeholder="Characters, Chapters, Locations…" value={collectionName} oninput={(event) => updateCollectionName(event.currentTarget.value)} /></label>
-    <label>Singular name <input aria-label="Singular name" placeholder="Character" value={singularName} oninput={(event) => { singularEdited = true; singularName = event.currentTarget.value; }} /></label>
-    <label>Icon <select aria-label="Collection icon" bind:value={collectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
+    <label>Material type <span>plural — e.g. Characters, Chapters, Locations</span><input aria-label="Material type name (plural)" placeholder="Characters, Chapters, Locations…" value={collectionName} oninput={(event) => updateCollectionName(event.currentTarget.value)} /></label>
+    <label>Singular item name <input aria-label="Singular item name" placeholder="Character" value={singularName} oninput={(event) => { singularEdited = true; singularName = event.currentTarget.value; }} /></label>
+    <label>Icon <select aria-label="Material type icon" bind:value={collectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
     <label class="numbering"><input type="checkbox" bind:checked={numberingEnabled} /> Number items</label>
     {#if numberingEnabled}<label>Start number <input aria-label="Start number" type="number" step="1" bind:value={numberingStart} /></label>{/if}
-    <div><button type="button" onclick={resetCollectionForm}>Cancel</button><button class="primary" disabled={!collectionName.trim() || !singularName.trim()}>Create Collection</button></div>
+    <div><button type="button" onclick={resetCollectionForm}>Cancel</button><button class="primary" disabled={!collectionName.trim() || !singularName.trim()}>Create Material type</button></div>
   </form>
 {/snippet}
 
@@ -535,7 +539,19 @@
         <button disabled={!workspace.canUndoNavigator} title={workspace.navigatorUndoLabel ? `Undo: ${workspace.navigatorUndoLabel}` : 'Nothing to undo in the Navigator'} aria-label={workspace.navigatorUndoLabel ? `Undo ${workspace.navigatorUndoLabel}` : 'Navigator Undo'} onclick={() => workspace.undoNavigator()}>⟲</button>
         <button disabled={!workspace.canRedoNavigator} title={workspace.navigatorRedoLabel ? `Redo: ${workspace.navigatorRedoLabel}` : 'Nothing to redo in the Navigator'} aria-label={workspace.navigatorRedoLabel ? `Redo ${workspace.navigatorRedoLabel}` : 'Navigator Redo'} onclick={() => workspace.redoNavigator()}>⟳</button>
       </div>
-      <small title="Current project">{workspace.currentProject?.title}</small>
+    </div>
+    <div class="project-control">
+      <select value={workspace.projectId} onchange={(event) => onSwitchProject(event.currentTarget.value)} aria-label="Project">
+        {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
+      </select>
+      <details class="project-menu">
+        <summary aria-label="Project actions" title="Project actions">•••</summary>
+        <div>
+          <button type="button" onclick={onCreateProject}>Create project</button>
+          <button type="button" onclick={onRenameProject}>Rename project</button>
+          <button type="button" class="danger" onclick={onResetProject}>Start over</button>
+        </div>
+      </details>
     </div>
     <div class="navigator-controls">
       <div class="history-controls" aria-label="Navigator history">
@@ -555,8 +571,8 @@
     {#if workspace.navigatorMemory.mode === 'traditional'}
       <div class="collection-list">
         <div class="collection-group-header">
-          <button class="group-title" title="About Collections" onclick={() => helpTopic = 'collections'}><span>Collections</span><span aria-hidden="true">?</span></button>
-          <button class="manage-collections" title="Manage Collections" aria-label="Manage Collections" onclick={() => openCollectionManager()}>•••</button>
+          <button class="group-title" title="About Material" onclick={() => helpTopic = 'collections'}><span>Material</span><span aria-hidden="true">?</span></button>
+          <button class="manage-collections" title="Manage Material" aria-label="Manage Material" onclick={() => openCollectionManager()}>•••</button>
         </div>
         {#each [...workspace.navigator.collections].sort((a, b) => a.order - b.order) as collection (collection.id)}
           {@const collectionKey = `collection:${collection.id}`}
@@ -564,11 +580,11 @@
           {@const members = workspace.navigatorNodes.filter((node) => nodeCollectionId(node) === collection.id && !nodeArchived(node))}
           <section role="group" class="collection" class:dragging={dragged?.id === collection.id} ondragover={allowDrop} ondrop={(event) => dropOnCollection(event, collection)}>
             <div class="section-heading" class:selected={workspace.branchId === collection.id}>
-              <button class="drag-handle" draggable="true" aria-label={`Move ${collection.name}`} title="Move Collection" ondragstart={(event) => startDrag(event, 'collection', collection.id)} ondragend={() => dragged = null}>⠿</button>
+              <button class="drag-handle" draggable="true" aria-label={`Move ${collection.name}`} title="Move Material type" ondragstart={(event) => startDrag(event, 'collection', collection.id)} ondragend={() => dragged = null}>⠿</button>
               <button class="disclosure" title={`${workspace.navigatorExpanded(collectionKey) ? 'Collapse' : 'Expand'} ${collection.name}`} aria-label={`${workspace.navigatorExpanded(collectionKey) ? 'Collapse' : 'Expand'} ${collection.name}`} onclick={() => workspace.toggleNavigatorExpanded(collectionKey)}>{workspace.navigatorExpanded(collectionKey) ? '⌄' : '›'}</button>
-              <span class="structural-icon" title={`${collection.icon === 'none' ? 'Collection' : `${collection.icon} Collection`}`} aria-hidden="true">{collection.icon === 'none' ? '·' : iconGlyphs[collection.icon]}</span>
+              <span class="structural-icon" title={`${collection.icon === 'none' ? 'Material type' : `${collection.icon} Material type`}`} aria-hidden="true">{collection.icon === 'none' ? '·' : iconGlyphs[collection.icon]}</span>
               <button class="heading-label collection-link" title={`Open ${collection.name}`} onclick={() => onOpenNode(collection.id)}>{collection.name} <em>{members.length}</em></button>
-              <button class="collection-action" aria-label={`Manage ${collection.name}`} title="Manage Collection" onclick={() => openCollectionManager('manage', collection)}>•••</button>
+              <button class="collection-action" aria-label={`Manage ${collection.name}`} title="Manage Material type" onclick={() => openCollectionManager('manage', collection)}>•••</button>
             </div>
             {#if workspace.navigatorExpanded(collectionKey)}
               <div class="collection-contents">
@@ -578,7 +594,7 @@
           </section>
         {/each}
 
-        <button class="new-collection" title="Create or manage Collections" onclick={() => openCollectionManager()}><span aria-hidden="true">＋</span> Manage Collections…</button>
+        <button class="new-collection" title="Create or manage Material" onclick={() => openCollectionManager()}><span aria-hidden="true">＋</span> Manage Material…</button>
         <button class="new-collection" title="Manage writing relationship vocabulary and links" onclick={() => relationshipManagerOpen = true}><span aria-hidden="true">↗</span> Manage Relationships…</button>
       </div>
     {:else}
@@ -633,9 +649,9 @@
 
               {#if addMenuOpen && !removalMode}
                 <div class="add-panel">
-                  <div class="add-kind-choices"><button class:active={addKind === 'material'} onclick={() => addKind = 'material'}>Material child</button><button class:active={addKind === 'todo'} onclick={() => addKind = 'todo'}>Todo</button><button onclick={() => { relationshipManagerOpen = true; addKind = null; addMenuOpen = false; }}>Relationship</button></div>
+                  <div class="add-kind-choices"><button class:active={addKind === 'material'} onclick={() => addKind = 'material'}>Material</button><button class:active={addKind === 'todo'} onclick={() => addKind = 'todo'}>Todo</button><button onclick={() => { relationshipManagerOpen = true; addKind = null; addMenuOpen = false; }}>Relationship</button></div>
                   {#if addKind === 'material'}
-                    <form class="relation-form" onsubmit={addChild}><label>Material type<select aria-label="Child collection" bind:value={childCollection}><option value="">Choose a Collection</option>{#each workspace.navigator.collections as collection}<option value={collection.id}>{collection.singularName}</option>{/each}</select></label><label>Optional title<input aria-label="Child title" placeholder="Title (optional when numbered)" bind:value={childTitle} /></label><div class="create-within-actions"><button type="button" onclick={() => openCollectionManager('create-child')}>Manage Collections…</button><span></span><button class="primary" disabled={!childCollection}>Create {workspace.navigator.collections.find((collection) => collection.id === childCollection)?.singularName ?? 'material'}</button></div></form>
+                    <form class="relation-form" onsubmit={addChild}><label>Material type<select aria-label="Child material type" bind:value={childCollection}><option value="">Choose a Material type</option>{#each workspace.navigator.collections as collection}<option value={collection.id}>{collection.singularName}</option>{/each}</select></label><label>Optional title<input aria-label="Child title" placeholder="Title (optional when numbered)" bind:value={childTitle} /></label><div class="create-within-actions"><button type="button" onclick={() => openCollectionManager('create-child')}>Manage Material…</button><span></span><button class="primary" disabled={!childCollection}>Create {workspace.navigator.collections.find((collection) => collection.id === childCollection)?.singularName ?? 'material'}</button></div></form>
                   {:else if addKind === 'todo'}
                     <form class="relation-form" onsubmit={addTodo}><label>Todo<input aria-label="New contextual Todo" placeholder={`Todo for ${workspace.navigatorNodeLabel(focused)}`} bind:value={todoDraft} /></label><div><button class="primary" disabled={!todoDraft.trim()}>Create Todo</button></div></form>
                   {/if}
@@ -669,22 +685,22 @@
       <header>
         <div>
           <small>Navigator</small>
-          <h2 id="collection-manager-title">Manage Collections</h2>
+          <h2 id="collection-manager-title">Manage Material</h2>
         </div>
-        <button type="button" class="manager-close" title="Close Collection Manager" aria-label="Close Collection Manager" onclick={closeCollectionManager}>×</button>
+        <button type="button" class="manager-close" title="Close Material Manager" aria-label="Close Material Manager" onclick={closeCollectionManager}>×</button>
       </header>
 
       {#if collectionManagerPurpose === 'proactive'}
         <div class="collection-welcome">
           <strong>Build your project</strong>
-          <p>This project has no Collections yet. Start with a Collection set or create your own. Nothing here creates sample content.</p>
+          <p>This project has no Material types yet. Start with a Material set or create your own. Nothing here creates sample content.</p>
         </div>
       {/if}
 
       <section class="manager-section collection-sets">
         <div class="manager-section-heading">
-          <div><h3>Collection sets</h3><p>Select a complete set, then adjust or remove individual Collections.</p></div>
-          <button type="button" onclick={() => collectionFormOpen = !collectionFormOpen}>{collectionFormOpen ? 'Hide custom form' : 'Create custom Collection'}</button>
+          <div><h3>Material sets</h3><p>Select a complete set, then adjust or remove individual Material types.</p></div>
+          <button type="button" onclick={() => collectionFormOpen = !collectionFormOpen}>{collectionFormOpen ? 'Hide custom form' : 'Create custom Material type'}</button>
         </div>
 
         {#if collectionFormOpen}{@render collectionCreationForm()}{/if}
@@ -698,7 +714,7 @@
                 <button type="button" class="set-disclosure" title={`${expanded ? 'Collapse' : 'Expand'} ${set.name}`} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${set.name}`} onclick={() => setExpanded(set.id, !expanded)}>{expanded ? '⌄' : '›'}</button>
                 <input
                   type="checkbox"
-                  aria-label={`Select all Collections in ${set.name}`}
+                  aria-label={`Select all Material types in ${set.name}`}
                   checked={selection.checked}
                   indeterminate={selection.indeterminate}
                   disabled={selection.disabled}
@@ -732,7 +748,7 @@
 
       {#if workspace.navigator.collections.length}
         <section class="manager-section existing-collections">
-          <div class="manager-section-heading"><div><h3>Existing Collections</h3><p>Edit their presentation or safely remove a Collection.</p></div></div>
+          <div class="manager-section-heading"><div><h3>Existing Material types</h3><p>Edit their presentation or safely remove a Material type.</p></div></div>
           {#each [...workspace.navigator.collections].sort((a, b) => a.order - b.order) as collection (collection.id)}
             <div class="existing-collection-row">
               <span class="structural-icon" aria-hidden="true">{collection.icon === 'none' ? '·' : iconGlyphs[collection.icon]}</span>
@@ -742,13 +758,13 @@
             </div>
             {#if editingCollectionId === collection.id}
               <form class="collection-form edit-collection" onsubmit={saveCollectionEdit}>
-                <label>Collection name <span>plural</span><input aria-label="Edit Collection name" bind:value={editCollectionName} /></label>
-                <label>Singular name <input aria-label="Edit singular name" bind:value={editSingularName} /></label>
-                <label>Icon <select aria-label="Edit Collection icon" bind:value={editCollectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
+                <label>Material type <span>plural</span><input aria-label="Edit Material type name" bind:value={editCollectionName} /></label>
+                <label>Singular item name <input aria-label="Edit singular item name" bind:value={editSingularName} /></label>
+                <label>Icon <select aria-label="Edit Material type icon" bind:value={editCollectionIcon}><option value="folder">Folder</option><option value="file">File</option><option value="link">Link</option><option value="todo">Todo</option><option value="none">None</option></select></label>
                 <label class="numbering"><input type="checkbox" bind:checked={editNumberingEnabled} /> Number items</label>
                 {#if editNumberingEnabled}<label>Start number <input aria-label="Edit start number" type="number" step="1" bind:value={editNumberingStart} /></label>{/if}
-                {#if deletingCollectionId === collection.id}<p class="delete-warning">Delete this Collection? Its items will move to Archived/Unowned rather than be erased.</p>{/if}
-                <div class="collection-edit-actions"><button type="button" class="danger" onclick={() => deleteCollection(collection)}>{deletingCollectionId === collection.id ? 'Confirm delete' : 'Delete Collection'}</button><span></span><button type="button" onclick={() => { editingCollectionId = null; deletingCollectionId = null; }}>Cancel</button><button class="primary" disabled={!editCollectionName.trim() || !editSingularName.trim()}>Save</button></div>
+                {#if deletingCollectionId === collection.id}<p class="delete-warning">Delete this Material type? Its items will move to Archived/Unowned rather than be erased.</p>{/if}
+                <div class="collection-edit-actions"><button type="button" class="danger" onclick={() => deleteCollection(collection)}>{deletingCollectionId === collection.id ? 'Confirm delete' : 'Delete Material type'}</button><span></span><button type="button" onclick={() => { editingCollectionId = null; deletingCollectionId = null; }}>Cancel</button><button class="primary" disabled={!editCollectionName.trim() || !editSingularName.trim()}>Save</button></div>
               </form>
             {/if}
           {/each}
@@ -756,15 +772,15 @@
       {/if}
 
       <footer>
-        <span>{selectedSetHasErrors ? 'Resolve duplicate or missing names before creating Collections' : selectedSetItemCount ? `${selectedSetItemCount} Collection${selectedSetItemCount === 1 ? '' : 's'} selected` : 'Select Collections from one or more sets'}</span>
+        <span>{selectedSetHasErrors ? 'Resolve duplicate or missing names before creating Material types' : selectedSetItemCount ? `${selectedSetItemCount} Material type${selectedSetItemCount === 1 ? '' : 's'} selected` : 'Select Material types from one or more sets'}</span>
         <button type="button" onclick={closeCollectionManager}>Cancel</button>
-        <button type="button" class="primary" disabled={!selectedSetItemCount || selectedSetHasErrors || applyingSets} onclick={applyCollectionSets}>{applyingSets ? 'Creating…' : 'Create selected Collections'}</button>
+        <button type="button" class="primary" disabled={!selectedSetItemCount || selectedSetHasErrors || applyingSets} onclick={applyCollectionSets}>{applyingSets ? 'Creating…' : 'Create selected Material types'}</button>
       </footer>
     </div>
   </div>
 {/if}
 
-<RelationshipManager open={relationshipManagerOpen} sourceNodeId={workspace.navigatorFocusId} onClose={() => relationshipManagerOpen = false} />
+<RelationshipManager open={relationshipManagerOpen} sourceNodeId={workspace.navigatorFocusId ?? workspace.spineNode?.id ?? current?.id ?? null} onClose={() => relationshipManagerOpen = false} />
 
 {#if helpTopic}
   <div class="navigator-help-backdrop" role="presentation" onclick={() => helpTopic = null}>
@@ -776,11 +792,20 @@
 {/if}
 
 <style>
-  .navigator { position: sticky; top: 104px; display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; height: calc(100vh - 104px); border-right: 1px solid var(--line); background: color-mix(in srgb, var(--paper-deep) 70%, var(--canvas)); color: var(--ink-soft); }
+  .navigator { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; height: 100%; border-right: 1px solid var(--line); background: color-mix(in srgb, var(--paper-deep) 70%, var(--canvas)); color: var(--ink-soft); }
   .navigator-header { display: grid; gap: 12px; padding: 16px 14px 12px; border-bottom: 1px solid var(--line); }
-  .navigator-title { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 7px; }
+  .navigator-title { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
   .navigator-header strong { color: var(--ink); font: 700 11px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
-  .navigator-header small { overflow: hidden; color: var(--muted); font: 10px/1.2 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .project-control { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 30px; gap: 5px; }
+  .project-control > select { min-width: 0; height: 31px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink-soft); padding: 0 8px; font: 600 10px/1 var(--font-ui); }
+  .project-menu { position: relative; }
+  .project-menu summary { display: grid; height: 31px; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); cursor: pointer; font: 700 10px/1 var(--font-ui); list-style: none; }
+  .project-menu summary::-webkit-details-marker { display: none; }
+  .project-menu[open] summary { border-color: var(--accent); color: var(--accent); }
+  .project-menu > div { position: absolute; z-index: 20; top: 35px; right: 0; display: grid; width: 145px; gap: 2px; padding: 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); box-shadow: 0 12px 30px rgb(35 30 22 / .16); }
+  .project-menu button { min-height: 29px; padding: 0 8px; border: 0; border-radius: 3px; background: transparent; color: var(--ink-soft); font: 500 9px/1 var(--font-ui); text-align: left; }
+  .project-menu button:hover { background: var(--paper-deep); }
+  .project-menu button.danger { color: #8d3329; }
   .navigator-history { display: flex; align-items: center; }
   .navigator-history button { display: grid; width: 23px; height: 23px; place-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 16px/1 var(--font-ui); }
   .navigator-history button:not(:disabled):hover { background: var(--paper); color: var(--accent); }
@@ -959,7 +984,7 @@
   .help-content :global(ul) { margin: 14px 0 0; padding-left: 20px; }
   .help-content :global(li + li) { margin-top: 7px; }
   @media (max-width: 760px) {
-    .navigator { position: static; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+    .navigator { height: 100%; max-height: none; border-right: 1px solid var(--line); border-bottom: 0; }
     .collection-manager-backdrop { padding: 10px; }
     .collection-manager { max-height: calc(100vh - 20px); }
     .set-item, .set-item.existing, .set-item.conflict { grid-template-columns: 22px 1fr 1fr; align-items: end; }

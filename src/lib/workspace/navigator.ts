@@ -96,6 +96,15 @@ export const emptyNavigatorMemory = (): NavigatorMemory => ({
   }
 });
 
+const navigatorLabelCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base'
+});
+
+export function compareNavigatorLabels(left: string, right: string): number {
+  return navigatorLabelCollator.compare(left, right);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

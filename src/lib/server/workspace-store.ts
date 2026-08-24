@@ -10,6 +10,7 @@ import type {
   DocumentRevision,
   ExtensionData,
   PersistentWorkspace,
+  WorkspaceAsset,
   WorkspaceDocument,
   WorkspaceProject
 } from '$lib/workspace/model';
@@ -72,6 +73,16 @@ interface BucketRevisionRow {
   created_at: string;
   created_by: string | null;
   reason: string | null;
+}
+
+interface AssetRow {
+  id: string;
+  project_id: string;
+  file_name: string;
+  mime_type: string;
+  byte_size: number;
+  content: Buffer;
+  created_at: string;
 }
 
 export interface CreateDocumentInput {
@@ -193,6 +204,17 @@ function bucketRevisionFromRow(row: BucketRevisionRow): ContextBucketRevision {
   };
 }
 
+function assetFromRow(row: AssetRow): WorkspaceAsset {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    byteSize: row.byte_size,
+    createdAt: row.created_at
+  };
+}
+
 export class WorkspaceRepository {
   constructor(private readonly database: Database.Database) {
     this.migrate();
@@ -263,6 +285,16 @@ export class WorkspaceRepository {
         reason TEXT,
         UNIQUE(bucket_id, number)
       );
+      CREATE TABLE IF NOT EXISTS workspace_assets (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES workspace_projects(id),
+        file_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        content BLOB NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      CREATE INDEX IF NOT EXISTS workspace_assets_project_idx ON workspace_assets(project_id, created_at, id);
     `);
     const bucketColumns = this.database.prepare("PRAGMA table_info('workspace_context_buckets')").all() as { name: string }[];
     if (!bucketColumns.some((column) => column.name === 'deleted_at')) {
@@ -339,6 +371,7 @@ export class WorkspaceRepository {
         WHERE bucket_id IN (SELECT id FROM workspace_context_buckets WHERE project_id = ?)
       `).run(projectId);
       this.database.prepare('DELETE FROM workspace_context_buckets WHERE project_id = ?').run(projectId);
+      this.database.prepare('DELETE FROM workspace_assets WHERE project_id = ?').run(projectId);
       this.database.prepare(`
         DELETE FROM workspace_document_revisions
         WHERE document_id IN (SELECT id FROM workspace_documents WHERE project_id = ?)
@@ -443,6 +476,25 @@ export class WorkspaceRepository {
     return (this.database.prepare(`
       SELECT * FROM workspace_document_revisions WHERE document_id = ? ORDER BY number DESC
     `).all(documentId) as DocumentRevisionRow[]).map(revisionFromRow);
+  }
+
+  createAsset(projectId: string, fileName: string, mimeType: string, content: Buffer): WorkspaceAsset {
+    if (!projectId) throw new Error('Asset project is required');
+    if (!mimeType.startsWith('image/')) throw new Error('Only image assets are supported');
+    const project = this.database.prepare('SELECT 1 FROM workspace_projects WHERE id = ?').get(projectId);
+    if (!project) throw new Error('Project not found');
+    const assetId = id('asset');
+    this.database.prepare(`
+      INSERT INTO workspace_assets (id, project_id, file_name, mime_type, byte_size, content)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(assetId, projectId, fileName || 'Pasted image', mimeType, content.byteLength, content);
+    return assetFromRow(this.database.prepare('SELECT * FROM workspace_assets WHERE id = ?').get(assetId) as AssetRow);
+  }
+
+  asset(assetId: string): { asset: WorkspaceAsset; content: Buffer } {
+    const row = this.database.prepare('SELECT * FROM workspace_assets WHERE id = ?').get(assetId) as AssetRow | undefined;
+    if (!row) throw new Error('Asset not found');
+    return { asset: assetFromRow(row), content: row.content };
   }
 
   createBucket(input: CreateContextBucketInput): ContextBucket {

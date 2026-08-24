@@ -1,6 +1,6 @@
 <script lang="ts">
   import { workspace } from '$lib/state/workspace.svelte';
-  import { nodeArchived, type RelationshipDefinition } from '$lib/workspace/navigator';
+  import { compareNavigatorLabels, nodeArchived, type RelationshipDefinition } from '$lib/workspace/navigator';
   import {
     relationshipSetDrafts,
     relationshipSets,
@@ -30,17 +30,17 @@
   let deletingDefinitionId = $state<string | null>(null);
   let targetNodeId = $state('');
   let definitionChoice = $state('');
-  let scopeNodeIds = $state<string[]>([]);
   let relationshipNote = $state('');
   let unlinkingRelationshipId = $state<string | null>(null);
 
-  let sourceNode = $derived(sourceNodeId ? workspace.projectNodes.find((node) => node.id === sourceNodeId) ?? null : null);
+  let sourceNode = $derived.by(() => {
+    const requested = sourceNodeId ? workspace.projectNodes.find((node) => node.id === sourceNodeId) ?? null : null;
+    return requested ?? workspace.navigatorFocusNode ?? workspace.currentDocument ?? workspace.spineNode;
+  });
   let availableTargets = $derived(workspace.projectNodes
-    .filter((node) => node.id !== sourceNodeId && !nodeArchived(node))
-    .sort((left, right) => left.title.localeCompare(right.title)));
-  let scopeTargets = $derived(workspace.projectNodes
-    .filter((node) => !['todos', 'navigator_todo'].includes(node.role ?? '') && !nodeArchived(node))
-    .sort((left, right) => left.title.localeCompare(right.title)));
+    .filter((node) => node.id !== sourceNode?.id && !nodeArchived(node))
+    .sort((left, right) => compareNavigatorLabels(workspace.navigatorNodeLabel(left), workspace.navigatorNodeLabel(right))));
+  let targetNode = $derived(targetNodeId ? workspace.projectNodes.find((node) => node.id === targetNodeId) ?? null : null);
   let selectedSetItemCount = $derived(Object.values(setDrafts).filter((item) => item.selected && !setTemplateExists(item.id)).length);
   let selectedSetHasErrors = $derived(Object.values(setDrafts).some((item) => item.selected && (
     !item.forwardLabel.trim() || !item.inverseLabel.trim() || draftConflict(item.id)
@@ -50,13 +50,15 @@
     const definition = workspace.navigator.relationshipDefinitions.find((item) => item.id === id) ?? null;
     return definition ? { definition, direction: direction === 'inverse' ? 'inverse' as const : 'forward' as const } : null;
   });
-  let sourceRelationships = $derived(sourceNodeId ? workspace.navigator.relationships.filter((relationship) =>
-    relationship.sourceNodeId === sourceNodeId || relationship.targetNodeId === sourceNodeId) : []);
+  let sourceRelationships = $derived(sourceNode ? workspace.navigator.relationships.filter((relationship) =>
+    relationship.sourceNodeId === sourceNode.id || relationship.targetNodeId === sourceNode.id) : []);
 
   $effect(() => {
     if (!open) return;
-    if (!definitionChoice && workspace.navigator.relationshipDefinitions.length) {
-      definitionChoice = `${[...workspace.navigator.relationshipDefinitions].sort((a, b) => a.order - b.order)[0].id}|forward`;
+    const definitions = [...workspace.navigator.relationshipDefinitions].sort((a, b) => a.order - b.order);
+    const [currentId] = definitionChoice.split('|');
+    if (!definitions.some((definition) => definition.id === currentId)) {
+      definitionChoice = definitions.length ? `${definitions[0].id}|forward` : '';
     }
   });
 
@@ -190,10 +192,6 @@
     if (definitionChoice.startsWith(`${definition.id}|`)) definitionChoice = '';
   }
 
-  function toggleScope(id: string, checked: boolean): void {
-    scopeNodeIds = checked ? [...new Set([...scopeNodeIds, id])] : scopeNodeIds.filter((item) => item !== id);
-  }
-
   async function createRelationship(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!sourceNode || !targetNodeId || !selectedDefinition) return;
@@ -206,12 +204,10 @@
       definitionId: definition.id,
       type,
       inverseType,
-      scopeNodeIds,
       note: relationshipNote
     }));
     if (!created) return;
     targetNodeId = '';
-    scopeNodeIds = [];
     relationshipNote = '';
   }
 
@@ -225,14 +221,11 @@
   }
 
   function relationshipProjection(relationship: (typeof workspace.navigator.relationships)[number]): { otherId: string; label: string } {
-    return relationship.sourceNodeId === sourceNodeId
+    return relationship.sourceNodeId === sourceNode?.id
       ? { otherId: relationship.targetNodeId, label: relationship.type }
       : { otherId: relationship.sourceNodeId, label: relationship.inverseType };
   }
 
-  function labelsFor(ids: string[]): string {
-    return ids.map((id) => workspace.projectNodes.find((node) => node.id === id)?.title ?? id).join(', ');
-  }
 </script>
 
 {#if open}
@@ -244,6 +237,40 @@
       </header>
 
       <div class="manager-body">
+        <section class="manager-section links-section">
+          <div class="section-heading"><div><h3>Relationships for {sourceNode ? workspace.navigatorNodeLabel(sourceNode) : 'the selected item'}</h3><p>Connect this item using the project relationship types below.</p></div></div>
+          {#if sourceNode}
+            {#if sourceRelationships.length}
+              <div class="link-list">
+                {#each sourceRelationships as relationship (relationship.id)}
+                  {@const projection = relationshipProjection(relationship)}
+                  {@const other = workspace.projectNodes.find((node) => node.id === projection.otherId)}
+                  <article class="link-row">
+                    <div><strong>{projection.label}</strong> <span>{other ? workspace.navigatorNodeLabel(other) : projection.otherId}</span></div>
+                    {#if relationship.note}<p>{relationship.note}</p>{/if}
+                    <button type="button" class:danger={unlinkingRelationshipId === relationship.id} onclick={() => unlinkRelationship(relationship.id)}>{unlinkingRelationshipId === relationship.id ? 'Confirm unlink' : 'Unlink'}</button>
+                  </article>
+                {/each}
+              </div>
+            {:else}<p class="empty-state">No relationships are attached to this item.</p>{/if}
+
+            {#if workspace.navigator.relationshipDefinitions.length}
+              <form class="link-form" onsubmit={createRelationship}>
+                <label>Related item<select aria-label="Relationship target" bind:value={targetNodeId}><option value="">Choose an item</option>{#each availableTargets as node}<option value={node.id}>{workspace.navigatorNodeLabel(node)} · {workspace.navigatorNodeType(node)}</option>{/each}</select></label>
+                <label>Relationship type<select aria-label="Relationship type and direction" bind:value={definitionChoice}><option value="">Choose a relationship type</option>{#each [...workspace.navigator.relationshipDefinitions].sort((a, b) => a.order - b.order) as definition}<option value={`${definition.id}|forward`}>{definition.forwardLabel}</option>{#if !definition.symmetric}<option value={`${definition.id}|inverse`}>{definition.inverseLabel} · reverse direction</option>{/if}{/each}</select></label>
+                {#if selectedDefinition}
+                  <p class="definition-guidance">{selectedDefinition.definition.description}</p>
+                  {#if targetNode}<p class="relationship-preview"><strong>Will create:</strong> {workspace.navigatorNodeLabel(sourceNode)} {selectedDefinition.direction === 'forward' ? selectedDefinition.definition.forwardLabel : selectedDefinition.definition.inverseLabel} {workspace.navigatorNodeLabel(targetNode)}</p>{/if}
+                {/if}
+                <label>Relationship note <span>optional</span><textarea aria-label="Relationship note" rows="3" placeholder="Explain the specific writing meaning when the relationship label is not enough" bind:value={relationshipNote}></textarea></label>
+                <div><button class="primary" disabled={!targetNodeId || !selectedDefinition}>Create relationship</button></div>
+              </form>
+            {:else}
+              <p class="empty-state relationship-types-empty"><strong>No relationship types exist.</strong> Create them below before linking this item.</p>
+            {/if}
+          {:else}<p class="empty-state">Select a structural item before creating a relationship.</p>{/if}
+        </section>
+
         <section class="manager-section relationship-sets-section">
           <div class="section-heading">
             <div><h3>Writing relationship sets</h3><p>Add project-owned vocabulary. Sets never create links or writing content.</p></div>
@@ -316,34 +343,6 @@
           {:else}<p class="empty-state">No relationship vocabulary yet. Select one or more writing sets above, or create a custom definition.</p>{/if}
         </section>
 
-        <section class="manager-section links-section">
-          <div class="section-heading"><div><h3>Relationships for {sourceNode?.title ?? 'the selected item'}</h3><p>Create scoped, explained links. Applicability can cover any combination of structural Nodes.</p></div></div>
-          {#if sourceNode}
-            {#if sourceRelationships.length}
-              <div class="link-list">
-                {#each sourceRelationships as relationship (relationship.id)}
-                  {@const projection = relationshipProjection(relationship)}
-                  {@const other = workspace.projectNodes.find((node) => node.id === projection.otherId)}
-                  <article class="link-row">
-                    <div><strong>{projection.label}</strong> <span>{other?.title ?? projection.otherId}</span></div>
-                    {#if relationship.scopeNodeIds?.length}<small>Applies during: {labelsFor(relationship.scopeNodeIds)}</small>{/if}
-                    {#if relationship.note}<p>{relationship.note}</p>{/if}
-                    <button type="button" class:danger={unlinkingRelationshipId === relationship.id} onclick={() => unlinkRelationship(relationship.id)}>{unlinkingRelationshipId === relationship.id ? 'Confirm unlink' : 'Unlink'}</button>
-                  </article>
-                {/each}
-              </div>
-            {:else}<p class="empty-state">No relationships are attached to this item.</p>{/if}
-
-            <form class="link-form" onsubmit={createRelationship}>
-              <label>Related item<select aria-label="Relationship target" bind:value={targetNodeId}><option value="">Choose an item</option>{#each availableTargets as node}<option value={node.id}>{node.title} · {workspace.navigatorNodeType(node)}</option>{/each}</select></label>
-              <label>Relationship<select aria-label="Relationship definition and direction" bind:value={definitionChoice}><option value="">Choose a definition</option>{#each [...workspace.navigator.relationshipDefinitions].sort((a, b) => a.order - b.order) as definition}<option value={`${definition.id}|forward`}>{sourceNode.title} {definition.forwardLabel} …</option>{#if !definition.symmetric}<option value={`${definition.id}|inverse`}>{sourceNode.title} {definition.inverseLabel} …</option>{/if}{/each}</select></label>
-              {#if selectedDefinition}<p class="definition-guidance">{selectedDefinition.definition.description}</p>{/if}
-              <fieldset><legend>Applies during <span>optional</span></legend><div class="scope-list">{#each scopeTargets as node}<label><input type="checkbox" checked={scopeNodeIds.includes(node.id)} onchange={(event) => toggleScope(node.id, event.currentTarget.checked)} /> <span>{node.title}</span><small>{workspace.navigatorNodeType(node)}</small></label>{/each}</div></fieldset>
-              <label>Relationship note <span>optional</span><textarea aria-label="Relationship note" rows="3" placeholder="Explain the specific writing meaning or change over time" bind:value={relationshipNote}></textarea></label>
-              <div><button class="primary" disabled={!targetNodeId || !selectedDefinition}>Create relationship</button></div>
-            </form>
-          {:else}<p class="empty-state">Select a structural item before creating a relationship.</p>{/if}
-        </section>
       </div>
 
       <footer><span>Relationship definitions and links belong to this project.</span><button type="button" onclick={onClose}>Done</button></footer>
@@ -394,7 +393,7 @@
   button:disabled { cursor: default; opacity: .4; }
   .definition-form, .link-form { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 10px 0; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--canvas); }
   .definition-form .symmetric { display: flex; align-items: center; gap: 6px; align-self: end; min-height: 30px; text-transform: none; }
-  .description, .definition-form > div, .delete-warning, .link-form fieldset, .link-form > p { grid-column: 1 / -1; }
+  .description, .definition-form > div, .delete-warning, .link-form > p { grid-column: 1 / -1; }
   .definition-form > div, .link-form > div { display: flex; justify-content: flex-end; gap: 6px; }
   .definition-form > div span { flex: 1; }
   button.danger, .danger { color: #8d3329 !important; }
@@ -408,18 +407,13 @@
   .link-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); }
   .link-row > div strong { color: var(--accent); font: 700 10px/1.2 var(--font-ui); }
   .link-row > div span { color: var(--ink); font: 600 10px/1.2 var(--font-ui); }
-  .link-row small, .link-row p { grid-column: 1; margin: 0; color: var(--muted); font: 9px/1.4 var(--font-ui); }
+  .link-row p { grid-column: 1; margin: 0; color: var(--muted); font: 9px/1.4 var(--font-ui); }
   .link-row button { grid-column: 2; grid-row: 1 / span 3; align-self: center; min-height: 27px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--muted); font: 600 8px/1 var(--font-ui); }
   .definition-guidance { margin: 0; padding: 7px 8px; background: var(--paper-deep); color: var(--muted); font: 9px/1.4 var(--font-ui); }
-  .link-form fieldset { min-width: 0; margin: 0; padding: 8px; border: 1px solid var(--line); }
-  .link-form legend { color: var(--ink-soft); font: 700 8px/1 var(--font-ui); text-transform: uppercase; }
-  .link-form legend span, .link-form > label > span { color: var(--muted); font-weight: 400; text-transform: none; }
-  .scope-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); max-height: 145px; overflow: auto; gap: 3px; }
-  .scope-list label { display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; align-items: center; gap: 5px; min-height: 25px; padding: 0 5px; border-radius: 3px; color: var(--ink-soft); font: 9px/1.2 var(--font-ui); }
-  .scope-list label:hover { background: var(--paper); }
-  .scope-list input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
-  .scope-list span, .scope-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .scope-list small { color: var(--muted); font-size: 8px; }
+  .link-form > label > span { color: var(--muted); font-weight: 400; text-transform: none; }
+  .relationship-preview { margin: 0; color: var(--ink-soft); font: 10px/1.4 var(--font-ui); }
+  .relationship-preview strong { color: var(--ink); }
+  .relationship-types-empty strong { color: var(--ink-soft); }
   .relationship-manager > footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 56px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--paper-deep); }
   footer span { margin-right: auto; color: var(--muted); font: 9px/1.3 var(--font-ui); }
   @media (max-width: 760px) {
@@ -429,6 +423,5 @@
     .set-guidance, .already-added, .name-conflict { grid-column: 2 / -1; }
     .installed-row { grid-template-columns: 1fr 20px 1fr auto; }
     .installed-row small { grid-column: 1 / -1; }
-    .scope-list { grid-template-columns: 1fr; }
   }
 </style>

@@ -30,6 +30,15 @@ export interface WorkspaceDocument extends WorkspaceNodeBase {
   updatedAt: string;
 }
 
+export interface WorkspaceAsset {
+  id: string;
+  projectId: string;
+  fileName: string;
+  mimeType: string;
+  byteSize: number;
+  createdAt: string;
+}
+
 export type WorkspaceNode = WorkspaceContainer | WorkspaceDocument;
 
 export interface DocumentRevision {

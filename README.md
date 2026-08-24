@@ -22,8 +22,10 @@ Svelte workspace state and facade. See [NAVIGATION.md](./NAVIGATION.md) for the 
 boundary and deferred multi-pane and fork work.
 
 The current screen is retained as evidence for the change-aware editor slice. Its
-accumulated top bars, source cards, fixed AI actions, Margin/Tray controls, and
-developer tools are not the target Navigator UX.
+fixed AI actions and remaining developer tools are not the final Navigator UX. The
+former Margin/Tray split has been consolidated into one Inputs panel, and that panel
+now owns document review, run status, Input filters, source participation, provider
+status, spend, and Input history.
 
 ## Run it
 
@@ -39,27 +41,45 @@ and deterministic replay sentinel are enabled by default.
 
 For a quick tour:
 
-1. Click **Run craft pass** to populate the live input margin.
-2. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, `E`, and
-   `X` for keyboard review.
+1. Click **Review document** in the Inputs panel to populate its live Inputs.
+2. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, and `X`
+   for keyboard review. Drag an Input's grip to reorder it, or focus the grip and use
+   Arrow Up/Down.
 3. Open **Ledger** to verify the instrumentation.
 4. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
 5. Open **Context** to exercise the historical POC context path. It is not the target
    Spine/Collection interface.
-6. Open **Inputs** to search, filter, locate, reopen, or dismiss current and historical
-   human/AI/system material.
+6. Click **History** at the bottom of the Inputs panel to search, filter, reopen, or
+   dismiss current and historical human/AI/system material.
 7. Select text or use **Strike work** to exercise attachment-backed formatting, then
    use **Undo/Redo** to restore prose, input state, targets, and formatting together.
+8. Use the editor pane's `−`, percentage, and `+` controls to change the local reading
+   size without changing manuscript formatting.
+9. Use the writing toolbar for paragraph and heading styles, bold, italic, underline,
+   strikethrough, bullet and numbered lists, block quotes, links, and clearing inline
+   formatting. These commands enter the same Svelte-owned transaction and Undo/Redo
+   path as typing and rich paste.
+10. Pasted sequences beginning with recognised bullets or sequential numbers are
+    normalised into semantic lists. Select existing malformed material and use
+    **Fix list** when an earlier paste needs the same repair.
 
 ## Change-aware workspace proof of concept
 
 The implemented architecture slice provides:
 
 - one continuous writing-and-editing surface rather than separate drafting/reviewing
-  modes; Pause, source visibility, filters, density, and the input surface control
+  modes; Pause, source participation, Input visibility filters, density, and the Input surface control
   interruption instead;
 - Svelte-owned canonical document, transaction, run, input, format, behaviour,
   revision, and undo/redo state;
+- neutral structured document persistence for headings, paragraphs, bullet and numbered
+  lists, supported inline marks, tables, and image references; pasted image bytes live behind the asset facade
+  rather than inside Svelte or ProseMirror;
+- an initial formatting toolbar for paragraph and heading styles, bold, italic,
+  underline, strikethrough, lists, block quotes, links, and clearing formatting;
+- conservative pasted-list normalisation that removes duplicate visible markers from
+  semantic lists and converts consecutive marker paragraphs without treating hyphen-led
+  prose as a list;
 - a dedicated Svelte 5 Rune settings state for provider availability, masked
   credentials, model selection, validation, dialog state, and saving state;
 - a shared content-target transformer for inputs and formats;
@@ -83,18 +103,17 @@ The implemented architecture slice provides:
 - a first-class input manager rather than margin-only access;
 - durable attachment state in document versions.
 
-It does not yet provide stable user-defined chapter/scene nodes, rich format/style
-precedence, durable session history, collaboration reconciliation, typed dependency
+It does not yet provide complete rich format/style precedence, durable session
+history, collaboration reconciliation, typed dependency
 cascades, or a third-party plugin runtime. See [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md)
 for verified workflows and the concrete remaining cases.
 
-It also does not yet implement the Navigator described in
-[NAVIGATION.md](./NAVIGATION.md): the Spine, canonical Todos, Collection creation,
-typed Node relationships, content-bearing containers, Traditional/Context projections,
-or split-pane focus/memory rules remain the next design and
-implementation slice. Integrated AI review design is deliberately postponed until
-that structure is proved. The new visible workspace starts without the current static
-demonstration content; automated tests create explicit fixtures.
+The Navigator now proves the Spine, canonical Todos, user-defined Material,
+content-bearing containers, relationship vocabulary, and Traditional/Context
+projections described in [NAVIGATION.md](./NAVIGATION.md). Split-pane focus/memory
+rules and integrated AI review design remain deliberately postponed. A new visible
+workspace starts without static demonstration content; automated tests create
+explicit fixtures.
 
 All application reactivity must follow [SVELTE_POLICY.md](./SVELTE_POLICY.md): Svelte
 5 Runes, `$props`, snippets, and current event attributes, with a regression test that
@@ -102,10 +121,10 @@ rejects legacy reactive syntax.
 
 ## Optional providers
 
-Open **Configure OpenRouter** in the Sources bar to enter an API key and model without
+Open **OpenRouter settings** at the bottom of the Inputs panel to enter an API key and model without
 leaving the editor. The server stores them in `data/provider-settings.json`, an ignored
 owner-readable file (`0600`), rather than in the document, browser storage, database,
-or event ledger. The Sources bar displays only a masked credential hint such as
+or event ledger. The Inputs panel displays only a masked credential hint such as
 `sk-or******456`. This POC local file is not encrypted; an OS keychain adapter remains
 the appropriate production replacement.
 
@@ -114,8 +133,9 @@ either OpenRouter or Ollama. Provider sources start **off** when configured thro
 environment; click their source buttons to make them visible before dispatching.
 Unavailable sources are labelled **not configured** rather than appearing usable.
 Configured paid providers return to **off** after an app restart so a page load cannot
-silently spend money; click A3 to make OpenRouter visible before using a selection
-action or craft pass.
+silently spend money; enable **Use** for A3 before using a selection action or document
+review. The separate **Show** control only filters Inputs already returned and never
+changes which sources a future review will call.
 
 OpenRouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Ollama uses
 `OLLAMA_MODEL` and, optionally, `OLLAMA_BASE_URL` (default

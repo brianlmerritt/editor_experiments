@@ -34,13 +34,13 @@ writer explicitly applies it; direct human editing must remain the natural path.
 The current POC accumulated controls while proving individual behaviours:
 
 - Pause, Context, Inputs, Brief, Compare, and Ledger links;
-- category filters, density, Margin and Tray views;
+- category and source filters plus density in the Inputs panel;
 - project, document, rename, fork, export, word count, undo/redo, and formatting
   controls in one document strip;
 - fixed Heighten, Vary cadence, More distant, Synonyms, Strikethrough, and custom
   selection actions;
-- local craft, replay, OpenRouter, and Ollama source cards;
-- provider settings, craft-pass execution, and keyboard legends.
+- local craft, replay, OpenRouter, and Ollama participation controls in the Inputs panel;
+- provider settings, document-review execution and status, spend, history, and keyboard legends.
 
 Those controls are implementation evidence, not a layout to preserve. The next proof
 of concept should begin with the writer's workflow and progressively reveal tools.
@@ -304,18 +304,20 @@ inputs, changed-since-review, active activity, alias, or fork. Dozens of subtly
 different icons would replace textual clutter with iconographic clutter and are not
 the target.
 
-## Collections and Nodes
+## Material and Nodes
 
-A **Collection** is a first-class, content-bearing, connectable Navigator Node that
-also owns an ordered set of children. `Characters` is a Collection; `Mara` can be one
-of its child Nodes. Selecting `Characters` opens its own content while its independent
-disclosure control expands or contracts the children. A Collection may remain useful
-with no children—for example, one `Location` Collection may hold the complete location
-material directly.
+A **Material type** is a first-class, content-bearing, connectable Navigator Node that
+also owns an ordered set of children. `Characters` is a Material type; `Mara` can be
+one of its child Nodes. Selecting `Characters` opens its own content while its
+independent disclosure control expands or contracts the children. A Material type may
+remain useful with no children—for example, one `Location` Material type may hold the
+complete location material directly.
 
-Internally, a `CollectionDefinition` stores the Collection's configuration. This
-technical term is not required in the ordinary UI, which can say **New Collection**,
-**Manage Collection**, and **Add Character**. Example Collections include:
+Internally, the current compatibility model still calls this a `CollectionDefinition`.
+That storage name is behind the facade and is not user-facing: the ordinary UI says
+**Material**, **Manage Material**, **Material type**, and **Add Character**. Renaming
+the stored interface is unnecessary until a data migration provides real value.
+Example Material types include:
 
 - chapter;
 - scene;
@@ -327,7 +329,7 @@ technical term is not required in the ordinary UI, which can say **New Collectio
 - narrative rule;
 - arbitrary user-defined material.
 
-Collection definitions need enough information to create and present Nodes without
+Material type definitions need enough information to create and present Nodes without
 making the core application understand every literary concept:
 
 ```ts
@@ -353,7 +355,8 @@ interface CollectionDefinition {
 
 This is illustrative, not a frozen TypeScript contract.
 
-Collection creation asks for an explicit plural name and an explicit singular name.
+Material creation asks for an explicit plural type name and an explicit singular item
+name.
 Typing the plural may populate a suggested singular value, but the suggestion remains
 an ordinary editable field and must not overwrite a manual change. Content-specific
 icon presets such as character, scene, or location are prohibited because they would
@@ -383,24 +386,24 @@ Nodes to Archived/Unowned rather than erasing their content. The item field uses
 action-oriented prompt **Create new {singular name}**; when numbering is enabled its
 name may be left blank because the generated number is sufficient.
 
-Collection definitions are created and edited in one Collection Manager modal from
+Material types are created and edited in one Material Manager modal from
 either Navigator view. Traditional and Context are presentation lenses, not separate
 capability sets: changing view must never determine whether the writer can create a
 Collection. When creation begins within a focused Node, the manager returns the new
 Collection to that child-item flow without changing Navigator focus or history.
 
-The manager offers optional **Collection sets** as well as custom creation. Each set
+The manager offers optional **Material sets** as well as custom creation. Each set
 has an independent disclosure control and a set checkbox. Selecting the set expands
 it and selects all available suggestions; individual suggestions can then be edited
 or removed and the parent checkbox shows a partial state. Applying a set creates
-ordinary project-owned Collection definitions. It creates no sample content, retains
+ordinary project-owned Material type definitions. It creates no sample content, retains
 no live dependency on the set, skips existing names, and remains fully editable.
 Initial sets cover Core story, Story planning, Story world, and Research. Scene Beats
 are an optional numbered Collection in Story planning: a Beat describes intended
 story action, while a Todo describes work the writer intends to perform. Containment
 may place Beat Nodes under Scenes, but the set does not impose that relationship.
 
-A project with no Collections proactively opens the manager once for that empty
+A project with no Material types proactively opens the manager once for that empty
 state, offering sets or custom creation. Dismissing the invitation is valid; the same
 manager remains available later from either Navigator view.
 
@@ -411,7 +414,7 @@ command model does not assume that later presentation.
 
 ### Writing relationship vocabulary and manager
 
-Relationship management uses a dedicated modal following the Collection Manager
+Relationship management uses a dedicated modal following the Material Manager
 pattern. It is available from Traditional view and from **Add… → Relationship** in
 Context. Definitions and confirmed links are project-owned Svelte state persisted
 through the workspace facade. Containment remains separate, endpoints are stable
@@ -507,11 +510,13 @@ Claire dies in Scene 1
 ```
 
 Likewise, `appears in`, `is referenced in`, `occurs in`, `supports`, `applies to`, and
-`contradicts` can be useful across many different Collection and container kinds. A
-relationship may carry a writer-readable note and optional applicability scope rather
-than multiplying almost identical predicates. This supports facts such as Geoffrey
-having one state during Scenes 1–3 and a changed state during Scenes 4–6 without
-changing Geoffrey's identity or creating copied character records.
+`contradicts` can be useful across many different Material and container kinds. A
+relationship may carry a writer-readable note when its selected type is not enough.
+The first UI does not expose a second **Applies during** scope: the writer links the
+relevant Material directly, or promotes a complex temporal fact into its own
+content-bearing Material item. The persistence reader retains legacy scope data so an
+older project is not damaged, but new relationship creation does not require or
+encourage it.
 
 An edge is appropriate while the fact only needs two endpoints and small qualifiers.
 When a fact needs its own prose, chronology, participants, evidence, consequences, or
@@ -581,6 +586,25 @@ authoritative project state.
 
 Input data remains in Svelte-owned domain records; card order and collapse state are
 view state, not a second copy of the content.
+
+The POC now uses one Inputs panel rather than separate Margin and Tray modes. Every
+replacement card has an explicit accept tick and one drag grip. Pointer dragging
+reorders cards using visible insertion marks; focusing the grip and pressing Arrow Up
+or Arrow Down provides the same operation without a pointer. Reordering is an
+undoable, facade-persisted Svelte domain transaction.
+
+The Inputs panel also owns the current review workflow. **Review document** creates
+one Svelte-owned craft activity even though the facade may receive one request per
+passage. The panel reports aggregate progress, returned Input count, and unrecovered
+errors. Source **Use** state controls participation in future requests; source
+**Show**, category, and density controls are independent projections over Inputs that
+already exist. Provider configuration, masked provider identity, session spend, and
+historical Input management are reachable from the same panel. The removed
+full-width filter strip and manuscript Sources footer must not return.
+
+The first slice deliberately reviews only the current document with the existing
+sentinel instruction. Recipe selection, arbitrary graph scope, automatic context
+assembly, and coordinated multi-pass review remain later AI-system decisions.
 
 Dismissal remains unresolved. The preferred direction is that dismissing a durable
 card changes an explicit state through the transaction and undo system, and that a
@@ -799,6 +823,31 @@ Navigator structure have been proved.
 - card dismissal, archival, recovery, and undo semantics;
 - conversation scope, lifetime, context selection, and promotion to durable notes.
 
+### Input categories, filters, and provider sources
+
+- review whether categories such as point of view, tense, canon, cadence, diction, and
+  distance should remain fixed application categories, become project-defined
+  categories, or form an immutable core extended by project-owned categories;
+- define category identity, ordering, colour/icon presentation, migration, prompt
+  association, and behaviour when a project category is renamed or removed;
+- redesign the Filters summary only after that category model is settled. Do not count
+  every hidden category or source as though each were an independently meaningful
+  filter; the summary must communicate the filters actually in use;
+- replace the fixed provider catalogue with settings-backed, named AI sources while
+  retaining local checks and deterministic replay as development/test sources;
+- add direct OpenAI and direct Anthropic sources;
+- add configurable OpenAI-compatible and Anthropic-compatible sources, including
+  endpoint URL, model ID, credential reference, and a writer-defined display name;
+- allow more than one configured source using either compatible protocol without
+  hard-coding another Inputs-panel button for every provider;
+- expose configured sources consistently to review participation, selection actions,
+  provenance, status, spend, and historical-Input filtering while preserving the
+  existing separation between **Use** for future calls and **Show** for returned
+  Inputs;
+- retain credentials behind the server/settings facade and add adapter contract,
+  malformed-output recovery, retry, and compatibility tests before calling any new
+  source implementation complete.
+
 ### Collection and graph rules
 
 - future user-authored, imported, or project-specific Collection sets beyond the
@@ -906,7 +955,7 @@ The first Navigator POC now proves:
   title, and content; a horizontal insertion marker means **before**, a highlighted
   indented row means **inside**, and cross-Collection ordering drops are refused
   rather than converted;
-- Context uses one bottom **Add…** gate for Material children, Todos, or relationships;
+- Context uses one bottom **Add…** gate for Material, Todos, or relationships;
   its removal mode selects any mixture of those entries, confirms once, and archives
   Material subtrees, deletes selected Todos, or unlinks selected relationships;
 - Navigator-owned structural changes, including creation, editing, deletion,
@@ -916,19 +965,19 @@ The first Navigator POC now proves:
   are deliberately not work history;
 - selecting any structural or related Node opens its one durable document in the
   existing editor and Input workflow.
-- Collections, Todos, and Archived/Unowned headings open concise instructions kept as
+- Material, Todos, and Archived/Unowned headings open concise instructions kept as
   editable HTML source under `src/lib/content/navigator/` rather than inline UI text;
-- Collections can be edited or deleted; deleted Collection children are recovered
+- Material types can be edited or deleted; deleted items are recovered
   under Archived/Unowned, while an explicit project-name-confirmed Start over action
   provides a genuinely clean project when that is what the writer chooses.
-- Collection creation and editing use one modal available from both Navigator views;
-  fresh projects proactively offer editable Collection sets, set selection supports
-  all/partial states, and applying a set creates only ordinary Collection definitions
+- Material creation and editing use one modal available from both Navigator views;
+  fresh projects proactively offer editable Material sets, set selection supports
+  all/partial states, and applying a set creates only ordinary Material type definitions
   without generated content or lasting template linkage;
-- Relationship management uses its own modal from either Navigator view; six editable
-  writing sets install project-owned definitions without creating links, and actual
-  links support both readable directions, optional applicability scope, explanatory
-  notes, safe unlinking, and Navigator Undo/Redo;
+- Relationship management uses its own modal from either Navigator view; relationship
+  creation appears first, six editable writing sets install project-owned definitions
+  without creating links, and actual links support both readable directions,
+  explanatory notes, safe unlinking, and Navigator Undo/Redo;
 
 The current persistence adapter stores Collection definitions, relationships, and
 Todos in the project's Navigator extension while content-bearing Nodes use durable
@@ -940,6 +989,36 @@ multi-target Todo editing UI, relationship cardinality and endpoint hints, impac
 cascades, fork-aware graph variance, and the terminal-style multi-pane manager.
 Existing AI review and Input behaviour remains available but has not yet been
 redesigned around Navigator context.
+
+### Current workbench layout proof
+
+The single-pane workbench now establishes the layout contract that the future pane
+manager must preserve:
+
+- the workbench is fixed to every edge of the visual viewport, cannot inherit a
+  smaller or rounded parent container, and has no manuscript maximum width;
+- the Navigator is an independently hideable pane, resizable from 250 pixels up to
+  half the viewport, with its width and visibility remembered locally;
+- the central document column owns vertical scrolling. Its sticky pane header names
+  the active document, reports words/version/save state, exposes writing Undo/Redo
+  and view-only zoom, and keeps secondary document actions in one overflow menu;
+- project switching, creation, renaming, and Start over belong to the Navigator header
+  rather than being repeated as manuscript controls;
+- editor zoom changes only the local projection of prose, is remembered locally, and
+  never creates document formatting or a work transaction;
+- the right-side Inputs/review pane is independently hideable and always occupies the
+  hard-right edge when visible; hiding it returns that width to the central workspace;
+- the Navigator, central document column, and Inputs/review pane each own an independent
+  overflow surface and remain pinned to the full available browser height;
+- Inputs begin at the top of their own pane and do not inherit or mirror the
+  manuscript's scroll position;
+- pane visibility controls live at the far right of the application header, separate
+  from project content and the Navigator transaction history.
+
+These presentation preferences are Svelte-owned local UI state, not project graph
+data and not facade-owned document content. Future horizontal and vertical editor
+splits must divide the reclaimed central workspace rather than reintroduce a fixed
+document width.
 
 The next implementation boundary should build on this proven slice without attempting
 recipes, collaboration, or a complete literary ontology:
@@ -966,7 +1045,7 @@ The next slice succeeds when:
 
 - the writer can understand where they are without decoding the current POC toolbar;
 - a node can have content and children;
-- the project can define a new Collection without application code changes;
+- the project can define a new Material type without application code changes;
 - a related character appears beneath a scene as an alias, not duplicated data;
 - Traditional view remains stable while Context view responds to the focused pane and
   selection without mutating the graph;

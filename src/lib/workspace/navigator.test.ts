@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceDocument, WorkspaceProject } from './model';
 import {
   ancestors,
+  compareNavigatorLabels,
   emptyNavigatorState,
   navigatorExtensions,
   nodeCollectionId,
@@ -24,6 +25,11 @@ function node(id: string, parentId: string | null = null): WorkspaceDocument {
 }
 
 describe('Navigator domain projection', () => {
+  it('orders numbered writing material naturally and then alphabetically', () => {
+    const labels = ['Scene 10', 'Appendix', 'Scene 2', 'Scene 1', 'Character'];
+    expect(labels.sort(compareNavigatorLabels)).toEqual(['Appendix', 'Character', 'Scene 1', 'Scene 2', 'Scene 10']);
+  });
+
   it('starts without generated collections, nodes, relationships, or todos', () => {
     expect(readNavigatorState(project)).toEqual(emptyNavigatorState());
   });

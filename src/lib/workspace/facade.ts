@@ -17,6 +17,7 @@ import type {
   ExtensionData,
   PersistentWorkspace,
   WorkspaceDocument,
+  WorkspaceAsset,
   WorkspaceProject
 } from '$lib/workspace/model';
 import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from '$lib/workspace/document-driver';
@@ -64,6 +65,10 @@ export interface CommitReceipt {
   documentId: string;
   durableRevision: number;
   updatedAt: string;
+}
+
+export interface UploadedAsset extends WorkspaceAsset {
+  url: string;
 }
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -226,6 +231,14 @@ export class WorkspaceFacade {
   async documentRevisions(documentId: string): Promise<DocumentRevision[]> {
     const result = await this.get<{ revisions: DocumentRevision[] }>(`/api/workspace?document=${encodeURIComponent(documentId)}`);
     return result.revisions;
+  }
+
+  async uploadAsset(projectId: string, file: File): Promise<UploadedAsset> {
+    const body = new FormData();
+    body.set('projectId', projectId);
+    body.set('file', file, file.name || 'Pasted image');
+    const result = await jsonResponse<{ asset: WorkspaceAsset }>(await this.fetcher('/api/assets', { method: 'POST', body }));
+    return { ...result.asset, url: `/api/assets/${encodeURIComponent(result.asset.id)}` };
   }
 
   async createContextBucket(input: {

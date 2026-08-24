@@ -186,6 +186,8 @@ export type RunState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelle
 
 export interface CraftRun {
   id: string;
+  batchId?: string;
+  scope?: 'document' | 'selection';
   documentId: string;
   sourceRevision: number;
   target: TargetSet;

@@ -1,10 +1,11 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
-import { workspaceFacade, type MarkdownExport, type WorkspaceFacade } from '$lib/workspace/facade';
+import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
 import { documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
+import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
 import {
   ancestors,
@@ -52,7 +53,6 @@ export class WorkspaceState {
   // Kept in provider requests for backward compatibility; the UI is one continuous workflow.
   mode = $state<WritingMode>('revising');
   paused = $state(false);
-  surface = $state<'docked' | 'tray'>('docked');
   activeSuggestionId = $state<string | null>(null);
   preview = $state<{ suggestionId: string; text: string } | null>(null);
   inputs = $state<Suggestion[]>([]);
@@ -61,6 +61,7 @@ export class WorkspaceState {
   behaviours = $state<Record<string, AttachmentBehaviour>>({ ...defaultAttachmentBehaviours });
   workspaceRevision = $state(0);
   documentSnapshot = $state<EditorDocumentSnapshot | null>(null);
+  richDocument = $state<RichDocument>(richDocumentFromText(''));
   undoStack = $state<WorkspaceHistoryEntry[]>([]);
   redoStack = $state<WorkspaceHistoryEntry[]>([]);
   navigatorUndoStack = $state<NavigatorHistoryEntry[]>([]);
@@ -75,6 +76,7 @@ export class WorkspaceState {
   navigator = $state<NavigatorProjectState>(emptyNavigatorState());
   navigatorMemory = $state<NavigatorMemory>(emptyNavigatorMemory());
   sourceStates = $state<Record<string, SourceState>>(Object.fromEntries(sourceCatalog.map((source) => [source.id, source.id === 'openrouter' || source.id === 'ollama' ? 'off' : 'visible'])));
+  inputSourceVisibility = $state<Record<string, boolean>>(Object.fromEntries(sourceCatalog.map((source) => [source.id, true])));
   categoryVisibility = $state<Record<Category, boolean>>(Object.fromEntries(categories.map((category) => [category, true])) as Record<Category, boolean>);
   densityCap = $state(8);
   costUsd = $state(0);
@@ -82,7 +84,6 @@ export class WorkspaceState {
   generating = $state(false);
   notice = $state<string | null>(null);
   lastError = $state<string | null>(null);
-  sourceClickAt = $state<Record<string, number>>({});
   private dispatches = new Map<string, AbortController>();
   private dispatchRunIds = new Map<string, string>();
   private documentSave: Promise<void> = Promise.resolve();
@@ -111,7 +112,7 @@ export class WorkspaceState {
     return this.suggestions
       .filter((suggestion) => suggestion.state === 'pending')
       .filter((suggestion) => this.categoryVisibility[suggestion.category])
-      .filter((suggestion) => this.sourceStates[suggestion.source] === 'visible')
+      .filter((suggestion) => this.inputSourceVisibility[suggestion.source] !== false)
       .sort((a, b) => a.order - b.order)
       .slice(0, this.densityCap);
   }
@@ -328,6 +329,18 @@ export class WorkspaceState {
     this.setCanonicalDocument(detail.after);
     if (detail.origin.kind === 'workspace_history') return { suggestions: this.visibleSuggestions, formats: this.formats };
 
+    if (detail.origin.kind === 'system') {
+      this.workspaceRevision += 1;
+      const previous = this.undoStack.at(-1);
+      if (previous) {
+        this.undoStack = [...this.undoStack.slice(0, -1), {
+          ...previous,
+          after: this.historySnapshot(detail.after)
+        }];
+      }
+      return { suggestions: this.visibleSuggestions, formats: this.formats };
+    }
+
     const transactionId = makeId('transaction');
     const before = this.historySnapshot(detail.before);
     const transformed = applyAttachmentChanges({
@@ -352,14 +365,15 @@ export class WorkspaceState {
     this.workspaceRevision += 1;
     const after = this.historySnapshot(detail.after);
     const acceptance = detail.origin.kind === 'input_acceptance';
+    const formattingOnly = detail.after.text === detail.before.text;
     this.pushHistory({
       id: transactionId,
-      source: acceptance ? 'ai' : 'human',
-      label: acceptance ? 'Accept input revision' : 'Edit text',
+      source: acceptance ? 'ai' : formattingOnly ? 'format' : 'human',
+      label: acceptance ? 'Accept input revision' : formattingOnly ? 'Edit formatting' : 'Edit text',
       before,
       after,
       createdAt: Date.now(),
-      group: acceptance ? undefined : 'typing'
+      group: acceptance || formattingOnly ? undefined : 'typing'
     });
     return { suggestions: this.visibleSuggestions, formats: this.formats };
   }
@@ -530,36 +544,35 @@ export class WorkspaceState {
     await this.log(this.paused ? 'paused' : 'resumed', { mode: this.mode });
   }
 
-  async cycleSource(sourceId: string): Promise<void> {
+  async toggleRunSource(sourceId: string): Promise<void> {
     const availability = this.settingsState.availability(sourceId);
     if (!this.sourceAvailable(sourceId)) {
       this.sourceStates[sourceId] = 'off';
       this.notice = availability.reason ?? `${sourceId} is not configured.`;
       return;
     }
-    const now = Date.now();
     const previous = this.sourceStates[sourceId] ?? 'visible';
-    const elapsed = now - (this.sourceClickAt[sourceId] ?? 0);
-    let next: SourceState;
-    if (previous === 'off') next = 'visible';
-    else if (previous === 'visible') next = 'invisible';
-    else next = elapsed <= 1000 ? 'off' : 'visible';
+    const next: SourceState = previous === 'off' ? 'visible' : 'off';
     this.sourceStates[sourceId] = next;
-    this.sourceClickAt[sourceId] = now;
     if (next === 'off') {
       for (const [key, controller] of this.dispatches) {
         if (key.includes(`:${sourceId}:`)) { controller.abort(); this.dispatches.delete(key); }
       }
     }
-    if (next === 'visible') {
-      this.suggestions = this.suggestions.map((suggestion) => suggestion.source === sourceId && suggestion.state === 'hidden' ? { ...suggestion, state: 'pending' } : suggestion);
-    }
-    await this.log('source_state_changed', { source: sourceId, from: previous, to: next, dwellMs: elapsed });
+    await this.log('source_state_changed', { source: sourceId, purpose: 'run_participation', from: previous, to: next });
+  }
+
+  async toggleInputSourceVisibility(sourceId: string): Promise<void> {
+    const next = this.inputSourceVisibility[sourceId] === false;
+    this.inputSourceVisibility[sourceId] = next;
+    if (next) this.inputs = this.inputs.map((input) => input.source === sourceId && input.state === 'hidden' ? { ...input, state: 'pending' } : input);
+    await this.log('source_state_changed', { source: sourceId, purpose: 'input_filter', visible: next });
   }
 
   enableConfiguredSource(sourceId: string): void {
     if (!this.settingsState.sourceAvailable(sourceId)) return;
     this.sourceStates[sourceId] = 'visible';
+    this.inputSourceVisibility[sourceId] = true;
   }
 
   sourceAvailable(sourceId: string): boolean {
@@ -572,10 +585,12 @@ export class WorkspaceState {
 
   async runCraftPass(prompt: TaskPrompt): Promise<Suggestion[]> {
     if (!this.documentSnapshot) return [];
+    const batchId = makeId('craft');
     const ranges = documentCraftParagraphs(this.documentSnapshot);
     const results = await Promise.all(ranges.map((range) => this.requestInputRun(
       { ...range, prompt },
-      `${this.branchId}:paragraph:${range.from}:${range.to}`
+      `${this.branchId}:paragraph:${range.from}:${range.to}`,
+      { batchId, scope: 'document' }
     )));
     return results.flat();
   }
@@ -589,11 +604,16 @@ export class WorkspaceState {
     }
     return this.requestInputRun(
       { ...range, prompt },
-      `${this.branchId}:selection:${range.from}:${range.to}`
+      `${this.branchId}:selection:${range.from}:${range.to}`,
+      { batchId: makeId('craft'), scope: 'selection' }
     );
   }
 
-  private async requestInputRun(input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>, rangeKey: string): Promise<Suggestion[]> {
+  private async requestInputRun(
+    input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>,
+    rangeKey: string,
+    activity: { batchId: string; scope: 'document' | 'selection' }
+  ): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
     const replacedRunId = this.dispatchRunIds.get(rangeKey);
@@ -603,6 +623,8 @@ export class WorkspaceState {
     const controller = new AbortController();
     const run: CraftRun = {
       id: makeId('run'),
+      batchId: activity.batchId,
+      scope: activity.scope,
       documentId: this.branchId,
       sourceRevision: this.workspaceRevision,
       target: textTarget(this.branchId, input.from, input.to, input.text),
@@ -619,7 +641,7 @@ export class WorkspaceState {
     this.dispatches.set(rangeKey, controller);
     this.dispatchRunIds.set(rangeKey, run.id);
     this.generating = true;
-    await this.log('suggestions_requested', { runId: run.id, range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
+    await this.log('suggestions_requested', { runId: run.id, batchId: run.batchId, scope: run.scope, range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
       const request: GenerationRequest = {
         ...input,
@@ -728,7 +750,7 @@ export class WorkspaceState {
       category: proposal.category,
       confidence: proposal.confidence,
       variants,
-      state: run.sourceStates[proposal.source] === 'invisible' ? 'hidden' : 'pending',
+      state: 'pending',
       order: from,
       createdAt: new Date().toISOString(),
       provenance: { ...proposal.provenance }
@@ -753,14 +775,29 @@ export class WorkspaceState {
     }
   }
 
-  reorder(id: string, direction: -1 | 1): void {
+  async moveInput(id: string, targetId: string, position: 'before' | 'after'): Promise<void> {
+    if (id === targetId || !this.documentSnapshot) return;
+    const live = this.suggestions.filter((suggestion) => suggestion.state === 'pending').sort((a, b) => a.order - b.order);
+    const moving = live.find((suggestion) => suggestion.id === id);
+    if (!moving || !live.some((suggestion) => suggestion.id === targetId)) return;
+    const before = this.historySnapshot(this.documentSnapshot);
+    const reordered = live.filter((suggestion) => suggestion.id !== id);
+    const targetIndex = reordered.findIndex((suggestion) => suggestion.id === targetId);
+    reordered.splice(targetIndex + (position === 'after' ? 1 : 0), 0, moving);
+    const orders = new Map(reordered.map((suggestion, order) => [suggestion.id, order]));
+    this.inputs = this.inputs.map((suggestion) => orders.has(suggestion.id) ? { ...suggestion, order: orders.get(suggestion.id)! } : suggestion);
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(this.documentSnapshot);
+    this.pushHistory({ id: makeId('transaction'), source: 'input', label: 'Reorder inputs', before, after, createdAt: Date.now() });
+    await this.persistDomainState('Reorder inputs');
+  }
+
+  async moveInputOneStep(id: string, direction: -1 | 1): Promise<void> {
     const live = this.suggestions.filter((suggestion) => suggestion.state === 'pending').sort((a, b) => a.order - b.order);
     const index = live.findIndex((suggestion) => suggestion.id === id);
-    const swap = index + direction;
-    if (index < 0 || swap < 0 || swap >= live.length) return;
-    const first = live[index];
-    const second = live[swap];
-    this.suggestions = this.suggestions.map((suggestion) => suggestion.id === first.id ? { ...suggestion, order: second.order } : suggestion.id === second.id ? { ...suggestion, order: first.order } : suggestion);
+    const target = live[index + direction];
+    if (!target) return;
+    await this.moveInput(id, target.id, direction === -1 ? 'before' : 'after');
   }
 
   async saveBrief(next: WritingBrief): Promise<void> {
@@ -801,6 +838,10 @@ export class WorkspaceState {
     const result = await this.facade.exportMarkdown({ markdown, title, sessionId: this.sessionId, branchId: this.branchId });
     await this.refreshLedger();
     return result;
+  }
+
+  uploadAsset(file: File): Promise<UploadedAsset> {
+    return this.facade.uploadAsset(this.projectId, file);
   }
 
   async switchBranch(id: string): Promise<void> {
@@ -1773,6 +1814,7 @@ export class WorkspaceState {
       ? stored as Record<string, unknown>
       : null;
     const persistedInputs = Array.isArray(value?.inputs) ? value.inputs as Suggestion[] : null;
+    this.richDocument = isRichDocument(value?.document) ? value.document : richDocumentFromText(document?.content ?? '');
     const storedAuthorityVersion = typeof value?.authorityVersion === 'number' ? value.authorityVersion : 0;
     let migratedLegacyInputs = 0;
     this.inputs = (persistedInputs ?? []).map((input) => {
@@ -1806,6 +1848,7 @@ export class WorkspaceState {
         authorityVersion,
         behaviourVersion: attachmentBehaviourVersion,
         inputs: this.inputs,
+        document: this.richDocument,
         formats: this.formats,
         runs: this.runs,
         behaviours: this.behaviours
@@ -1833,7 +1876,13 @@ export class WorkspaceState {
     this.documentSave = this.documentSave.then(async () => {
       const receipt = await this.facade.commit(transaction);
       this.documents = this.documents.map((item) => item.id === receipt.documentId
-        ? { ...item, revision: Math.max(item.revision, receipt.durableRevision), updatedAt: receipt.updatedAt }
+        ? {
+          ...item,
+          content: transaction.content,
+          extensions: transaction.extensions,
+          revision: Math.max(item.revision, receipt.durableRevision),
+          updatedAt: receipt.updatedAt
+        }
         : item);
       this.refreshBranches();
     }).catch((error) => {
@@ -1864,6 +1913,7 @@ export class WorkspaceState {
       formats: [],
       revision: this.workspaceRevision
     }).document;
+    this.richDocument = snapshot.richDocument ?? richDocumentFromProseMirror(snapshot.doc);
     this.documents = this.documents.map((document) => document.id === this.branchId
       ? { ...document, content: snapshot.text, updatedAt: new Date().toISOString() }
       : document);

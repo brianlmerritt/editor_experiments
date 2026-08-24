@@ -4,6 +4,7 @@ import { textTarget } from '$lib/workspace/attachments';
 import type { WorkspaceFacade } from '$lib/workspace/facade';
 import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
+import { richDocumentFromProseMirror } from '$lib/workspace/rich-document';
 import { WorkspaceState } from './workspace.svelte';
 
 const beforeDocument: EditorDocumentSnapshot = {
@@ -109,6 +110,69 @@ const selectionPrompt: TaskPrompt = {
 };
 
 describe('semantic workspace history', () => {
+  it('keeps a formatting-only editor transaction in Svelte history and canonical rich content', () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+    workspace.documents = [document('noticed')];
+    workspace.setEditorReady(beforeDocument);
+    const formatted: EditorDocumentSnapshot = {
+      doc: {
+        type: 'doc',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: 'noticed', marks: [{ type: 'strong' }] }] }]
+      },
+      text: 'noticed',
+      selection: { from: 1, to: 8 }
+    };
+    formatted.richDocument = richDocumentFromProseMirror(formatted.doc);
+
+    workspace.recordEditorTransaction({ before: beforeDocument, after: formatted, changes: [], origin: { kind: 'human' } });
+
+    expect(workspace.undoStack.at(-1)).toMatchObject({ source: 'format', label: 'Edit formatting' });
+    expect(workspace.richDocument.blocks[0]).toMatchObject({
+      type: 'paragraph',
+      content: [{ type: 'text', text: 'noticed', marks: [{ type: 'bold' }] }]
+    });
+  });
+
+  it('separates future review participation from filtering existing Inputs', async () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+    workspace.inputs = [input()];
+
+    expect(workspace.visibleSuggestions).toHaveLength(1);
+    await workspace.toggleRunSource('local-craft');
+
+    expect(workspace.sourceStates['local-craft']).toBe('off');
+    expect(workspace.visibleSuggestions).toHaveLength(1);
+
+    await workspace.toggleInputSourceVisibility('local-craft');
+
+    expect(workspace.inputSourceVisibility['local-craft']).toBe(false);
+    expect(workspace.visibleSuggestions).toHaveLength(0);
+    expect(workspace.sourceStates['local-craft']).toBe('off');
+  });
+
+  it('reorders pending inputs through the same undoable persistence path', async () => {
+    const facade = fakeFacade();
+    const workspace = new WorkspaceState(facade);
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.inputs = [
+      input(),
+      { ...input(), id: 'input-2', order: 2 },
+      { ...input(), id: 'input-3', order: 3 }
+    ];
+    workspace.setEditorReady(beforeDocument);
+
+    await workspace.moveInput('input-3', 'input-1', 'before');
+
+    expect(workspace.inputs.filter((item) => item.state === 'pending').sort((a, b) => a.order - b.order).map((item) => item.id)).toEqual(['input-3', 'input-1', 'input-2']);
+    expect(workspace.canUndo).toBe(true);
+    expect(workspace.undoWorkspace()).not.toBeNull();
+    expect(workspace.inputs.sort((a, b) => a.order - b.order).map((item) => item.id)).toEqual(['input-1', 'input-2', 'input-3']);
+    expect(facade.commit).toHaveBeenCalled();
+  });
+
   it('undoes and redoes accepted prose and input state together', () => {
     const workspace = new WorkspaceState();
     workspace.branchId = 'main';

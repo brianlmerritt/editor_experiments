@@ -4,11 +4,13 @@
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import Navigator from '$lib/components/Navigator.svelte';
-  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type SourceState, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
   import { settings as providerSettings } from '$lib/state/settings.svelte';
   import type { ContextBucket, ContextScope } from '$lib/workspace/model';
+  import { clampEditorZoom, clampNavigatorWidth, DEFAULT_EDITOR_ZOOM, DEFAULT_NAVIGATOR_WIDTH, maxNavigatorWidth, MAX_EDITOR_ZOOM, MIN_EDITOR_ZOOM, MIN_NAVIGATOR_WIDTH } from '$lib/workspace/layout';
+  import { summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
@@ -18,9 +20,8 @@
   let settingsOpen = $state(false);
   let contextOpen = $state(false);
   let ledgerOpen = $state(false);
-  let sourceLegendOpen = $state(false);
   let inputsOpen = $state(false);
-  let displayedSourceStates = $state<Record<string, SourceState>>({ ...workspace.sourceStates });
+  let inputControlsOpen = $state(false);
   let inputStateFilter = $state('all');
   let inputSearch = $state('');
   let briefDraft = $state<WritingBrief>({ ...workspace.brief });
@@ -34,8 +35,6 @@
   let workspaceReady = $state(false);
   let displayedDocumentRevision = $state(1);
   let documentSaving = $state(false);
-  let cardTops = $state<Record<string, number>>({});
-  let cardsHeight = $state(0);
   let cardsElement = $state<HTMLDivElement>();
   let undoDismiss = $state<{ suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null>(null);
   let liveSuggestions = $state<Suggestion[]>([]);
@@ -50,6 +49,17 @@
   let customRequest = $state('');
   let projectDialogKind = $state<'create' | 'rename' | 'reset' | null>(null);
   let projectDialogValue = $state('');
+  let navigatorVisible = $state(true);
+  let reviewPanelVisible = $state(true);
+  let navigatorWidth = $state(DEFAULT_NAVIGATOR_WIDTH);
+  let editorZoom = $state(DEFAULT_EDITOR_ZOOM);
+  let viewportWidth = $state(1440);
+  let draggedInputId = $state<string | null>(null);
+  let inputDropTarget = $state<{ id: string; position: 'before' | 'after' } | null>(null);
+  let resizeCleanup: (() => void) | null = null;
+  let inputDragCleanup: (() => void) | null = null;
+
+  const layoutStorageKey = 'margin-note:workbench-layout';
 
   let selectedPrompt = $derived(workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0]);
   let currentDocumentText = $derived(workspace.currentDocument?.content ?? '');
@@ -62,18 +72,51 @@
     .filter((input) => inputStateFilter === 'all' || input.state === inputStateFilter)
     .filter((input) => !inputSearch.trim() || `${input.payload.comment} ${input.source} ${input.category} ${input.state}`.toLowerCase().includes(inputSearch.trim().toLowerCase()))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
+  let latestCraftActivity = $derived(summarizeLatestCraftActivity(workspace.runs, workspace.branchId));
+  let enabledRunSourceCount = $derived(sourceCatalog.filter((source) => workspace.sourceStates[source.id] !== 'off' && providerSettings.sourceAvailability[source.id]?.available === true).length);
+  let hiddenInputFilterCount = $derived(
+    categories.filter((category) => !workspace.categoryVisibility[category]).length
+    + sourceCatalog.filter((source) => workspace.inputSourceVisibility[source.id] === false).length
+  );
+
+  const activityLabels: Record<CraftActivityState, string> = {
+    running: 'Running',
+    completed: 'Complete',
+    partial: 'Partially complete',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+    discarded: 'Superseded by edits'
+  };
 
   onMount(() => {
+    viewportWidth = window.innerWidth;
+    try {
+      const saved = JSON.parse(localStorage.getItem(layoutStorageKey) ?? '{}') as {
+        navigatorVisible?: boolean;
+        reviewPanelVisible?: boolean;
+        navigatorWidth?: number;
+        editorZoom?: number;
+      };
+      navigatorVisible = saved.navigatorVisible !== false;
+      reviewPanelVisible = saved.reviewPanelVisible !== false;
+      navigatorWidth = clampNavigatorWidth(saved.navigatorWidth ?? DEFAULT_NAVIGATOR_WIDTH, window.innerWidth);
+      editorZoom = clampEditorZoom(saved.editorZoom ?? DEFAULT_EDITOR_ZOOM);
+    } catch {
+      navigatorWidth = clampNavigatorWidth(DEFAULT_NAVIGATOR_WIDTH, window.innerWidth);
+      editorZoom = DEFAULT_EDITOR_ZOOM;
+    }
     void workspace.initialize().then(() => {
       briefDraft = { ...workspace.brief };
       sentinelInstruction = workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.instruction ?? '';
-      displayedSourceStates = { ...workspace.sourceStates };
       workspaceReady = true;
       displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
       refreshLiveSuggestions();
     });
     const keydown = (event: KeyboardEvent) => handleReviewKeys(event);
-    const relayout = () => layoutCards();
+    const relayout = () => {
+      viewportWidth = window.innerWidth;
+      navigatorWidth = clampNavigatorWidth(navigatorWidth, window.innerWidth);
+    };
     window.addEventListener('keydown', keydown);
     window.addEventListener('resize', relayout);
     window.addEventListener('scroll', relayout, { passive: true });
@@ -81,6 +124,8 @@
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('resize', relayout);
       window.removeEventListener('scroll', relayout);
+      resizeCleanup?.();
+      inputDragCleanup?.();
       if (editTimer) clearTimeout(editTimer);
       if (documentSaveTimer) clearTimeout(documentSaveTimer);
       if (scanTimer) clearTimeout(scanTimer);
@@ -88,34 +133,53 @@
     };
   });
 
-  $effect(() => {
-    if (liveSuggestions.length && editorReady) void tick().then(layoutCards);
-  });
-
-  function layoutCards(): void {
-    if (!editor || !cardsElement || workspace.surface !== 'docked') return;
-    const measuredHeights = new Map(
-      Array.from(cardsElement.querySelectorAll<HTMLElement>('.card-slot'))
-        .map((slot) => [slot.dataset.suggestionId ?? '', slot.offsetHeight])
-    );
-    const next: Record<string, number> = {};
-    let floor = 18;
-    for (const suggestion of liveSuggestions) {
-      const anchored = editor.getSuggestionTop?.(suggestion) ?? floor;
-      const top = Math.max(floor, anchored);
-      next[suggestion.id] = top;
-      const measuredHeight = measuredHeights.get(suggestion.id);
-      const fallbackHeight = suggestion.variants.length ? 218 : 150;
-      floor = top + (measuredHeight || fallbackHeight) + 20;
-    }
-    cardTops = next;
-    cardsHeight = floor;
+  function persistWorkbenchLayout(): void {
+    localStorage.setItem(layoutStorageKey, JSON.stringify({ navigatorVisible, reviewPanelVisible, navigatorWidth, editorZoom }));
   }
 
-  function observeCard(node: HTMLElement): { destroy: () => void } {
-    const observer = new ResizeObserver(() => layoutCards());
-    observer.observe(node);
-    return { destroy: () => observer.disconnect() };
+  function toggleNavigatorPane(): void {
+    navigatorVisible = !navigatorVisible;
+    persistWorkbenchLayout();
+  }
+
+  function toggleReviewPanel(): void {
+    reviewPanelVisible = !reviewPanelVisible;
+    persistWorkbenchLayout();
+  }
+
+  function setNavigatorWidth(width: number): void {
+    navigatorWidth = clampNavigatorWidth(width, window.innerWidth);
+  }
+
+  function setEditorZoom(zoom: number): void {
+    editorZoom = clampEditorZoom(zoom);
+    persistWorkbenchLayout();
+  }
+
+  function startNavigatorResize(event: PointerEvent): void {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = navigatorWidth;
+    document.body.classList.add('resizing-navigator');
+    const move = (moveEvent: PointerEvent) => setNavigatorWidth(startWidth + moveEvent.clientX - startX);
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      document.body.classList.remove('resizing-navigator');
+      resizeCleanup = null;
+      persistWorkbenchLayout();
+    };
+    resizeCleanup?.();
+    resizeCleanup = stop;
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+  }
+
+  function resizeNavigatorWithKeyboard(event: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    setNavigatorWidth(navigatorWidth + (event.key === 'ArrowLeft' ? -20 : 20));
+    persistWorkbenchLayout();
   }
 
   function refreshLiveSuggestions(): void {
@@ -123,7 +187,7 @@
     liveSuggestions = workspace.suggestions
       .filter((suggestion) => suggestion.state === 'pending')
       .filter((suggestion) => workspace.categoryVisibility[suggestion.category])
-      .filter((suggestion) => workspace.sourceStates[suggestion.source] === 'visible')
+      .filter((suggestion) => workspace.inputSourceVisibility[suggestion.source] !== false)
       .filter((suggestion) => {
         const fingerprint = suggestionFingerprint(suggestion);
         if (seen.has(fingerprint)) return false;
@@ -159,13 +223,13 @@
   function preventDefault(event: Event): void { event.preventDefault(); }
   function stopPropagation(event: Event): void { event.stopPropagation(); }
 
-  async function changeSource(sourceId: string): Promise<void> {
-    if (sourceId === 'openrouter' && providerSettings.sourceAvailability.openrouter?.available !== true) {
-      providerSettings.openOpenRouter();
-      return;
-    }
-    await workspace.cycleSource(sourceId);
-    displayedSourceStates = { ...workspace.sourceStates };
+  async function toggleRunSource(sourceId: string): Promise<void> {
+    if (sourceId === 'openrouter' && providerSettings.sourceAvailability.openrouter?.available !== true) providerSettings.openOpenRouter();
+    else await workspace.toggleRunSource(sourceId);
+  }
+
+  async function toggleInputSource(sourceId: string): Promise<void> {
+    await workspace.toggleInputSourceVisibility(sourceId);
     refreshLiveSuggestions();
   }
 
@@ -177,8 +241,7 @@
     try {
       const configured = await providerSettings.saveOpenRouter({ key, model });
       workspace.enableConfiguredSource('openrouter');
-      displayedSourceStates = { ...workspace.sourceStates };
-      workspace.notice = `OpenRouter ${configured.model ?? providerSettings.openRouterModel} was saved locally and is now visible.`;
+      workspace.notice = `OpenRouter ${configured.model ?? providerSettings.openRouterModel} was saved locally and enabled for reviews.`;
       refreshLiveSuggestions();
     } catch (error) {
       workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'OpenRouter configuration failed');
@@ -204,6 +267,7 @@
         ? 'Accepted revision'
         : 'Editing session';
     scheduleDocumentSave(saveReason);
+    if (!detail.characters) return;
     if (origin && origin.kind !== 'human') return;
     const now = Date.now();
     if (!editSession.started) editSession.started = now;
@@ -277,10 +341,8 @@
     const incoming = await workspace.runCraftPass(selectedPrompt);
     if (!workspace.notice) showNotice(incoming.length
       ? `${incoming.length} new ${incoming.length === 1 ? 'input' : 'inputs'} added.`
-      : 'Craft pass complete; no new inputs.');
+      : 'Review complete; no new inputs.');
     refreshLiveSuggestions();
-    await tick();
-    layoutCards();
   }
 
   async function runSelectionPrompt(prompt: TaskPrompt, pendingMessage?: string): Promise<Suggestion[]> {
@@ -290,7 +352,6 @@
     const incoming = await workspace.runSelectionPass(selection, prompt);
     refreshLiveSuggestions();
     await tick();
-    layoutCards();
     if (incoming[0]) void activateCard(incoming[0].id);
     return incoming;
   }
@@ -306,7 +367,6 @@
     workspace.activate(suggestion.id);
     editor?.focusSuggestion(suggestion);
     await tick();
-    layoutCards();
   }
 
   async function suggestNoteRevisions(suggestion: Suggestion): Promise<void> {
@@ -367,14 +427,12 @@
 
   function activateFromEditor(id: string): void {
     workspace.activate(id);
-    void tick().then(layoutCards);
   }
 
   async function activateCard(id: string): Promise<void> {
     workspace.activate(id);
     await tick();
     cardsElement?.querySelector<HTMLElement>(`.card-slot[data-suggestion-id="${id}"] .card`)?.focus({ preventScroll: true });
-    layoutCards();
   }
 
   function chooseVariant(id: string, index: number): void {
@@ -382,7 +440,7 @@
     workspace.activate(id);
   }
 
-  async function accept(suggestion: Suggestion, index: number, edit = false, viaKeyboard = false): Promise<void> {
+  async function accept(suggestion: Suggestion, index: number, viaKeyboard = false): Promise<void> {
     const currentEditor = editor;
     if (!currentEditor) return;
     const variants = suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
@@ -401,14 +459,10 @@
       showNotice('That note expired because its text changed.');
       return;
     }
-    const eventType = edit ? 'accepted_then_edited' : viaKeyboard ? 'accepted_via_keyboard' : 'accepted_via_tick';
+    const eventType = viaKeyboard ? 'accepted_via_keyboard' : 'accepted_via_tick';
     await workspace.resolveSuggestion(suggestion.id, 'accepted', eventType, { variantId: variant.id, replacement: variant.text });
     await workspace.supersedeSiblings(suggestion, variant.id);
     refreshLiveSuggestions();
-    if (edit && result.from != null && result.to != null) {
-      if (variant.text) currentEditor.selectRange(result.from, result.to);
-      else currentEditor.focusAt(result.to);
-    }
   }
 
   async function reject(suggestion: Suggestion, viaDrag: boolean): Promise<void> {
@@ -417,7 +471,7 @@
       if (undoDismiss) clearTimeout(undoDismiss.timer);
       const timer = setTimeout(() => { undoDismiss = null; }, 5000);
       undoDismiss = { suggestion, timer };
-    } else await workspace.resolveSuggestion(suggestion.id, 'rejected', 'rejected', { surface: workspace.surface });
+    } else await workspace.resolveSuggestion(suggestion.id, 'rejected', 'rejected');
     refreshLiveSuggestions();
   }
 
@@ -447,9 +501,47 @@
     if (/^[123]$/.test(event.key)) {
       const variant = Number(event.key) - 1;
       if (variant < current.variants.length) { event.preventDefault(); chooseVariant(current.id, variant); workspace.setPreview(current.id, current.variants[variant].text); }
-    } else if (event.key === 'Enter') { event.preventDefault(); void accept(current, selectedVariants[current.id] ?? 0, false, true); }
-    else if (event.key === 'e') { event.preventDefault(); void accept(current, selectedVariants[current.id] ?? 0, true, true); }
+    } else if (event.key === 'Enter') { event.preventDefault(); void accept(current, selectedVariants[current.id] ?? 0, true); }
     else if (event.key === 'x' || event.key === 'Escape') { event.preventDefault(); void reject(current, false); }
+  }
+
+  function beginInputDrag(id: string, event: PointerEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    inputDragCleanup?.();
+    draggedInputId = id;
+    inputDropTarget = null;
+    const move = (moveEvent: PointerEvent) => {
+      const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>('.card-slot');
+      const targetId = target?.dataset.suggestionId;
+      if (!target || !targetId || targetId === id) {
+        inputDropTarget = null;
+        return;
+      }
+      const bounds = target.getBoundingClientRect();
+      inputDropTarget = { id: targetId, position: moveEvent.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after' };
+    };
+    const finish = (commit: boolean) => {
+      const target = inputDropTarget;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', pointerUp);
+      window.removeEventListener('pointercancel', pointerCancel);
+      inputDragCleanup = null;
+      draggedInputId = null;
+      inputDropTarget = null;
+      if (commit && target) void workspace.moveInput(id, target.id, target.position).then(refreshLiveSuggestions);
+    };
+    const pointerUp = () => finish(true);
+    const pointerCancel = () => finish(false);
+    inputDragCleanup = () => finish(false);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', pointerUp);
+    window.addEventListener('pointercancel', pointerCancel);
+  }
+
+  async function moveInputOneStep(id: string, direction: -1 | 1): Promise<void> {
+    await workspace.moveInputOneStep(id, direction);
+    refreshLiveSuggestions();
   }
 
   async function saveSettings(): Promise<void> {
@@ -632,50 +724,60 @@
     <div class="top-actions">
       <button class:paused={isPaused} onclick={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
       <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
-      <button onclick={openInputs}>Inputs <span>{workspace.inputs.length}</span></button>
       <button onclick={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
       <button onclick={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
+      <button class="layout-toggle" class:active={navigatorVisible} aria-label={navigatorVisible ? 'Hide Navigator' : 'Show Navigator'} aria-pressed={navigatorVisible} title={navigatorVisible ? 'Hide Navigator' : 'Show Navigator'} onclick={toggleNavigatorPane}><span class="pane-icon pane-icon-left" aria-hidden="true"></span></button>
+      <button class="layout-toggle" class:active={reviewPanelVisible} aria-label={reviewPanelVisible ? 'Hide Inputs panel' : 'Show Inputs panel'} aria-pressed={reviewPanelVisible} title={reviewPanelVisible ? 'Hide Inputs panel' : 'Show Inputs panel'} onclick={toggleReviewPanel}><span class="pane-icon pane-icon-right" aria-hidden="true"></span></button>
     </div>
   </header>
 
-    <nav class="filterbar" aria-label="Input filters">
-      <span class="filter-label">Show</span>
-      {#each categories as category}
-        <button class:off={!workspace.categoryVisibility[category]} style={`--category:${`var(--cat-${category})`}`} onclick={() => changeCategory(category)}>
-          <i>{categoryMeta[category].icon}</i>{categoryMeta[category].label}
-        </button>
-      {/each}
-      <label>Density <input type="range" min="1" max="20" bind:value={workspace.densityCap} oninput={refreshLiveSuggestions} /><output>{workspace.densityCap}</output></label>
-      <span class="spacer"></span>
-      <button class:active={workspace.surface === 'docked'} onclick={() => workspace.surface = 'docked'}>Margin</button>
-      <button class:active={workspace.surface === 'tray'} onclick={() => workspace.surface = 'tray'}>Tray</button>
-    </nav>
-
-  <div class="workbench">
-    <Navigator onOpenNode={switchDocument} />
+  <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px`}>
+    {#if navigatorVisible}
+      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} /></div>
+      <button
+        type="button"
+        class="navigator-resizer"
+        aria-label={`Resize Navigator, currently ${navigatorWidth} pixels wide`}
+        title={`Drag to resize the Navigator between ${MIN_NAVIGATOR_WIDTH} and ${maxNavigatorWidth(viewportWidth)} pixels`}
+        onpointerdown={startNavigatorResize}
+        onkeydown={resizeNavigatorWithKeyboard}
+      ><span aria-hidden="true"></span></button>
+    {/if}
     <main>
-    <section class="workspace">
+    <section class="workspace" class:review-hidden={!reviewPanelVisible}>
       <div class="document-column">
-        <div class="document-meta">
-          <div class="document-selectors">
-            <select value={workspace.projectId} onchange={(event) => switchProject((event.currentTarget as HTMLSelectElement).value)} aria-label="Project">
-              {#each workspace.projects as project}<option value={project.id}>{project.title}</option>{/each}
-            </select>
-            <button onclick={createProject} title="Create project">+ Project</button>
-            <button onclick={renameProject} title="Rename current project">Rename project</button>
-            <button onclick={resetProject} title="Remove this project's material and recreate an empty Spine and Todos">Start over</button>
-            <span aria-hidden="true">/</span><small>Editing</small><strong>{workspace.currentDocument ? workspace.navigatorNodeLabel(workspace.currentDocument) : ''}</strong>
-            {#if workspace.currentDocument && !['spine', 'todos'].includes(workspace.currentDocument.role ?? '')}<button onclick={renameDocument}>Rename</button>{/if}
-            <button onclick={forkBranch}>Fork from here</button>
+        <header class="editor-pane-header">
+          <div class="pane-identity">
+            <small>{workspace.currentDocument ? workspace.navigatorNodeType(workspace.currentDocument) : 'Document'}</small>
+            <strong>{workspace.currentDocument ? workspace.navigatorNodeLabel(workspace.currentDocument) : 'Opening…'}</strong>
           </div>
-          <div><span>{wordCount(currentDocumentText)} words · v{displayedDocumentRevision}{documentSaving ? ' · saving…' : ''}</span><button onclick={exportMarkdown}>Export .md</button></div>
-          <div class="document-tools">
-            <button disabled={!workspace.undoStack.length} onclick={undoWorkspace}>Undo</button>
-            <button disabled={!workspace.redoStack.length} onclick={redoWorkspace}>Redo</button>
-            <button onclick={strikeWork}>{workspace.workHasStrikethrough ? 'Remove work strikethrough' : 'Strike work'}</button>
+          <div class="pane-status">
+            <span>{wordCount(currentDocumentText)} words</span>
+            <span>v{displayedDocumentRevision}</span>
+            <span class:saving={documentSaving}>{documentSaving ? 'Saving…' : 'Saved'}</span>
           </div>
-        </div>
+          <div class="pane-actions">
+            <div class="history-actions" aria-label="Writing undo and redo">
+              <button disabled={!workspace.undoStack.length} title="Undo writing change" aria-label="Undo writing change" onclick={undoWorkspace}>↶</button>
+              <button disabled={!workspace.redoStack.length} title="Redo writing change" aria-label="Redo writing change" onclick={redoWorkspace}>↷</button>
+            </div>
+            <div class="zoom-actions" aria-label="Editor zoom">
+              <button disabled={editorZoom <= MIN_EDITOR_ZOOM} title="Zoom out" aria-label="Zoom out" onclick={() => setEditorZoom(editorZoom - 10)}>−</button>
+              <button title="Reset editor zoom" aria-label={`Reset editor zoom, currently ${editorZoom}%`} onclick={() => setEditorZoom(DEFAULT_EDITOR_ZOOM)}>{editorZoom}%</button>
+              <button disabled={editorZoom >= MAX_EDITOR_ZOOM} title="Zoom in" aria-label="Zoom in" onclick={() => setEditorZoom(editorZoom + 10)}>+</button>
+            </div>
+            <details class="pane-menu">
+              <summary aria-label="Document actions" title="Document actions">•••</summary>
+              <div>
+                {#if workspace.currentDocument && !['spine', 'todos'].includes(workspace.currentDocument.role ?? '')}<button type="button" onclick={renameDocument}>Rename document</button>{/if}
+                <button type="button" onclick={forkBranch}>Fork from here</button>
+                <button type="button" onclick={strikeWork}>{workspace.workHasStrikethrough ? 'Remove work strikethrough' : 'Strike work'}</button>
+                <button type="button" onclick={exportMarkdown}>Export Markdown</button>
+              </div>
+            </details>
+          </div>
+        </header>
 
         <div class="editor-wrap">
           {#if !workspaceReady || !workspace.currentDocument}
@@ -686,6 +788,8 @@
                 bind:this={editor}
                 branchId={workspace.branchId}
                 initialContent={workspace.currentDocument.content}
+                initialDocument={workspace.richDocument}
+                zoomPercent={editorZoom}
                 suggestions={liveSuggestions}
                 formats={workspace.formats}
                 attachmentRevision={workspace.workspaceRevision}
@@ -694,6 +798,7 @@
                 paused={isPaused}
                 onTextChange={textChanged}
                 onEditorReady={(snapshot) => workspace.setEditorReady(snapshot)}
+                onAssetUpload={(file) => workspace.uploadAsset(file)}
                 onEditorTransaction={(detail) => {
                   const projection = workspace.recordEditorTransaction(detail);
                   refreshLiveSuggestions();
@@ -733,75 +838,146 @@
           {/if}
         </div>
 
-        <div class="source-dock">
-          <div class="source-heading"><span>Sources</span><button onclick={() => sourceLegendOpen = !sourceLegendOpen}>L/A key</button></div>
-          <div class="source-buttons">
-            {#each sourceCatalog as source}
-              {@const state = displayedSourceStates[source.id]}
-              {@const availability = providerSettings.sourceAvailability[source.id]}
-              {@const unavailable = availability?.available !== true}
-              <button class:invisible={state === 'invisible'} class:off={state === 'off'} class:unavailable onclick={() => changeSource(source.id)} title={unavailable ? availability.reason : `${source.label}: ${state}${availability?.model ? ` · ${availability.model}` : ''}`}>
-                <span class="state-icon">{unavailable ? '!' : state === 'visible' ? '◉' : state === 'invisible' ? '⊘' : '○'}</span>
-                <b>{source.kind === 'local' ? 'L' : 'A'}{source.number}</b>
-                <span>{source.label}</span>
-                <small>{unavailable ? 'not configured' : state}</small>
-              </button>
-            {/each}
-          </div>
-          <div class="source-summary">
-            <span>Session spend <strong>${workspace.costUsd.toFixed(4)}</strong> <em>includes invisible</em></span>
-            {#if providerSettings.sourceAvailability.openrouter?.credentialHint}
-              <span class="provider-identity">{providerSettings.sourceAvailability.openrouter.credentialHint} · {providerSettings.sourceAvailability.openrouter.model}</span>
-            {/if}
-            <button class="provider-config" onclick={() => providerSettings.openOpenRouter()}>{providerSettings.sourceAvailability.openrouter?.available === true ? 'OpenRouter settings' : 'Configure OpenRouter'}</button>
-            <button class="scan" disabled={workspace.generating || workspace.paused} onclick={runSentinels}>{workspace.generating ? 'Reading…' : 'Run craft pass'}</button>
-          </div>
-          {#if sourceLegendOpen}<p class="legend"><b>L</b> local, offline craft tool · <b>A</b> AI or scripted model · source number identifies provenance without assigning it a hue. Click rapidly: visible → invisible → off.</p>{/if}
-        </div>
       </div>
 
-        <aside class:tray={workspace.surface === 'tray'}>
-          <header>
-            <div><span>{workspace.surface === 'docked' ? 'Inputs' : 'Input tray'}</span><strong>{liveSuggestions.length} live</strong></div>
-            {#if queuedCount}<small>+{queuedCount} queued by density cap</small>{/if}
+        {#if reviewPanelVisible}<aside class="inputs-panel">
+          <header class="inputs-panel-header">
+            <div class="inputs-heading">
+              <div><span>Inputs</span><strong>{liveSuggestions.length} live</strong></div>
+              {#if queuedCount}<small>+{queuedCount} filtered or beyond the display limit</small>{/if}
+            </div>
+            <div class="inputs-header-actions">
+              <button
+                type="button"
+                class:active={inputControlsOpen}
+                aria-expanded={inputControlsOpen}
+                onclick={() => inputControlsOpen = !inputControlsOpen}
+              >Filters{hiddenInputFilterCount ? ` ${hiddenInputFilterCount}` : ''}</button>
+              <button
+                type="button"
+                class="review-document"
+                disabled={workspace.generating || workspace.paused || !enabledRunSourceCount}
+                onclick={runSentinels}
+              >{workspace.generating ? 'Reviewing…' : 'Review document'}</button>
+            </div>
           </header>
+
+          {#if latestCraftActivity}
+            <section class={`craft-activity activity-${latestCraftActivity.state}`} aria-live="polite">
+              <header>
+                <strong>{latestCraftActivity.scope === 'document' ? 'Document review' : 'Selection revision'}</strong>
+                <span>{activityLabels[latestCraftActivity.state]}</span>
+              </header>
+              <p>
+                {latestCraftActivity.requestCount} {latestCraftActivity.requestCount === 1 ? 'passage' : 'passages'}
+                · {latestCraftActivity.proposalCount} {latestCraftActivity.proposalCount === 1 ? 'input' : 'inputs'}
+                {#if latestCraftActivity.runningCount} · {latestCraftActivity.runningCount} running{/if}
+              </p>
+              {#if latestCraftActivity.firstError}<small>{latestCraftActivity.firstError}</small>{/if}
+            </section>
+          {/if}
+
+          {#if inputControlsOpen}
+            <section class="inputs-controls" aria-label="Input controls">
+              <div class="control-group">
+                <header><strong>Show categories</strong><small>Existing Inputs</small></header>
+                <div class="category-controls">
+                  {#each categories as category}
+                    <button
+                      type="button"
+                      class:off={!workspace.categoryVisibility[category]}
+                      aria-pressed={workspace.categoryVisibility[category]}
+                      onclick={() => changeCategory(category)}
+                    ><i>{categoryMeta[category].icon}</i>{categoryMeta[category].label}</button>
+                  {/each}
+                </div>
+                <label class="density-control">Maximum visible
+                  <input type="range" min="1" max="20" bind:value={workspace.densityCap} oninput={refreshLiveSuggestions} />
+                  <output>{workspace.densityCap}</output>
+                </label>
+              </div>
+
+              <div class="control-group">
+                <header><strong>Sources</strong><small>Future reviews / existing Inputs</small></header>
+                <p class="control-explanation"><b>Use</b> controls future reviews. <b>Show</b> only filters Inputs already returned.</p>
+                <div class="source-controls">
+                  {#each sourceCatalog as source}
+                    {@const availability = providerSettings.sourceAvailability[source.id]}
+                    <div class="source-row">
+                      <div><b>A{source.number}</b><span>{source.label}</span>{#if availability?.model}<small>{availability.model}</small>{/if}</div>
+                      <button
+                        type="button"
+                        class:active={workspace.sourceStates[source.id] !== 'off'}
+                        aria-pressed={workspace.sourceStates[source.id] !== 'off'}
+                        disabled={availability?.available !== true}
+                        title={availability?.available === true ? 'Include this source in future reviews' : availability?.reason ?? 'Source is not configured'}
+                        onclick={() => toggleRunSource(source.id)}
+                      >Use</button>
+                      <button
+                        type="button"
+                        class:active={workspace.inputSourceVisibility[source.id] !== false}
+                        aria-pressed={workspace.inputSourceVisibility[source.id] !== false}
+                        title="Show or hide existing Inputs from this source"
+                        onclick={() => toggleInputSource(source.id)}
+                      >Show</button>
+                      {#if source.id === 'openrouter' && availability?.available !== true}
+                        <button class="configure-source" type="button" onclick={() => providerSettings.openOpenRouter()}>Configure</button>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </section>
+          {/if}
+
           <div
             class="cards"
-            class:docked={workspace.surface === 'docked'}
+            role="list"
             bind:this={cardsElement}
-            style={workspace.surface === 'docked' ? `min-height:max(68vh, ${cardsHeight}px)` : ''}
           >
             {#if !liveSuggestions.length}
-              <div class="empty-notes"><span>✓</span><p>No visible inputs.</p><small>Run a craft pass, change filters, or bring an invisible source back.</small></div>
+              <div class="empty-notes"><span>✓</span><p>No visible Inputs.</p><small>Review the current document or change the Input filters.</small></div>
             {/if}
             {#each liveSuggestions as suggestion}
               <div
                 class="card-slot"
+                class:dragging={draggedInputId === suggestion.id}
+                class:drop-before={inputDropTarget?.id === suggestion.id && inputDropTarget.position === 'before'}
+                class:drop-after={inputDropTarget?.id === suggestion.id && inputDropTarget.position === 'after'}
+                role="listitem"
                 data-suggestion-id={suggestion.id}
-                use:observeCard
-                style={workspace.surface === 'docked' ? `top:${cardTops[suggestion.id] ?? 18}px` : ''}
               >
                 <SuggestionCard
                   {suggestion}
                   active={workspace.activeSuggestionId === suggestion.id}
-                  tray={workspace.surface === 'tray'}
                   selectedVariant={selectedVariants[suggestion.id] ?? 0}
                   revisionBusy={workspace.generating && revisionSuggestionId === suggestion.id}
                   revisionAvailable={hasRevisionProvider}
                   onActivate={() => void activateCard(suggestion.id)}
                   onSelectVariant={(index) => chooseVariant(suggestion.id, index)}
-                  onAccept={(index, edit) => accept(suggestion, index, edit)}
+                  onAccept={(index) => accept(suggestion, index)}
                   onReject={(viaDrag) => reject(suggestion, viaDrag)}
                   onPreview={(text) => text === null ? workspace.clearPreview() : workspace.setPreview(suggestion.id, text)}
                   onSuggestRevision={() => void startSuggestionRevision(suggestion)}
                   onSourceHover={() => workspace.log('source_tooltip_hovered', { source: suggestion.source, sourceNumber: suggestion.sourceNumber }, suggestion.id)}
-                  onMove={(direction) => workspace.reorder(suggestion.id, direction)}
+                  onMove={(direction) => void moveInputOneStep(suggestion.id, direction)}
+                  onOrderPointerDown={(event) => beginInputDrag(suggestion.id, event)}
                 />
               </div>
             {/each}
           </div>
-          {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>E</kbd> accept/edit · <kbd>X</kbd> reject</p>{/if}
-        </aside>
+          {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>X</kbd> reject</p>{/if}
+          <footer class="inputs-panel-footer">
+            <div>
+              <strong>${workspace.costUsd.toFixed(4)}</strong><span>session provider spend</span>
+              {#if providerSettings.sourceAvailability.openrouter?.credentialHint}
+                <small>{providerSettings.sourceAvailability.openrouter.credentialHint} · {providerSettings.sourceAvailability.openrouter.model}</small>
+              {/if}
+            </div>
+            <button type="button" onclick={() => providerSettings.openOpenRouter()}>OpenRouter settings</button>
+            <button type="button" onclick={openInputs}>History</button>
+          </footer>
+        </aside>{/if}
     </section>
 
     {#if ledgerOpen}<div class="ledger-panel"><LedgerTail events={workspace.ledger} costUsd={workspace.costUsd} /></div>{/if}
@@ -949,8 +1125,8 @@
 </div>
 
 <style>
-  .app-shell { min-height: 100vh; }
-  .topbar { position: sticky; z-index: 30; top: 0; display: grid; grid-template-columns: 1fr auto; align-items: center; min-height: 58px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 91%, transparent); backdrop-filter: blur(14px); }
+  .app-shell { position: fixed; inset: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); width: auto; max-width: none; height: auto; min-height: 0; overflow: hidden; border-radius: 0; background: var(--canvas); }
+  .topbar { position: relative; z-index: 30; display: grid; grid-template-columns: 1fr auto; align-items: center; min-height: 58px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 91%, transparent); backdrop-filter: blur(14px); }
   .brand { display: flex; align-items: baseline; gap: 8px; text-decoration: none; }
   .brand > span { color: var(--accent); font: 700 25px/1 var(--font-reading); }
   .brand strong { font: 700 14px/1 var(--font-ui); letter-spacing: -.02em; }
@@ -960,31 +1136,47 @@
   .top-actions button:hover, .top-actions a:hover { background: var(--paper-deep); color: var(--ink); }
   .top-actions span { color: var(--muted); }
   .top-actions .paused { color: var(--accept); font-weight: 700; }
-  .filterbar { position: sticky; z-index: 25; top: 58px; display: flex; align-items: center; gap: 5px; min-height: 46px; padding: 7px max(24px, calc((100vw - 1390px) / 2)); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); backdrop-filter: blur(12px); }
+  .top-actions .layout-toggle { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; color: var(--muted); }
+  .top-actions .layout-toggle.active { background: var(--paper-deep); color: var(--ink); }
+  .pane-icon { position: relative; display: block; box-sizing: border-box; width: 16px; height: 13px; border: 1.5px solid currentColor; border-radius: 2px; }
+  .pane-icon::before { position: absolute; top: 0; bottom: 0; width: 4px; background: currentColor; content: ''; opacity: .75; }
+  .pane-icon-left::before { left: 0; border-radius: 1px 0 0 1px; }
+  .pane-icon-right::before { right: 0; border-radius: 0 1px 1px 0; }
   .mode-hidden { display: none !important; }
-  .filterbar button { --category: var(--accent); display: flex; align-items: center; gap: 5px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 6px 8px; font: 600 10px/1 var(--font-ui); cursor: pointer; }
-  .filterbar button i { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--category) 18%, transparent); color: var(--category); font-style: normal; font-size: 9px; }
-  .filterbar button.off { opacity: .35; text-decoration: line-through; }
-  .filterbar button.active { border-color: var(--line-strong); background: var(--paper-deep); color: var(--ink); }
-  .filter-label { color: var(--muted); font: 700 9px/1 var(--font-ui); letter-spacing: .08em; text-transform: uppercase; margin-right: 4px; }
-  .filterbar label { display: flex; align-items: center; gap: 7px; margin-left: 7px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
-  .filterbar input { width: 70px; accent-color: var(--accent); }
-  .filterbar output { width: 16px; }
-  .spacer { flex: 1; }
-  .workbench { display: grid; grid-template-columns: 270px minmax(0, 1fr); align-items: start; }
-  main { min-width: 0; width: min(1190px, calc(100% - 36px)); margin: 0 auto; padding: 34px 0 80px; }
-  .workspace { display: grid; grid-template-columns: minmax(540px, 830px) minmax(260px, 350px); justify-content: center; gap: clamp(28px, 5vw, 72px); }
-  .document-column { min-width: 0; }
-  .document-meta { display: flex; justify-content: space-between; align-items: center; min-height: 34px; margin-bottom: 8px; color: var(--muted); font-size: 10px; }
-  .document-meta > div { display: flex; align-items: center; gap: 7px; }
-  .document-selectors { min-width: 0; flex-wrap: wrap; }
-  .document-selectors > span { color: var(--line-strong); }
-  .document-meta select, .document-meta button { border: 0; background: transparent; color: var(--muted); padding: 4px; font-size: 10px; cursor: pointer; }
-  .document-meta button:disabled { opacity: .35; cursor: default; }
-  .document-meta select { color: var(--ink-soft); font-weight: 600; }
-  .document-meta button:hover { color: var(--accent); }
-  .document-tools { padding-left: 6px; border-left: 1px solid var(--line); }
-  .editor-wrap { position: relative; }
+  .workbench { display: grid; grid-template-columns: var(--navigator-width) 6px minmax(0, 1fr); width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+  .workbench.navigator-hidden { grid-template-columns: minmax(0, 1fr); }
+  .navigator-pane { min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: hidden; }
+  .navigator-resizer { position: relative; z-index: 5; width: 6px; height: 100%; padding: 0; border: 0; border-radius: 0; background: color-mix(in srgb, var(--line) 55%, transparent); cursor: col-resize; outline: none; touch-action: none; }
+  .navigator-resizer::after { position: absolute; inset: 0 -3px; content: ''; }
+  .navigator-resizer:hover, .navigator-resizer:focus-visible { background: var(--accent); }
+  .navigator-resizer span { position: absolute; top: 50%; left: 2px; width: 2px; height: 38px; transform: translateY(-50%); border-radius: 2px; background: color-mix(in srgb, var(--muted) 58%, transparent); }
+  :global(body.resizing-navigator) { cursor: col-resize; user-select: none; }
+  main { display: flex; min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex-direction: column; overflow: hidden; }
+  .workspace { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 22vw, 420px); min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex: 1 1 auto; overflow: hidden; }
+  .workspace.review-hidden { grid-template-columns: minmax(0, 1fr); }
+  .document-column { min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: auto; padding: 0 clamp(16px, 1.8vw, 36px) 72px; scrollbar-gutter: stable; }
+  .editor-pane-header { position: sticky; z-index: 14; top: 0; display: flex; min-height: 58px; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 7px 0; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); backdrop-filter: blur(12px); }
+  .pane-identity { display: grid; min-width: 130px; flex: 1 1 180px; gap: 3px; }
+  .pane-identity small { color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
+  .pane-identity strong { overflow: hidden; color: var(--ink); font: 650 12px/1.2 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .pane-status { display: flex; flex: 0 1 auto; align-items: center; gap: 8px; color: var(--muted); font: 9px/1 var(--font-ui); white-space: nowrap; }
+  .pane-status span + span { padding-left: 8px; border-left: 1px solid var(--line); }
+  .pane-status .saving { color: var(--accent); }
+  .pane-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+  .history-actions, .zoom-actions { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); }
+  .pane-actions button, .pane-menu summary { display: grid; min-width: 28px; height: 29px; place-items: center; border: 0; background: transparent; color: var(--muted); font: 600 9px/1 var(--font-ui); cursor: pointer; }
+  .pane-actions button:hover, .pane-menu summary:hover { color: var(--accent); }
+  .pane-actions button:disabled { cursor: default; opacity: .28; }
+  .history-actions button { font-size: 16px; }
+  .zoom-actions button:nth-child(2) { min-width: 44px; border-right: 1px solid var(--line); border-left: 1px solid var(--line); }
+  .pane-menu { position: relative; }
+  .pane-menu summary { border: 1px solid var(--line); border-radius: 4px; background: var(--paper); list-style: none; }
+  .pane-menu summary::-webkit-details-marker { display: none; }
+  .pane-menu[open] summary { border-color: var(--accent); color: var(--accent); }
+  .pane-menu > div { position: absolute; z-index: 20; top: 34px; right: 0; display: grid; width: 170px; gap: 2px; padding: 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); box-shadow: 0 12px 30px rgb(35 30 22 / .16); }
+  .pane-menu > div button { display: block; width: 100%; padding: 0 8px; color: var(--ink-soft); text-align: left; }
+  .pane-menu > div button:hover { background: var(--paper-deep); }
+  .editor-wrap { position: relative; padding-top: 14px; }
   .editor-loading { display: grid; place-items: center; min-height: 68vh; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); font: 12px/1.5 var(--font-ui); }
   .selection-menu { position: sticky; z-index: 12; bottom: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 40px); margin: -58px auto 17px; padding: 5px; border: 1px solid #34322e; border-radius: 4px; background: #282723; color: #f7f3e9; box-shadow: 0 10px 30px rgb(0 0 0 / .2); }
   .selection-menu span { padding: 0 8px; color: #a9a69f; font-size: 9px; }
@@ -995,45 +1187,67 @@
   .custom-request input { min-width: 280px; flex: 1; border: 1px solid #55524c; border-radius: 2px; background: #f7f3e9; color: #25231f; padding: 7px 8px; font: 11px/1.2 var(--font-ui); }
   .custom-request .request-example { max-width: 260px; color: #d7d2c8; text-align: left; white-space: normal; }
   .custom-request button:disabled { opacity: .4; cursor: default; }
-  aside { min-width: 0; padding-top: 42px; }
-  aside > header { display: flex; align-items: end; justify-content: space-between; min-height: 30px; padding: 0 0 9px; border-bottom: 1px solid var(--line); }
-  aside > header div { display: flex; align-items: baseline; gap: 8px; }
-  aside > header span { font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .09em; }
-  aside > header strong, aside > header small { color: var(--muted); font: 500 9px/1 var(--font-ui); }
-  .cards { position: relative; min-height: 68vh; }
-  .cards.docked .card-slot { position: absolute; left: 0; width: 100%; transition: top .25s ease; }
-  .cards:not(.docked) { display: grid; gap: 10px; padding-top: 14px; }
-  aside.tray { background: color-mix(in srgb, var(--paper) 46%, transparent); border: 1px solid var(--line); border-radius: 4px; margin-top: 42px; padding: 18px; align-self: start; }
-  aside.tray > header { padding-top: 0; }
+  .inputs-panel { min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: auto; padding: 0 18px; border-left: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 84%, var(--paper)); scrollbar-gutter: stable; }
+  .inputs-panel-header { position: sticky; z-index: 4; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 58px; padding: 9px 0; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); }
+  .inputs-heading { min-width: 0; }
+  .inputs-heading > div { display: flex; align-items: baseline; gap: 8px; }
+  .inputs-heading span { font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .09em; }
+  .inputs-heading strong, .inputs-heading small { color: var(--muted); font: 500 9px/1.35 var(--font-ui); }
+  .inputs-heading small { display: block; margin-top: 4px; }
+  .inputs-header-actions { display: flex; align-items: center; gap: 5px; }
+  .inputs-header-actions button, .inputs-panel-footer button { border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 9px; font: 700 9px/1 var(--font-ui); cursor: pointer; white-space: nowrap; }
+  .inputs-header-actions button.active { border-color: var(--accent); color: var(--accent); }
+  .inputs-header-actions .review-document { border-color: var(--accent); background: var(--accent); color: white; }
+  .inputs-header-actions button:disabled { opacity: .42; cursor: default; }
+  .craft-activity { margin-top: 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--paper) 80%, transparent); padding: 9px 10px; }
+  .craft-activity > header { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-soft); font: 700 9px/1.2 var(--font-ui); }
+  .craft-activity > header span { color: var(--accent); }
+  .craft-activity p, .craft-activity small { margin: 5px 0 0; color: var(--muted); font: 9px/1.4 var(--font-ui); }
+  .craft-activity small { display: block; color: var(--reject); }
+  .activity-failed, .activity-partial { border-left-color: var(--reject); }
+  .activity-failed > header span, .activity-partial > header span { color: var(--reject); }
+  .activity-discarded, .activity-cancelled { border-left-color: #887b61; }
+  .inputs-controls { margin-top: 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); padding: 11px; }
+  .control-group + .control-group { margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); }
+  .control-group > header { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .control-group > header strong { color: var(--ink-soft); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
+  .control-group > header small { color: var(--muted); font: 8px/1 var(--font-ui); }
+  .category-controls { display: flex; flex-wrap: wrap; gap: 4px; }
+  .category-controls button { display: flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px; background: #fffefa; color: var(--ink-soft); padding: 5px 7px; font: 600 8px/1 var(--font-ui); cursor: pointer; }
+  .category-controls button i { color: var(--accent); font-style: normal; }
+  .category-controls button.off { opacity: .38; text-decoration: line-through; }
+  .density-control { display: grid; grid-template-columns: auto minmax(60px, 1fr) 20px; align-items: center; gap: 7px; margin-top: 9px; color: var(--muted); font: 8px/1 var(--font-ui); }
+  .density-control input { width: 100%; accent-color: var(--accent); }
+  .control-explanation { margin: -2px 0 8px; color: var(--muted); font: 8px/1.45 var(--font-ui); }
+  .source-controls { display: grid; gap: 5px; }
+  .source-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 5px; }
+  .source-row:has(.configure-source) { grid-template-columns: minmax(0, 1fr) auto auto auto; }
+  .source-row > div { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 5px; align-items: baseline; }
+  .source-row > div b { grid-row: 1 / span 2; color: var(--accent); font: 700 9px/1 var(--font-ui); }
+  .source-row > div span { overflow: hidden; color: var(--ink-soft); font: 600 9px/1.2 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .source-row > div small { overflow: hidden; color: var(--muted); font: 7px/1.2 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .source-row > button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--muted); padding: 5px 6px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .source-row > button.active { border-color: var(--accept); background: color-mix(in srgb, var(--accept) 9%, transparent); color: var(--accept); }
+  .source-row > button:disabled { opacity: .32; cursor: default; }
+  .source-row > .configure-source { color: var(--accent); }
+  .cards { display: grid; gap: 10px; min-height: 0; padding-top: 14px; }
+  .card-slot { position: relative; }
+  .card-slot.dragging { opacity: .45; }
+  .card-slot.drop-before::before, .card-slot.drop-after::after { position: absolute; z-index: 3; right: 0; left: 0; height: 3px; border-radius: 3px; background: var(--accent); content: ''; pointer-events: none; }
+  .card-slot.drop-before::before { top: -6px; }
+  .card-slot.drop-after::after { bottom: -6px; }
   .empty-notes { display: grid; place-items: center; text-align: center; padding: 80px 24px; color: var(--muted); }
   .empty-notes > span { display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; color: var(--accept); }
   .empty-notes p { margin: 12px 0 5px; color: var(--ink-soft); font: 500 13px/1 var(--font-ui); }
   .empty-notes small { max-width: 230px; font: 10px/1.5 var(--font-ui); }
   .key-help { color: var(--muted); font: 9px/1.6 var(--font-ui); text-align: center; }
   kbd { display: inline-block; min-width: 18px; padding: 1px 4px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 3px; background: var(--paper); font: 8px/1.4 var(--font-mono); }
-  .source-dock { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 11px; }
-  .source-heading, .source-summary { display: flex; align-items: center; justify-content: space-between; }
-  .source-heading span { color: var(--muted); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .1em; }
-  .source-heading button { border: 0; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
-  .source-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-  .source-buttons button { display: grid; grid-template-columns: 18px auto; grid-template-areas: "icon code" "label label" "state state"; align-items: center; min-width: 115px; border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 9px; text-align: left; cursor: pointer; }
-  .source-buttons .state-icon { grid-area: icon; color: var(--accent); }
-  .source-buttons b { grid-area: code; font-size: 11px; }
-  .source-buttons button > span:nth-of-type(2) { grid-area: label; margin-top: 5px; font-size: 9px; }
-  .source-buttons small { grid-area: state; margin-top: 3px; color: var(--accent); font-size: 8px; text-transform: uppercase; }
-  .source-buttons button.invisible { border-style: dashed; opacity: .58; }
-  .source-buttons button.invisible .state-icon, .source-buttons button.invisible small { color: #887b61; }
-  .source-buttons button.off { background: transparent; opacity: .42; filter: grayscale(1); }
-  .source-buttons button.unavailable { border-style: dotted; opacity: .66; filter: grayscale(.65); }
-  .source-buttons button.unavailable .state-icon, .source-buttons button.unavailable small { color: var(--reject); }
-  .source-summary { color: var(--muted); font-size: 9px; }
-  .source-summary strong { color: var(--ink-soft); }
-  .source-summary em { font-style: normal; opacity: .7; }
-  .provider-config { margin-left: auto; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 10px; font: 700 9px/1 var(--font-ui); cursor: pointer; }
-  .scan { border: 0; border-radius: 3px; background: var(--accent); color: white; padding: 8px 12px; font: 700 9px/1 var(--font-ui); cursor: pointer; }
-  .scan:disabled { opacity: .45; cursor: wait; }
-  .legend { max-width: 680px; color: var(--muted); font: 9px/1.5 var(--font-ui); }
-  .ledger-panel { margin-top: 28px; }
+  .inputs-panel-footer { position: sticky; z-index: 4; bottom: 0; display: flex; align-items: center; gap: 5px; margin-top: 14px; padding: 10px 0 12px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); }
+  .inputs-panel-footer > div { min-width: 0; flex: 1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 6px; }
+  .inputs-panel-footer strong { color: var(--ink-soft); font: 700 9px/1 var(--font-mono); }
+  .inputs-panel-footer span { color: var(--muted); font: 8px/1 var(--font-ui); }
+  .inputs-panel-footer small { flex-basis: 100%; overflow: hidden; color: var(--muted); font: 7px/1.35 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .ledger-panel { flex: 0 0 min(280px, 34vh); min-height: 0; overflow: auto; border-top: 1px solid var(--line); }
   .pause-banner { position: fixed; z-index: 45; top: 66px; left: 50%; transform: translateX(-50%); border: 1px solid #b5cbbf; border-radius: 3px; background: #eff8f2; color: #3f6250; padding: 8px 13px; box-shadow: 0 8px 30px rgb(20 45 30 / .12); font-size: 10px; }
   .notice, .error { position: fixed; z-index: 60; right: 18px; bottom: 18px; display: flex; gap: 16px; align-items: center; max-width: 420px; border: 1px solid #27433a; border-radius: 3px; background: #1f302a; color: #edf5f1; padding: 11px 13px; box-shadow: 0 12px 30px rgb(0 0 0 / .18); font-size: 10px; cursor: pointer; }
   .error { background: #5c2925; border-color: #743731; }
@@ -1100,20 +1314,15 @@
   .new-context > button:disabled { opacity: .45; cursor: default; }
   .new-context::after { display: block; clear: both; content: ''; }
   @media (max-width: 980px) {
-    .workbench { grid-template-columns: 230px minmax(0, 1fr); }
-    .workspace { grid-template-columns: minmax(0, 1fr); }
-    aside { padding-top: 8px; }
-    .cards.docked { display: grid; gap: 10px; min-height: 0; padding-top: 12px; }
-    .cards.docked .card-slot { position: static; }
+    .workspace { grid-template-columns: minmax(0, 1fr) minmax(270px, 36vw); }
+    .workspace.review-hidden { grid-template-columns: minmax(0, 1fr); }
     .brand small { display: none; }
-    .filterbar { overflow-x: auto; }
   }
   @media (max-width: 680px) {
     .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
     .top-actions button:nth-last-child(n+3), .top-actions a { display: none; }
-    .filterbar { top: 58px; }
-    .workbench { grid-template-columns: 1fr; }
-    main { width: calc(100% - 20px); padding-top: 18px; }
+    .document-column { padding: 0 12px 48px; }
+    .inputs-panel { padding-inline: 11px; }
     .form-grid { grid-template-columns: 1fr; }
     .context-fields { grid-template-columns: 1fr; }
   }

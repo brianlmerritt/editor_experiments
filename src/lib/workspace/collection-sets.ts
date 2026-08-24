@@ -23,7 +23,7 @@ export const collectionSets: CollectionSetDefinition[] = [
   {
     id: 'core-story',
     name: 'Core story',
-    description: 'The broad containers used to organise a manuscript.',
+    description: 'The broad Material types used to organise a manuscript.',
     items: [
       { id: 'chapters', name: 'Chapters', singularName: 'Chapter', icon: 'folder', numbering: { enabled: true, start: 1 } },
       { id: 'scenes', name: 'Scenes', singularName: 'Scene', icon: 'file', numbering: { enabled: true, start: 1 } }

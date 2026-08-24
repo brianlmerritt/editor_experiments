@@ -48,6 +48,10 @@ its formatting, its inputs, and undo/redo.
 14. The Navigator has remembered **Traditional** and **Context** projections.
     Traditional view is structurally stable; Context view responds to the focused
     pane and selection without mutating canonical Nodes or relationships.
+15. The right-side **Inputs panel** owns review initiation and presentation. Svelte
+    owns craft activity, run, and Input state; the facade executes and persists but
+    does not decide activity status. Source participation in future requests is
+    separate from source/category/density filters over existing Inputs.
 
 ## Authority and boundaries
 
@@ -161,9 +165,11 @@ reducer—not individual components. Cardinality and endpoint constraints remain
 deliberately deferred until the initial writing vocabularies have been exercised. A
 domain graph does not imply a graph database.
 
-A Collection is itself a stable, content-bearing Node as well as an ordered container.
-Selecting it opens its own content; expanding it reveals its children. Collection and
-child identities do not include their displayed ordinal numbers. Optional numbering
+A Material type is itself a stable, content-bearing Node as well as an ordered
+container. Selecting it opens its own content; expanding it reveals its children. The
+current facade payload retains the internal `CollectionDefinition` name for backward
+compatibility. Material type and child identities do not include their displayed
+ordinal numbers. Optional numbering
 is derived from sibling order and a configured start value, while an optional title is
 stored independently. Nodes from one Collection may still appear beneath a Node from
 another Collection through primary containment.
@@ -357,6 +363,13 @@ state, source, author/model, priority, tag, assignee, creation revision, and whe
 the target remains attached. These indexes are projections of `inputs`, never the
 canonical records.
 
+A document review is one user activity that may fan out into several facade requests.
+Each persisted `CraftRun` therefore carries a shared `batchId` and an explicit
+`document` or `selection` scope. Svelte derives one aggregate activity status from
+those records, including request, proposal, running, and unrecovered-error counts.
+Individual paragraph calls remain diagnostic detail rather than becoming separate
+user-facing jobs.
+
 ## State-held attachment behaviour
 
 The reducer implements a small finite vocabulary of target transformations. Workspace
@@ -515,11 +528,43 @@ format ranges shrink, split, or disappear according to their behaviour profile. 
 input manager exposes pending and historical states rather than leaving them only in
 the margin.
 
-The document's `extensions.margin_note` payload stores current runs, inputs, formats,
-behaviours, and workspace revision in durable document versions. `EditorShell` owns a
-transient ProseMirror view only. It reports a transaction to Svelte before rendering,
+The document's `extensions.margin_note` payload stores a neutral structured document,
+current runs, inputs, formats, behaviours, and workspace revision in durable document
+versions. Legacy string documents migrate to paragraph blocks without a destructive
+database migration. The `content` string remains a derived plain-text representation
+for search, word counts, AI and export compatibility; it is not the rich-document
+authority. `EditorShell` owns a transient ProseMirror view only. It reports every
+document transaction—including formatting-only changes—to Svelte before rendering,
 then receives Svelte's transformed input and format projection in that same editor
 transaction. It does not save, fork, export, or dispatch AI from editor-held text.
+
+Clipboard HTML is parsed through the explicit editor schema and converted to the
+neutral Svelte document. The first supported rich-paste set includes headings,
+paragraphs, block quotes, bullet and numbered lists, bold, italic, underline,
+strikethrough, links, tables, and images. Pasted image bytes are stored in the
+workspace asset repository through the facade; Svelte owns the image node, durable
+asset identity, metadata and lifecycle, while ProseMirror receives only a renderable
+projection. A rich paste never assumes that an unrelated clipboard image file is the
+source of an HTML image. This avoids treating the PNG/TIFF whole-selection preview
+that macOS Word may place on the clipboard as an embedded document image. Exact
+base64 HTML images are imported; inaccessible `file:` references remain unresolved
+instead of being guessed. Advanced Word layout, merged-cell tools, image cropping and
+full `.docx` import remain outside this slice.
+
+The initial formatting controls use ProseMirror commands only to calculate editor
+transactions for paragraph and heading styles, bold, italic, underline,
+strikethrough, bullet and numbered lists, block quotes, links, and clearing
+formatting. `EditorShell` immediately submits each transaction to the Svelte workspace
+reducer; ProseMirror does not retain a separate authoritative formatting history.
+Formatting changes therefore persist and undo through the same canonical document
+path as typing and paste.
+
+Clipboard list normalisation runs on the parsed ProseMirror slice before it becomes a
+Svelte transaction. Existing semantic lists lose one redundant visible marker from
+each matching item; runs of at least two recognised bullet or sequential-number
+paragraphs become semantic list nodes. Hyphen-led paragraphs are deliberately not
+inferred as lists. The same neutral normaliser powers the explicit **Fix list** command
+for selected legacy material, so paste and repair do not maintain separate list models.
 
 `WorkspaceFacade.commit` durably saves the Svelte snapshot and then passes the
 acknowledged snapshot to a private Yjs/IndexedDB document driver. Yjs is a write-behind
@@ -541,17 +586,29 @@ is the only operation that deliberately clears the project's working material an
 recreates its empty fixed roots.
 
 This remains a proof of concept rather than the completed model above. The Navigator,
-protected content-bearing Spine and Todos, user-defined content-bearing Collections,
-stable Nodes, project-owned relationship definitions, and confirmed scoped graph
+protected content-bearing Spine and Todos, user-defined content-bearing Material,
+stable Nodes, project-owned relationship definitions, and confirmed graph
 relationships now have a first vertical slice. Relationship definitions can be
 installed from editable writing sets or created directly; installing vocabulary does
-not create links or content.
+not create links or content. New links consist of two Material endpoints, a selected
+relationship type, and an optional explanatory note. Legacy applicability scope is
+preserved on read but is not exposed by the initial relationship workflow.
 Fork-aware graph variance and the terminal-style split-pane projection are not
 implemented; history stores complete snapshots instead of compact forward and inverse
 patches; current session undo is not restored after reload; and collaborative
 transaction reconciliation is not implemented. Regression evidence and the exact next cases are
 recorded in [CRAFT_REVISION_QA.md](./CRAFT_REVISION_QA.md). The next vertical slice is
 defined in [NAVIGATION.md](./NAVIGATION.md).
+
+Workbench geometry, editor zoom, and pane visibility are deliberately outside the
+persistence facade's document model. Svelte Rune state owns the live Navigator width,
+view-only editor zoom, and left/right pane visibility, with local browser persistence
+as a UI preference. The application shell is fixed to the visual viewport so it
+cannot inherit a smaller or rounded parent boundary. The current single-editor layout
+gives the document column its own vertical scroll surface and treats the Navigator and
+Inputs/review panel as independently scrolling, reclaimable side panes. A future split-pane manager must remain a projection over the same Svelte
+workspace aggregate; it must not make CSS layout, ProseMirror, or a persistence driver
+an alternative source of truth.
 
 ## Intentionally deferred
 
