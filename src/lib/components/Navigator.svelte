@@ -109,6 +109,12 @@
     return labels.length ? labels.join(', ') : 'Work';
   }
 
+  function runProjectAction(event: MouseEvent, action: () => void): void {
+    const button = event.currentTarget;
+    if (button instanceof HTMLElement) button.closest('details')?.removeAttribute('open');
+    action();
+  }
+
   function previewChildren(node: WorkspaceDocument, path: string[]): WorkspaceDocument[] {
     const excluded = new Set(path);
     return childrenOf(node.id).filter((child) => !excluded.has(child.id)).slice(0, 3);
@@ -547,9 +553,9 @@
       <details class="project-menu">
         <summary aria-label="Project actions" title="Project actions">•••</summary>
         <div>
-          <button type="button" onclick={onCreateProject}>Create project</button>
-          <button type="button" onclick={onRenameProject}>Rename project</button>
-          <button type="button" class="danger" onclick={onResetProject}>Start over</button>
+          <button type="button" onclick={(event) => runProjectAction(event, onCreateProject)}>Create project</button>
+          <button type="button" onclick={(event) => runProjectAction(event, onRenameProject)}>Rename project</button>
+          <button type="button" class="danger" onclick={(event) => runProjectAction(event, onResetProject)}>Start over</button>
         </div>
       </details>
     </div>

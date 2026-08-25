@@ -1,4 +1,6 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
+import { FacadeAIInteractionService } from '$lib/ai/service';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
@@ -33,6 +35,26 @@ const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', vers
 const attachmentBehaviourVersion = 2;
 const authorityVersion = 2;
 
+function isInputProposalPayload(value: unknown): value is InputProposal {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proposal = value as Partial<InputProposal>;
+  return typeof proposal.proposalId === 'string'
+    && typeof proposal.source === 'string'
+    && typeof proposal.sourceNumber === 'number'
+    && (proposal.sourceKind === 'local' || proposal.sourceKind === 'ai')
+    && Number.isInteger(proposal.from)
+    && Number.isInteger(proposal.to)
+    && typeof proposal.sourceText === 'string'
+    && (proposal.type === 'replacement' || proposal.type === 'insertion' || proposal.type === 'annotation')
+    && categories.includes(proposal.category as Category)
+    && typeof proposal.comment === 'string'
+    && Array.isArray(proposal.variants)
+    && proposal.variants.every((variant) => typeof variant === 'string')
+    && typeof proposal.confidence === 'number'
+    && Number.isFinite(proposal.confidence)
+    && Boolean(proposal.provenance && typeof proposal.provenance === 'object');
+}
+
 interface NavigatorHistorySnapshot {
   navigator: NavigatorProjectState;
   documents: WorkspaceDocument[];
@@ -58,6 +80,7 @@ export class WorkspaceState {
   inputs = $state<Suggestion[]>([]);
   formats = $state<FormatAttachment[]>([]);
   runs = $state<CraftRun[]>([]);
+  activities = $state<AIActivityRecord[]>([]);
   behaviours = $state<Record<string, AttachmentBehaviour>>({ ...defaultAttachmentBehaviours });
   workspaceRevision = $state(0);
   documentSnapshot = $state<EditorDocumentSnapshot | null>(null);
@@ -89,10 +112,15 @@ export class WorkspaceState {
   private documentSave: Promise<void> = Promise.resolve();
   private initialized = false;
 
+  private readonly aiService: AIInteractionService;
+
   constructor(
     private readonly facade: WorkspaceFacade = workspaceFacade,
+    aiService?: AIInteractionService,
     private readonly settingsState: SettingsState = settings
-  ) {}
+  ) {
+    this.aiService = aiService ?? new FacadeAIInteractionService(facade);
+  }
 
   get suggestions(): Suggestion[] { return this.inputs; }
   set suggestions(value: Suggestion[]) { this.inputs = value; }
@@ -583,14 +611,179 @@ export class WorkspaceState {
     this.categoryVisibility[category] = !this.categoryVisibility[category];
   }
 
+  private beginAIActivity(prompt: TaskPrompt, scope: 'document' | 'selection'): AIActivityRecord {
+    const intent: AIInteractionIntent = prompt.id === 'sentinel' ? 'review' : 'revise';
+    const activity: AIActivityRecord = {
+      id: makeId('activity'),
+      documentId: this.branchId,
+      scope,
+      intent,
+      actionId: prompt.id,
+      actionVersion: prompt.version,
+      state: 'running',
+      runIds: [],
+      createdAt: new Date().toISOString()
+    };
+    this.activities = [...this.activities, activity].slice(-100);
+    return activity;
+  }
+
+  private refreshAIActivity(activityId: string): void {
+    const activity = this.activities.find((item) => item.id === activityId);
+    if (!activity) return;
+    const runs = this.runs.filter((run) => run.activityId === activityId || (!run.activityId && run.batchId === activityId));
+    const running = runs.some((run) => run.state === 'running' || run.state === 'queued');
+    const completed = runs.some((run) => run.state === 'completed');
+    const failed = runs.some((run) => run.state === 'failed');
+    const discarded = runs.some((run) => run.state === 'discarded');
+    const cancelled = runs.some((run) => run.state === 'cancelled');
+    const state = running ? 'running'
+      : completed && (failed || discarded || cancelled) ? 'partial'
+        : failed ? 'failed'
+          : discarded ? 'discarded'
+            : cancelled ? 'cancelled'
+              : 'completed';
+    this.activities = this.activities.map((item) => item.id === activityId ? {
+      ...item,
+      state,
+      runIds: runs.map((run) => run.id),
+      completedAt: state === 'running' ? undefined : new Date().toISOString()
+    } : item);
+  }
+
+  private actionSnapshot(prompt: TaskPrompt, intent: AIInteractionIntent): AIActionSnapshot {
+    return {
+      id: prompt.id,
+      name: prompt.name,
+      version: prompt.version,
+      intent,
+      instruction: prompt.instruction
+    };
+  }
+
+  private contextManifest(action: AIActionSnapshot, target: AIContextManifest['target']): AIContextManifest {
+    const items: AIContextItem[] = [
+      {
+        id: `action:${action.id}:v${action.version}`,
+        sourceType: 'action',
+        sourceId: action.id,
+        sourceRevision: action.version,
+        role: 'protocol',
+        title: action.name,
+        content: action.instruction,
+        reason: 'Selected AI action',
+        inclusion: 'required',
+        sent: true
+      },
+      {
+        id: `brief:v${this.brief.version}`,
+        sourceType: 'spine',
+        sourceId: 'writing-brief',
+        sourceRevision: this.brief.version,
+        role: 'constraint',
+        title: 'Writing brief',
+        content: `Form: ${this.brief.form}\nPOV: ${this.brief.pov}\nTense: ${this.brief.tense}\nDistance: ${this.brief.distance}\nCanon: ${this.brief.canon}`,
+        reason: 'Current writing constraints',
+        inclusion: 'required',
+        sent: true
+      },
+      {
+        id: `target:${target.documentId}:${target.sourceRevision}`,
+        sourceType: 'manuscript',
+        sourceId: target.documentId,
+        sourceRevision: target.sourceRevision,
+        role: 'target',
+        title: this.currentDocument?.title ?? 'Current passage',
+        content: target.exactText,
+        reason: 'Exact captured request target',
+        inclusion: 'required',
+        sent: true
+      }
+    ];
+    const addDocument = (document: WorkspaceDocument | null, sourceType: 'spine' | 'material', role: 'constraint' | 'fact', reason: string) => {
+      if (!document || document.id === target.documentId || !document.content.trim()) return;
+      items.push({
+        id: `${sourceType}:${document.id}:${document.revision}`,
+        sourceType,
+        sourceId: document.id,
+        sourceRevision: document.revision,
+        role,
+        title: document.title,
+        content: document.content,
+        reason,
+        inclusion: 'resolved',
+        sent: true
+      });
+    };
+    addDocument(this.spineNode, 'spine', 'constraint', 'Protected project Spine');
+    if (this.navigatorFocusNode?.role !== 'spine') addDocument(this.navigatorFocusNode, 'material', 'fact', 'Selected Navigator Material');
+    for (const bucket of this.currentContext) {
+      const role = bucket.role === 'constraint' || bucket.role === 'fact' || bucket.role === 'guidance' || bucket.role === 'reference'
+        ? bucket.role
+        : 'reference';
+      items.push({
+        id: `material:${bucket.id}:${bucket.revision}`,
+        sourceType: 'material',
+        sourceId: bucket.id,
+        sourceRevision: bucket.revision,
+        role,
+        title: bucket.title,
+        content: bucket.content,
+        reason: bucket.scope === 'project' ? 'Applicable project context' : 'Applicable document context',
+        inclusion: 'resolved',
+        sent: true
+      });
+    }
+    for (const relationship of this.selectedNodeRelations) {
+      items.push({
+        id: `relationship:${relationship.relationshipId}:${this.navigator.revision}`,
+        sourceType: 'relationship',
+        sourceId: relationship.relationshipId,
+        sourceRevision: this.navigator.revision,
+        role: 'fact',
+        title: relationship.label,
+        content: `${relationship.label}: ${relationship.node.title}${relationship.note ? `\n${relationship.note}` : ''}`,
+        reason: 'Direct confirmed relationship of the selected Navigator item',
+        inclusion: 'resolved',
+        sent: true
+      });
+    }
+    for (const todo of this.selectedNodeTodos.filter((item) => item.state === 'open')) {
+      const todoDocument = this.todoNode(todo.id);
+      items.push({
+        id: `todo:${todo.id}:${this.navigator.revision}`,
+        sourceType: 'todo',
+        sourceId: todo.id,
+        sourceRevision: todoDocument?.revision ?? this.navigator.revision,
+        role: 'guidance',
+        title: todo.title,
+        content: todoDocument?.content.trim() || todo.title,
+        reason: 'Open Todo attached to the selected Navigator item',
+        inclusion: 'resolved',
+        sent: true
+      });
+    }
+    return {
+      workspaceRevision: this.workspaceRevision,
+      forkId: this.branchId,
+      target,
+      items: [...new Map(items.map((item) => [item.id, item])).values()]
+    };
+  }
+
   async runCraftPass(prompt: TaskPrompt): Promise<Suggestion[]> {
     if (!this.documentSnapshot) return [];
-    const batchId = makeId('craft');
+    const activity = this.beginAIActivity(prompt, 'document');
     const ranges = documentCraftParagraphs(this.documentSnapshot);
+    if (!ranges.length) {
+      this.refreshAIActivity(activity.id);
+      await this.persistDomainState('Complete empty AI activity');
+      return [];
+    }
     const results = await Promise.all(ranges.map((range) => this.requestInputRun(
       { ...range, prompt },
       `${this.branchId}:paragraph:${range.from}:${range.to}`,
-      { batchId, scope: 'document' }
+      activity
     )));
     return results.flat();
   }
@@ -602,35 +795,54 @@ export class WorkspaceState {
       this.notice = 'The selection changed before the run began. Select it again.';
       return [];
     }
+    const activity = this.beginAIActivity(prompt, 'selection');
     return this.requestInputRun(
       { ...range, prompt },
       `${this.branchId}:selection:${range.from}:${range.to}`,
-      { batchId: makeId('craft'), scope: 'selection' }
+      activity
     );
   }
 
   private async requestInputRun(
     input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>,
     rangeKey: string,
-    activity: { batchId: string; scope: 'document' | 'selection' }
+    activity: AIActivityRecord
   ): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
     const replacedRunId = this.dispatchRunIds.get(rangeKey);
-    if (replacedRunId) this.runs = this.runs.map((run) => run.id === replacedRunId && run.state === 'running'
-      ? { ...run, state: 'cancelled', completedAt: new Date().toISOString() }
-      : run);
+    const replacedRun = replacedRunId ? this.runs.find((run) => run.id === replacedRunId) : undefined;
+    if (replacedRunId) {
+      this.runs = this.runs.map((run) => run.id === replacedRunId && run.state === 'running'
+        ? { ...run, state: 'cancelled', completedAt: new Date().toISOString() }
+        : run);
+      if (replacedRun?.activityId) this.refreshAIActivity(replacedRun.activityId);
+    }
     const controller = new AbortController();
-    const run: CraftRun = {
-      id: makeId('run'),
-      batchId: activity.batchId,
-      scope: activity.scope,
+    const intent = activity.intent;
+    const action = this.actionSnapshot(input.prompt, intent);
+    const capturedTarget = {
       documentId: this.branchId,
       sourceRevision: this.workspaceRevision,
       target: textTarget(this.branchId, input.from, input.to, input.text),
+      exactText: input.text
+    };
+    const context = this.contextManifest(action, capturedTarget);
+    const run: CraftRun = {
+      id: makeId('run'),
+      batchId: activity.id,
+      activityId: activity.id,
+      scope: activity.scope,
+      documentId: this.branchId,
+      sourceRevision: this.workspaceRevision,
+      target: capturedTarget.target,
       originalText: input.text,
       promptId: input.prompt.id,
       promptVersion: input.prompt.version,
+      intent,
+      requestedContextManifest: context,
+      contextManifest: context,
+      permittedProposalKinds: ['craft_input'],
       sourceStates: { ...this.sourceStates },
       state: 'running',
       proposalIds: [],
@@ -638,29 +850,63 @@ export class WorkspaceState {
       createdAt: new Date().toISOString()
     };
     this.runs = [...this.runs, run].slice(-200);
+    this.activities = this.activities.map((item) => item.id === activity.id
+      ? { ...item, runIds: [...item.runIds, run.id] }
+      : item);
     this.dispatches.set(rangeKey, controller);
     this.dispatchRunIds.set(rangeKey, run.id);
     this.generating = true;
     await this.log('suggestions_requested', { runId: run.id, batchId: run.batchId, scope: run.scope, range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
-      const request: GenerationRequest = {
-        ...input,
+      const request: AIInteractionRequest = {
+        activityId: activity.id,
+        runId: run.id,
         sessionId: this.sessionId,
-        branchId: this.branchId,
-        brief: this.brief,
-        sourceStates: { ...this.sourceStates },
-        mode: this.mode,
-        context: this.currentContext.map((bucket) => ({
-          title: bucket.title,
-          role: bucket.role,
-          scope: bucket.scope,
-          content: bucket.content,
-          revision: bucket.revision
-        }))
+        projectId: this.projectId,
+        documentId: this.branchId,
+        intent,
+        action,
+        target: capturedTarget,
+        context,
+        permittedProposalKinds: ['craft_input'],
+        sources: sourceCatalog.map((source) => ({
+          sourceId: source.id,
+          participation: this.sourceStates[source.id] ?? 'off',
+          model: this.settingsState.sourceAvailability[source.id]?.model
+        })),
+        generation: {
+          brief: { ...this.brief },
+          mode: this.mode
+        }
       };
-      const data = await this.facade.requestInputs(request, controller.signal);
-      const outputDiagnostics = data.errors.filter((item) => item.kind === 'provider_output');
-      const actionableErrors = data.errors.filter((item) => item.kind !== 'provider_output');
+      const response = await this.aiService.execute(request, controller.signal);
+      const contractDiagnostics: AIServiceDiagnostic[] = [];
+      if (!validReturnedContext(request.context, response.context)) {
+        contractDiagnostics.push({
+          source: 'interaction_service',
+          kind: 'contract' as const,
+          recovered: false,
+          outcome: 'rejected' as const,
+          message: 'AI service returned hidden, altered, or incomplete Writing Context.'
+        });
+      }
+      const proposals: InputProposal[] = [];
+      for (const proposal of response.proposals) {
+        if (!request.permittedProposalKinds.includes(proposal.kind) || proposal.kind !== 'craft_input' || !isInputProposalPayload(proposal.payload)) {
+          contractDiagnostics.push({
+            source: 'interaction_service',
+            kind: 'contract' as const,
+            recovered: false,
+            outcome: 'rejected' as const,
+            message: `AI service returned an invalid or unpermitted proposal kind: ${proposal.kind || '(missing)'}.`
+          });
+          continue;
+        }
+        proposals.push(proposal.payload);
+      }
+      const diagnostics = [...response.diagnostics, ...contractDiagnostics];
+      const outputDiagnostics = diagnostics.filter((item) => item.kind === 'provider_output');
+      const actionableErrors = diagnostics.filter((item) => item.kind !== 'provider_output');
       for (const diagnostic of outputDiagnostics) {
         console.warn('[Margin Note] Malformed provider output', {
           runId: run.id,
@@ -676,23 +922,26 @@ export class WorkspaceState {
         : null;
       if (!currentRun || currentRun.state !== 'running' || !target || currentText !== currentRun.originalText) {
         this.runs = this.runs.map((item) => item.id === run.id
-          ? { ...item, state: 'discarded', errors: data.errors, completedAt: new Date().toISOString() }
+          ? { ...item, state: 'discarded', errors: diagnostics, completedAt: new Date().toISOString() }
           : item);
+        this.refreshAIActivity(activity.id);
         await this.persistDomainState('Discard stale craft run');
         this.notice = 'The passage changed while the craft pass was running, so its proposals were safely discarded.';
         return [];
       }
-      const adopted = data.proposals.flatMap((proposal) => {
+      const adopted = (contractDiagnostics.some((diagnostic) => diagnostic.message.includes('Writing Context')) ? [] : proposals).flatMap((proposal) => {
         const inputRecord = this.adoptProposal(proposal, currentRun, target.start);
         return inputRecord ? [inputRecord] : [];
       });
       this.runs = this.runs.map((item) => item.id === run.id ? {
         ...item,
-        state: data.errors.some((error) => !error.recovered) && !adopted.length ? 'failed' : 'completed',
+        state: diagnostics.some((error) => !error.recovered) && !adopted.length ? 'failed' : 'completed',
         proposalIds: adopted.map((item) => item.id),
-        errors: data.errors,
+        errors: diagnostics,
+        contextManifest: response.context,
         completedAt: new Date().toISOString()
       } : item);
+      this.refreshAIActivity(activity.id);
       await this.coalesceSuggestions([...this.suggestions, ...adopted]);
       for (const suggestion of adopted) {
         await this.log(suggestion.state === 'hidden' ? 'generated_hidden' : 'suggestion_generated', {
@@ -705,6 +954,7 @@ export class WorkspaceState {
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         this.runs = this.runs.map((item) => item.id === run.id ? { ...item, state: 'cancelled', completedAt: new Date().toISOString() } : item);
+        this.refreshAIActivity(activity.id);
         await this.persistDomainState('Cancel craft run');
         return [];
       }
@@ -714,6 +964,7 @@ export class WorkspaceState {
         errors: [{ source: 'transport', message: error instanceof Error ? error.message : 'Input request failed' }],
         completedAt: new Date().toISOString()
       } : item);
+      this.refreshAIActivity(activity.id);
       await this.persistDomainState('Record failed craft run');
       this.lastError = error instanceof Error ? error.message : 'Suggestion request failed';
       return [];
@@ -753,7 +1004,14 @@ export class WorkspaceState {
       state: 'pending',
       order: from,
       createdAt: new Date().toISOString(),
-      provenance: { ...proposal.provenance }
+      provenance: {
+        ...proposal.provenance,
+        activityId: run.activityId ?? run.batchId,
+        runId: run.id,
+        actionId: run.promptId,
+        actionVersion: run.promptVersion,
+        contextManifestId: run.id
+      }
     };
   }
 
@@ -906,7 +1164,7 @@ export class WorkspaceState {
     this.saveNavigatorMemory();
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
     this.refreshBranches();
-    await this.switchBranch(document.id);
+    await this.openNavigatorNode(document.id);
   }
 
   async createDocument(title: string): Promise<WorkspaceDocument> {
@@ -944,7 +1202,7 @@ export class WorkspaceState {
     this.refreshBranches();
     const spine = this.spineNode;
     if (!spine) throw new Error('Reset project has no Spine');
-    await this.switchBranch(spine.id);
+    await this.openNavigatorNode(spine.id);
   }
 
   async createCollection(input: {
@@ -1828,6 +2086,7 @@ export class WorkspaceState {
     });
     this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
     this.runs = Array.isArray(value?.runs) ? value.runs as CraftRun[] : [];
+    this.activities = Array.isArray(value?.activities) ? value.activities as AIActivityRecord[] : [];
     const storedBehaviours = value?.behaviours && typeof value.behaviours === 'object' && !Array.isArray(value.behaviours)
       ? value.behaviours as Record<string, AttachmentBehaviour>
       : {};
@@ -1851,6 +2110,7 @@ export class WorkspaceState {
         document: this.richDocument,
         formats: this.formats,
         runs: this.runs,
+        activities: this.activities,
         behaviours: this.behaviours
       }))
     } as WorkspaceDocument['extensions'];

@@ -1,4 +1,5 @@
 import { textTarget, type TargetSet } from '$lib/workspace/attachments';
+import type { AIContextManifest, AIInteractionIntent } from '$lib/ai/contracts';
 
 export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
 export type Category = (typeof categories)[number];
@@ -49,7 +50,7 @@ export interface InputProposal {
   provenance: Provenance;
 }
 
-export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration';
+export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration' | 'contract';
 
 export interface InputError {
   source: string;
@@ -71,6 +72,11 @@ export interface Provenance {
   outputTokens?: number;
   providerAttempts?: number;
   costUsd?: number;
+  activityId?: string;
+  runId?: string;
+  actionId?: string;
+  actionVersion?: number;
+  contextManifestId?: string;
 }
 
 export interface InputEvent {
@@ -187,6 +193,7 @@ export type RunState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelle
 export interface CraftRun {
   id: string;
   batchId?: string;
+  activityId?: string;
   scope?: 'document' | 'selection';
   documentId: string;
   sourceRevision: number;
@@ -194,6 +201,10 @@ export interface CraftRun {
   originalText: string;
   promptId: string;
   promptVersion: number;
+  intent?: AIInteractionIntent;
+  requestedContextManifest?: AIContextManifest;
+  contextManifest?: AIContextManifest;
+  permittedProposalKinds?: string[];
   sourceStates: Record<string, SourceState>;
   state: RunState;
   proposalIds: string[];

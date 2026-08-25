@@ -604,7 +604,17 @@ full-width filter strip and manuscript Sources footer must not return.
 
 The first slice deliberately reviews only the current document with the existing
 sentinel instruction. Recipe selection, arbitrary graph scope, automatic context
-assembly, and coordinated multi-pass review remain later AI-system decisions.
+assembly, and coordinated multi-pass review remain later AI-system implementation.
+Their authority, context-manifest, request, proposal, and adoption boundary is now
+specified in [AI_BOUNDARY.md](./AI_BOUNDARY.md).
+
+The same boundary defines **existing-work assimilation** as a first-class future
+activity. A writer can supply a manuscript and editorial reviews, then ask AI to use
+the project's existing Material and relationship vocabulary to propose Spine,
+Material, relationship, and Todo additions. Reviews remain Inputs rather than canon;
+AI-proposed structures remain in the Inputs system until the writer adopts them. The
+Navigator displays only adopted project structure and never becomes a container for
+AI runs or an AI-owned shadow outline.
 
 Dismissal remains unresolved. The preferred direction is that dismissing a durable
 card changes an explicit state through the transaction and undo system, and that a
@@ -791,9 +801,10 @@ placed together merely because both involve AI.
 
 ## Parked but required design work
 
-The following are deliberately recorded without being prematurely solved. Integrated
-AI review design is postponed until the Spine, Todos, Collection store, graph, and
-Navigator structure have been proved.
+The following UX and policy questions remain deliberately unresolved. The underlying
+AI authority and service boundary is defined in [AI_BOUNDARY.md](./AI_BOUNDARY.md);
+integrated review UX still follows after the Spine, Todos, Collection store, graph,
+and Navigator structure have been proved.
 
 ### Recipes and AI actions
 

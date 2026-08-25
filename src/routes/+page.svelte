@@ -49,6 +49,7 @@
   let customRequest = $state('');
   let projectDialogKind = $state<'create' | 'rename' | 'reset' | null>(null);
   let projectDialogValue = $state('');
+  let projectDialogPending = $state(false);
   let navigatorVisible = $state(true);
   let reviewPanelVisible = $state(true);
   let navigatorWidth = $state(DEFAULT_NAVIGATOR_WIDTH);
@@ -619,35 +620,48 @@
     const kind = projectDialogKind;
     const value = projectDialogValue.trim();
     const current = workspace.currentProject;
-    if (!kind || !current) return;
-    if (kind === 'rename') {
-      if (!value) return;
-      await workspace.renameProject(value);
-      projectDialogKind = null;
-      return;
-    }
-    if (kind === 'create') {
-      if (!value) return;
-      if (documentSaveTimer) {
-        clearTimeout(documentSaveTimer);
-        documentSaveTimer = null;
-        await workspace.persistCurrentDocument('Saved before creating project');
+    if (!kind || !current || projectDialogPending) return;
+    projectDialogPending = true;
+    workspace.lastError = null;
+    try {
+      if (kind === 'rename') {
+        if (!value) return;
+        await workspace.renameProject(value);
+        projectDialogKind = null;
+        showNotice(`Project renamed to ${value}.`);
+        return;
       }
+      if (kind === 'create') {
+        if (!value) return;
+        if (documentSaveTimer) {
+          clearTimeout(documentSaveTimer);
+          documentSaveTimer = null;
+          await workspace.persistCurrentDocument('Saved before creating project');
+        }
+        editorReady = false;
+        selection = { from: 1, to: 1, text: '' };
+        await workspace.createProject(value);
+        projectDialogKind = null;
+        displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
+        refreshLiveSuggestions();
+        showNotice(`${value} created. Its Spine is open and ready.`);
+        return;
+      }
+      if (value !== current.title) return;
+      if (documentSaveTimer) clearTimeout(documentSaveTimer);
+      documentSaveTimer = null;
       editorReady = false;
-      await workspace.createProject(value);
+      selection = { from: 1, to: 1, text: '' };
+      await workspace.resetCurrentProject();
       projectDialogKind = null;
+      displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
       refreshLiveSuggestions();
-      return;
+      showNotice(`${current.title} started over. Its new Spine is open.`);
+    } catch (error) {
+      workspace.lastError = error instanceof Error ? error.message : `Could not ${kind === 'reset' ? 'start over' : `${kind} project`}`;
+    } finally {
+      projectDialogPending = false;
     }
-    if (value !== current.title) return;
-    if (documentSaveTimer) clearTimeout(documentSaveTimer);
-    documentSaveTimer = null;
-    editorReady = false;
-    selection = { from: 1, to: 1, text: '' };
-    await workspace.resetCurrentProject();
-    projectDialogKind = null;
-    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
-    refreshLiveSuggestions();
   }
 
   async function createDocument(): Promise<void> {
@@ -1005,17 +1019,17 @@
   {/if}
 
   {#if projectDialogKind}
-    <div class="modal-backdrop" role="presentation" onclick={() => projectDialogKind = null}>
+    <div class="modal-backdrop" role="presentation" onclick={() => { if (!projectDialogPending) projectDialogKind = null; }}>
       <div class="settings project-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="project-dialog-title" onclick={stopPropagation} onkeydown={stopPropagation}>
         <form onsubmit={submitProjectDialog}>
-          <header><div><small>Project</small><h2 id="project-dialog-title">{projectDialogKind === 'create' ? 'Create project' : projectDialogKind === 'rename' ? 'Rename project' : 'Start over'}</h2></div><button type="button" onclick={() => projectDialogKind = null}>×</button></header>
+          <header><div><small>Project</small><h2 id="project-dialog-title">{projectDialogKind === 'create' ? 'Create project' : projectDialogKind === 'rename' ? 'Rename project' : 'Start over'}</h2></div><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>×</button></header>
           {#if projectDialogKind === 'reset'}
             <p class="reset-warning">This permanently removes the current project's documents, Collections, Todo records and content, Inputs, formats, and context. The project will restart with empty Spine and Todos documents.</p>
             <label>Type <strong>{workspace.currentProject?.title}</strong> to confirm<input aria-label="Project name confirmation" autocomplete="off" bind:value={projectDialogValue} /></label>
           {:else}
             <label>Project name<input aria-label="Project name" autocomplete="off" bind:value={projectDialogValue} /></label>
           {/if}
-          <footer><p>{projectDialogKind === 'reset' ? 'This cannot be undone.' : 'The project name is separate from its fixed Spine and Todos.'}</p><button type="button" onclick={() => projectDialogKind = null}>Cancel</button><button class:danger={projectDialogKind === 'reset'} class="primary" disabled={!projectDialogValue.trim() || (projectDialogKind === 'reset' && projectDialogValue.trim() !== workspace.currentProject?.title)}>{projectDialogKind === 'reset' ? 'Start over' : projectDialogKind === 'rename' ? 'Rename' : 'Create'}</button></footer>
+          <footer><p>{projectDialogPending ? 'Updating the project…' : projectDialogKind === 'reset' ? 'This cannot be undone.' : 'The project name is separate from its fixed Spine and Todos.'}</p><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>Cancel</button><button class:danger={projectDialogKind === 'reset'} class="primary" disabled={projectDialogPending || !projectDialogValue.trim() || (projectDialogKind === 'reset' && projectDialogValue.trim() !== workspace.currentProject?.title)}>{projectDialogPending ? projectDialogKind === 'reset' ? 'Starting over…' : projectDialogKind === 'rename' ? 'Renaming…' : 'Creating…' : projectDialogKind === 'reset' ? 'Start over' : projectDialogKind === 'rename' ? 'Rename' : 'Create'}</button></footer>
         </form>
       </div>
     </div>

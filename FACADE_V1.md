@@ -7,6 +7,8 @@ implementations. The domain model and transaction semantics are defined in
 The forthcoming graph-backed Navigator and fork-view requirements are recorded in
 [NAVIGATION.md](./NAVIGATION.md); they extend the snapshot content without changing
 this authority boundary.
+The narrower AI request and proposal boundary is defined in
+[AI_BOUNDARY.md](./AI_BOUNDARY.md).
 
 ## Purpose
 
@@ -124,7 +126,8 @@ ordinary workspace transaction with provenance linking it to the Input.
 Keeping this service logically separate prevents generation concerns from expanding
 the persistence contract. The existing `WorkspaceFacade` class may continue to host
 both responsibilities during the POC while callers depend only on the narrow methods
-they need.
+they need. The service receives a Svelte-captured request envelope and may not query
+the editor, Navigator, workspace persistence, or database for hidden context.
 
 ## Persistence timing and failure
 

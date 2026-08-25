@@ -5,6 +5,7 @@ import type { WorkspaceFacade } from '$lib/workspace/facade';
 import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
 import { richDocumentFromProseMirror } from '$lib/workspace/rich-document';
+import type { AIInteractionRequest, AIInteractionService } from '$lib/ai/contracts';
 import { WorkspaceState } from './workspace.svelte';
 
 const beforeDocument: EditorDocumentSnapshot = {
@@ -319,6 +320,73 @@ describe('semantic workspace history', () => {
     warning.mockRestore();
   });
 
+  it('captures a typed activity, target, and inspectable context before dispatch', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [{ kind: 'craft_input', payload: proposal() }],
+      diagnostics: [],
+      context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [
+      document(),
+      { ...document('Keep Mara in close third.'), id: 'spine', role: 'spine', title: 'Story Spine' }
+    ];
+    workspace.contextBuckets = [{
+      id: 'context-mara', projectId: 'project', documentId: null, scope: 'project', title: 'Mara',
+      role: 'fact', content: 'Mara dislikes clocks.', revision: 2, extensions: {}, updatedAt: '2026-08-18T00:00:00Z'
+    }];
+    workspace.setEditorReady(beforeDocument);
+
+    const adopted = await workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt);
+    const request = execute.mock.calls[0][0] as AIInteractionRequest;
+
+    expect(request).toMatchObject({
+      activityId: expect.stringMatching(/^activity_/),
+      runId: expect.stringMatching(/^run_/),
+      projectId: 'project',
+      documentId: 'main',
+      intent: 'revise',
+      action: { id: 'heighten', version: 1 },
+      permittedProposalKinds: ['craft_input'],
+      target: { exactText: 'noticed', sourceRevision: 0 }
+    });
+    expect(request.context.items.map((item) => item.title)).toEqual(expect.arrayContaining([
+      'Heighten', 'Writing brief', 'Main draft', 'Story Spine', 'Mara'
+    ]));
+    expect(workspace.activities.at(-1)).toMatchObject({ state: 'completed', runIds: [request.runId] });
+    expect(workspace.runs.at(-1)?.contextManifest).toEqual(request.context);
+    expect(adopted[0].provenance).toMatchObject({
+      activityId: request.activityId,
+      runId: request.runId,
+      actionId: 'heighten',
+      actionVersion: 1,
+      contextManifestId: request.runId
+    });
+    expect(workspace.currentDocument?.content).toBe('noticed');
+  });
+
+  it('rejects proposals when the service alters required Writing Context', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => {
+      const context = structuredClone(request.context);
+      context.items[0] = { ...context.items[0], content: 'A different hidden instruction.' };
+      return { proposals: [{ kind: 'craft_input', payload: proposal() }], diagnostics: [], context };
+    });
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+
+    expect(await workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt)).toEqual([]);
+    expect(workspace.inputs).toEqual([]);
+    expect(workspace.runs.at(-1)).toMatchObject({
+      state: 'failed',
+      errors: [expect.objectContaining({ kind: 'contract', outcome: 'rejected' })]
+    });
+  });
+
   it('does not resurrect a dismissed input after preceding text moves its target', async () => {
     const repeated = {
       ...proposal(),
@@ -366,6 +434,35 @@ describe('semantic workspace history', () => {
 });
 
 describe('Navigator workspace transactions', () => {
+  it('opens a new project on its protected Spine with a valid Navigator projection', async () => {
+    const facade = fakeFacade();
+    const freshProject = { ...project(), id: 'fresh', title: 'Fresh story' };
+    facade.createProject = vi.fn(async () => freshProject);
+    facade.createDocument = vi.fn(async (input) => ({
+      id: `${input.role}-fresh`, projectId: input.projectId, parentId: input.parentId ?? null,
+      title: input.title, order: input.role === 'spine' ? 0 : 1, revision: 1, role: input.role,
+      extensions: input.extensions ?? {}, kind: 'document' as const, content: '',
+      updatedAt: '2026-08-18T00:00:00Z'
+    }));
+    facade.persistentWorkspace = vi.fn(async () => ({
+      projects: [freshProject], documents: [], contextBuckets: []
+    }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+
+    await workspace.createProject('Fresh story');
+
+    expect(workspace.spineNode).toMatchObject({ id: 'spine-fresh', title: 'Spine', role: 'spine' });
+    expect(workspace.currentDocument?.id).toBe('spine-fresh');
+    expect(workspace.navigatorMemory.mode).toBe('traditional');
+    expect(workspace.navigatorMemory.traditional.selectedKey).toBe('node:spine-fresh');
+    expect(workspace.navigatorFocusNode?.id).toBe('spine-fresh');
+  });
+
   it('repairs protected project content and materializes legacy Collections when switching projects', async () => {
     const facade = fakeFacade();
     const legacyProject: WorkspaceProject = {

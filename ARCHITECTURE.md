@@ -7,6 +7,9 @@ plan conflicts with this document, this document wins.
 
 The next graph-backed workspace and UX slice is specified in
 [NAVIGATION.md](./NAVIGATION.md). It is a design target, not implemented behaviour.
+The AI request, context, provider, proposal, and adoption contract is specified in
+[AI_BOUNDARY.md](./AI_BOUNDARY.md). It refines this architecture without changing the
+Svelte authority rule.
 
 Margin Note remains an experiment. The architecture should keep the next experiment
 cheap while protecting the things a writer must be able to trust: the current work,
@@ -52,6 +55,9 @@ its formatting, its inputs, and undo/redo.
     owns craft activity, run, and Input state; the facade executes and persists but
     does not decide activity status. Source participation in future requests is
     separate from source/category/density filters over existing Inputs.
+16. AI interaction crosses the boundary as a Svelte-created request with a captured
+    target and inspectable context manifest. Providers return untrusted proposals;
+    only an explicit Svelte workspace transaction may adopt one.
 
 ## Authority and boundaries
 
@@ -369,6 +375,15 @@ Each persisted `CraftRun` therefore carries a shared `batchId` and an explicit
 those records, including request, proposal, running, and unrecovered-error counts.
 Individual paragraph calls remain diagnostic detail rather than becoming separate
 user-facing jobs.
+
+Existing-work assimilation follows the same rule at a larger scope. A manuscript,
+supplied reviews, and the current project graph may produce a coordinated activity
+whose runs propose Spine, Material, relationship, and Todo changes. Manuscript
+evidence, adopted project knowledge, editorial opinion, and writer instruction retain
+distinct context roles. Every proposed graph operation remains an Input until a
+Svelte-owned adoption transaction accepts it; neither the provider nor the facade may
+construct an authoritative shadow project. The workflow contract is specified in
+[AI_BOUNDARY.md](./AI_BOUNDARY.md#existing-work-assimilation).
 
 ## State-held attachment behaviour
 

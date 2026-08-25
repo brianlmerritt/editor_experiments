@@ -8,6 +8,10 @@ the event ledger. None of those adapters independently owns live manuscript stat
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
+The Phase 1 AI request, Writing Context, provider, proposal, and adoption contract is
+documented in [AI_BOUNDARY.md](./AI_BOUNDARY.md). It also defines existing-work
+assimilation: using a manuscript, supplied reviews, and the current project vocabulary
+to propose human-approved Spine, Material, relationship, and Todo changes.
 The next major proof of concept—a graph-backed Navigator with a protected, editable
 **Spine**, fixed canonical **Todos**, configurable **Collections**, and fork-aware
 terminal-style split views—is specified in [NAVIGATION.md](./NAVIGATION.md). AI and
@@ -89,6 +93,11 @@ The implemented architecture slice provides:
   consolidation of paraphrased same-source annotations at the same locus;
 - provider responses treated as proposals from which Svelte creates authoritative
   input IDs, targets, lifecycle, and provenance;
+- typed Svelte-owned AI activities and runs that capture an immutable target, action,
+  permitted proposal kinds, selected sources, and inspectable Writing Context before
+  a narrow interaction service reaches the existing craft transport;
+- rejection of hidden or rewritten returned context and unpermitted proposal kinds
+  before provider output can become an Input;
 - diagnosis-only margin notes can select their current live target and immediately
   dispatch a contextual multi-option revision request; the same toolbar can request
   more options or accept one-shot custom writer instructions without introducing a
