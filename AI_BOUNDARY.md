@@ -272,7 +272,7 @@ The AI interaction service may:
 - call one or more configured source adapters;
 - apply provider capability differences;
 - repair common malformed structured output;
-- make a bounded corrective retry for output-only validation failures;
+- make bounded corrective retries for output-only validation failures;
 - return normalised proposals, usage, cost, raw-output diagnostics, and the final
   context manifest.
 
@@ -283,7 +283,8 @@ It may not:
 - apply a response to the workspace;
 - convert a proposal into a canonical Input ID;
 - decide that a stale target is still close enough;
-- retry authentication, configuration, or network failures as malformed output;
+- retry authentication or configuration failures, or disguise transport failures as
+  malformed output;
 - hide provider errors or malformed responses.
 
 Provider selection and Input filtering remain separate:
@@ -369,7 +370,8 @@ The service and workspace apply distinct checks:
 2. **Repair** attempts bounded local repair of common structured-output damage.
 3. **Schema validation** checks the declared output contract and exact ranges/enums.
 4. **Corrective retry** may occur for an output-only failure, with the validation
-   error stated precisely.
+   error stated precisely; explicit truncation may increase the output allowance, and
+   selected transient transport failures may receive a bounded transport retry.
 5. **Normalisation** removes provider envelope differences without inventing missing
    domain facts.
 6. **Workspace validation** verifies target identity, revisions, exact source text,
@@ -380,6 +382,11 @@ The service and workspace apply distinct checks:
 Every malformed response is recorded in run diagnostics and logged to the browser
 console with attempt and recovery outcome. A recovered run may create Inputs; an
 exhausted run remains inspectable but creates no fabricated result.
+
+The implemented craft path permits at most three attempts per provider. Authentication
+and configuration failures stop for reconfiguration. Manual retry is a separate run,
+targets only the failed providers that remain configured, and is allowed only while
+the captured live target remains unchanged.
 
 ## Concurrency and delayed replies
 
@@ -471,11 +478,18 @@ The first boundary slice is now represented in code:
 - deterministic tests exercise required/optional context, hostile context changes,
   proposal permissions, transport translation, delayed targets, and the rule that a
   proposal never edits manuscript text.
+- named local provider profiles support OpenAI-compatible and Anthropic Messages
+  protocols; settings expose presets for OpenRouter, OpenAI, Anthropic, and Ollama;
+- provider recovery classifies malformed output, truncation, transient transport,
+  rate limits, authentication, and configuration, with at most three attempts;
+- the provider and run managers expose provider health state, participating sources,
+  retained diagnostics and attempts, and a new-run retry of failed sources against an
+  unchanged target.
 
 This is the basement, not the complete AI system. The visible Writing Context editor,
-general project-change proposals, model profiles and role routing, complete recovery
-classification, resumable workflow graphs, existing-work assimilation, and their UX
-remain to be implemented deliberately on this boundary.
+general project-change proposals, model role routing, resumable workflow graphs,
+existing-work assimilation, and their UX remain to be implemented deliberately on
+this boundary.
 
 ## Deliberately unresolved UX and policy
 

@@ -323,7 +323,10 @@ export class WorkspaceState {
       this.branches = loaded.branches;
       this.ledger = loaded.events;
       this.settingsState.load(loaded.sourceAvailability);
-      for (const source of sourceCatalog) if (!this.settingsState.sourceAvailable(source.id)) this.sourceStates[source.id] = 'off';
+      this.syncAvailableSources();
+      if (loaded.providerSettingsError) {
+        this.lastError = `Writing workspace loaded, but AI provider settings are unavailable: ${loaded.providerSettingsError}`;
+      }
       const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
       if (migratedLegacyInputs) {
         this.notice = `${migratedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
@@ -603,6 +606,14 @@ export class WorkspaceState {
     this.inputSourceVisibility[sourceId] = true;
   }
 
+  syncAvailableSources(): void {
+    for (const source of this.settingsState.sources) {
+      if (!(source.id in this.sourceStates)) this.sourceStates[source.id] = source.kind === 'local' ? 'visible' : 'off';
+      if (!(source.id in this.inputSourceVisibility)) this.inputSourceVisibility[source.id] = true;
+      if (!this.settingsState.sourceAvailable(source.id)) this.sourceStates[source.id] = 'off';
+    }
+  }
+
   sourceAvailable(sourceId: string): boolean {
     return this.settingsState.sourceAvailable(sourceId);
   }
@@ -633,12 +644,13 @@ export class WorkspaceState {
     if (!activity) return;
     const runs = this.runs.filter((run) => run.activityId === activityId || (!run.activityId && run.batchId === activityId));
     const running = runs.some((run) => run.state === 'running' || run.state === 'queued');
-    const completed = runs.some((run) => run.state === 'completed');
+    const completed = runs.some((run) => run.state === 'completed' || run.state === 'partial');
+    const partial = runs.some((run) => run.state === 'partial');
     const failed = runs.some((run) => run.state === 'failed');
     const discarded = runs.some((run) => run.state === 'discarded');
     const cancelled = runs.some((run) => run.state === 'cancelled');
     const state = running ? 'running'
-      : completed && (failed || discarded || cancelled) ? 'partial'
+      : partial || completed && (failed || discarded || cancelled) ? 'partial'
         : failed ? 'failed'
           : discarded ? 'discarded'
             : cancelled ? 'cancelled'
@@ -803,10 +815,53 @@ export class WorkspaceState {
     );
   }
 
+  async retryRun(runId: string): Promise<Suggestion[]> {
+    const previous = this.runs.find((run) => run.id === runId);
+    if (!previous || (previous.state !== 'failed' && previous.state !== 'partial')) return [];
+    const target = firstTextTarget(previous.target);
+    const currentText = target && this.documentSnapshot
+      ? documentTextBetween(this.documentSnapshot, target.start, target.end)
+      : null;
+    if (!target || currentText !== previous.originalText) {
+      this.notice = 'That failed run no longer matches the current passage and cannot be retried.';
+      return [];
+    }
+    const capturedAction = previous.request?.action;
+    const prompt: TaskPrompt = capturedAction ? {
+      id: capturedAction.id,
+      name: capturedAction.name,
+      version: capturedAction.version,
+      instruction: capturedAction.instruction
+    } : this.prompts.find((item) => item.id === previous.promptId) ?? {
+      id: previous.promptId,
+      name: previous.promptId,
+      version: previous.promptVersion,
+      instruction: 'Repeat the failed request.'
+    };
+    const activity = this.beginAIActivity(prompt, previous.scope ?? 'selection');
+    const failedSources = new Set(previous.errors.filter((error) => !error.recovered).map((error) => error.source));
+    if (!this.settingsState.sources.some((source) => failedSources.has(source.id) && this.settingsState.sourceAvailable(source.id))) {
+      this.activities = this.activities.filter((item) => item.id !== activity.id);
+      this.notice = 'No currently configured provider matches this failed run.';
+      return [];
+    }
+    const retrySourceStates = Object.fromEntries(this.settingsState.sources.map((source) => [
+      source.id,
+      failedSources.has(source.id) ? 'visible' : 'off'
+    ])) as Record<string, SourceState>;
+    return this.requestInputRun(
+      { from: target.start, to: target.end, text: previous.originalText, prompt },
+      `${this.branchId}:retry:${previous.id}`,
+      activity,
+      retrySourceStates
+    );
+  }
+
   private async requestInputRun(
     input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>,
     rangeKey: string,
-    activity: AIActivityRecord
+    activity: AIActivityRecord,
+    requestedSourceStates: Record<string, SourceState> = this.sourceStates
   ): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
@@ -843,7 +898,7 @@ export class WorkspaceState {
       requestedContextManifest: context,
       contextManifest: context,
       permittedProposalKinds: ['craft_input'],
-      sourceStates: { ...this.sourceStates },
+      sourceStates: { ...requestedSourceStates },
       state: 'running',
       proposalIds: [],
       errors: [],
@@ -869,9 +924,9 @@ export class WorkspaceState {
         target: capturedTarget,
         context,
         permittedProposalKinds: ['craft_input'],
-        sources: sourceCatalog.map((source) => ({
+        sources: this.settingsState.sources.map((source) => ({
           sourceId: source.id,
-          participation: this.sourceStates[source.id] ?? 'off',
+          participation: requestedSourceStates[source.id] ?? 'off',
           model: this.settingsState.sourceAvailability[source.id]?.model
         })),
         generation: {
@@ -879,6 +934,7 @@ export class WorkspaceState {
           mode: this.mode
         }
       };
+      this.runs = this.runs.map((item) => item.id === run.id ? { ...item, request } : item);
       const response = await this.aiService.execute(request, controller.signal);
       const contractDiagnostics: AIServiceDiagnostic[] = [];
       if (!validReturnedContext(request.context, response.context)) {
@@ -908,11 +964,13 @@ export class WorkspaceState {
       const outputDiagnostics = diagnostics.filter((item) => item.kind === 'provider_output');
       const actionableErrors = diagnostics.filter((item) => item.kind !== 'provider_output');
       for (const diagnostic of outputDiagnostics) {
-        console.warn('[Margin Note] Malformed provider output', {
+        const details = {
           runId: run.id,
           documentId: this.branchId,
           ...diagnostic
-        });
+        };
+        if (diagnostic.recovered) console.info('[Margin Note] Provider output normalized', details);
+        else console.warn('[Margin Note] Malformed provider output', details);
       }
       if (actionableErrors.length) this.notice = actionableErrors.map((item) => `${item.source}: ${item.message}`).join(' · ');
       const currentRun = this.runs.find((item) => item.id === run.id);
@@ -935,7 +993,7 @@ export class WorkspaceState {
       });
       this.runs = this.runs.map((item) => item.id === run.id ? {
         ...item,
-        state: diagnostics.some((error) => !error.recovered) && !adopted.length ? 'failed' : 'completed',
+        state: diagnostics.some((error) => !error.recovered) ? (adopted.length ? 'partial' : 'failed') : 'completed',
         proposalIds: adopted.map((item) => item.id),
         errors: diagnostics,
         contextManifest: response.context,
@@ -1105,18 +1163,20 @@ export class WorkspaceState {
   async switchBranch(id: string): Promise<void> {
     if (id === this.branchId) return;
     const previous = this.branchId;
+    const targetDocument = this.documents.find((document) => document.id === id);
+    if (!targetDocument) throw new Error(`Document not found: ${id}`);
+    const data = await this.facade.suggestionHistory(id);
     this.branchId = id;
+    this.ledger = data.events;
+    this.costUsd = data.stats.costUsd;
+    const migratedLegacyInputs = this.loadDocumentDomain(targetDocument);
+    this.documentSnapshot = null;
+    this.undoStack = [];
+    this.redoStack = [];
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem('margin-note:document', id);
       localStorage.setItem('margin-note:branch', id);
     }
-    const data = await this.facade.suggestionHistory(id);
-    this.ledger = data.events;
-    this.costUsd = data.stats.costUsd;
-    const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
-    this.documentSnapshot = null;
-    this.undoStack = [];
-    this.redoStack = [];
     if (migratedLegacyInputs) await this.persistDomainState('Archive legacy input targets');
     await this.log('branch_switched', { from: previous, to: id });
   }
@@ -2087,6 +2147,13 @@ export class WorkspaceState {
     this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
     this.runs = Array.isArray(value?.runs) ? value.runs as CraftRun[] : [];
     this.activities = Array.isArray(value?.activities) ? value.activities as AIActivityRecord[] : [];
+    if (value?.sourceStates && typeof value.sourceStates === 'object' && !Array.isArray(value.sourceStates)) {
+      this.sourceStates = { ...this.sourceStates, ...value.sourceStates as Record<string, SourceState> };
+    }
+    if (value?.inputSourceVisibility && typeof value.inputSourceVisibility === 'object' && !Array.isArray(value.inputSourceVisibility)) {
+      this.inputSourceVisibility = { ...this.inputSourceVisibility, ...value.inputSourceVisibility as Record<string, boolean> };
+    }
+    this.syncAvailableSources();
     const storedBehaviours = value?.behaviours && typeof value.behaviours === 'object' && !Array.isArray(value.behaviours)
       ? value.behaviours as Record<string, AttachmentBehaviour>
       : {};
@@ -2111,6 +2178,8 @@ export class WorkspaceState {
         formats: this.formats,
         runs: this.runs,
         activities: this.activities,
+        sourceStates: this.sourceStates,
+        inputSourceVisibility: this.inputSourceVisibility,
         behaviours: this.behaviours
       }))
     } as WorkspaceDocument['extensions'];

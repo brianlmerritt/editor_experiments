@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationRequest, TaskPrompt } from '$lib/domain';
-import { configureSuggestionProvider, generateSuggestions, parseProviderSuggestions, resolveProviderRange } from './suggesters';
+import { configureProviderProfile, configureSuggestionProvider, generateSuggestions, parseProviderSuggestions, resolveProviderRange, suggestionSourceAvailability } from './suggesters';
 
-afterEach(() => vi.unstubAllGlobals());
+const providerRuntime = globalThis as typeof globalThis & { __marginNoteProviderSettings?: unknown };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete providerRuntime.__marginNoteProviderSettings;
+});
 
 function request(text: string, prompt: TaskPrompt): GenerationRequest {
   return {
@@ -19,6 +24,18 @@ function request(text: string, prompt: TaskPrompt): GenerationRequest {
 }
 
 describe('selection suggestions', () => {
+  it('migrates provider runtime state left alive by a development hot reload', () => {
+    providerRuntime.__marginNoteProviderSettings = {
+      openrouter: { key: 'test-key', model: 'provider/model', persistence: 'local_file' },
+      ollama: { model: 'local/model', baseUrl: 'http://127.0.0.1:11434/v1' }
+    };
+
+    expect(suggestionSourceAvailability()).toMatchObject({
+      openrouter: { available: true, name: 'OpenRouter', model: 'provider/model' },
+      ollama: { available: true, name: 'Ollama', model: 'local/model' }
+    });
+  });
+
   it('returns distinct word alternatives instead of the selected source text', async () => {
     const result = await generateSuggestions(request('noticed', {
       id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.'
@@ -171,6 +188,34 @@ describe('selection suggestions', () => {
     })]);
   });
 
+  it('classifies valid fenced JSON with trailing explanation as normalization rather than malformed output', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: `\`\`\`json
+{"suggestions": []}
+\`\`\`
+
+No substantive issues detected.` } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const providerRequest = request('noticed', {
+      id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Review it.'
+    });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates.openrouter = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    expect(result.proposals).toEqual([]);
+    expect(result.errors).toEqual([expect.objectContaining({
+      source: 'openrouter',
+      classification: 'output_nonconforming',
+      recoveryAction: 'extract_local',
+      recovered: true,
+      outcome: 'normalized_locally',
+      message: 'Valid JSON was extracted from surrounding provider text.'
+    })]);
+  });
+
   it('recovers suggestions from a fenced JSON provider response', () => {
     const suggestions = parseProviderSuggestions(`Here is the requested result:\n\n\`\`\`json
 {
@@ -238,9 +283,103 @@ describe('selection suggestions', () => {
     expect(result.proposals).toEqual([]);
     expect(result.errors).toEqual([
       expect.objectContaining({ source: 'openrouter', kind: 'provider_output', attempt: 1, outcome: 'retry_requested', recovered: false }),
-      expect.objectContaining({ source: 'openrouter', kind: 'provider_output', attempt: 2, outcome: 'rejected', recovered: false })
+      expect.objectContaining({ source: 'openrouter', kind: 'provider_output', attempt: 2, outcome: 'retry_requested', recovered: false }),
+      expect.objectContaining({ source: 'openrouter', kind: 'provider_output', attempt: 3, outcome: 'rejected', recovered: false, recoveryAction: 'human' })
     ]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses the Anthropic Messages protocol for an Anthropic profile', async () => {
+    configureProviderProfile({
+      id: 'anthropic-test', name: 'Anthropic test', protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.test/v1', key: 'test-key', model: 'claude-test'
+    }, { persist: false });
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      content: [{ type: 'text', text: JSON.stringify({ suggestions: [{
+        from: 0, to: 7, source_text: 'noticed', type: 'replacement', category: 'diction',
+        comment: 'Use a direct verb.', variants: ['observed'], confidence: 0.8
+      }] }) }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 21, output_tokens: 13 }
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const providerRequest = request('noticed', { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.' });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates['anthropic-test'] = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    expect(result.proposals[0]).toMatchObject({ source: 'anthropic-test', variants: ['observed'] });
+    expect(result.proposals[0].provenance).toMatchObject({ model: 'claude-test', inputTokens: 21, outputTokens: 13 });
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.anthropic.test/v1/messages');
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ 'x-api-key': 'test-key', 'anthropic-version': '2023-06-01' });
+  });
+
+  it('retries transient provider failures and records the recovered attempt', async () => {
+    configureProviderProfile({
+      id: 'transient-test', name: 'Transient test', protocol: 'openai_compatible',
+      baseUrl: 'https://transient.test/v1', key: 'test-key', model: 'test-model'
+    }, { persist: false });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('Temporarily unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"suggestions":[]}' }, finish_reason: 'stop' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const providerRequest = request('noticed', { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.' });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates['transient-test'] = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.errors).toEqual([expect.objectContaining({
+      source: 'transient-test', classification: 'transient', recoveryAction: 'retry_transient',
+      attempt: 1, recovered: true, outcome: 'recovered_by_retry'
+    })]);
+  });
+
+  it('routes network exceptions through the same bounded recovery history', async () => {
+    configureProviderProfile({
+      id: 'network-test', name: 'Network test', protocol: 'openai_compatible',
+      baseUrl: 'https://network.test/v1', key: 'test-key', model: 'test-model'
+    }, { persist: false });
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('connection reset'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"suggestions":[]}' }, finish_reason: 'stop' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const providerRequest = request('noticed', { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.' });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates['network-test'] = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.errors).toEqual([expect.objectContaining({
+      source: 'network-test', classification: 'transient', attempt: 1, recovered: true
+    })]);
+  });
+
+  it('increases the output budget after explicit truncation', async () => {
+    configureProviderProfile({
+      id: 'truncated-test', name: 'Truncated test', protocol: 'openai_compatible',
+      baseUrl: 'https://truncated.test/v1', key: 'test-key', model: 'test-model'
+    }, { persist: false });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"suggestions":[' }, finish_reason: 'length' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"suggestions":[]}' }, finish_reason: 'stop' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const providerRequest = request('noticed', { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.' });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates['truncated-test'] = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(firstBody.max_tokens).toBe(6000);
+    expect(secondBody.max_tokens).toBe(12000);
+    expect(result.errors).toEqual([expect.objectContaining({
+      source: 'truncated-test', classification: 'truncated', recoveryAction: 'increase_budget', recovered: true
+    })]);
   });
 
   it('repairs wrong provider offsets only when source text has one exact match', () => {

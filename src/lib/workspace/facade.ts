@@ -6,6 +6,7 @@ import type {
   JudgmentPair,
   LedgerEvent,
   SourceAvailability,
+  ProviderProfileInput,
   TaskPrompt,
   WritingBrief
 } from '$lib/domain';
@@ -37,6 +38,7 @@ export interface WorkspaceBootstrap {
   activeProjectId: string;
   activeDocumentId: string;
   sourceAvailability: Record<string, SourceAvailability>;
+  providerSettingsError?: string;
 }
 
 export interface InputProposalBatch {
@@ -125,7 +127,7 @@ export class WorkspaceFacade {
     const activeDocument = projectDocuments.find((document) => document.id === preferred?.documentId) ?? projectDocuments[0];
     if (!activeDocument) throw new Error('Project has no document');
     const [settings, eventFeed] = await Promise.all([
-      this.get<{ brief: WritingBrief; prompts: TaskPrompt[]; sourceAvailability?: Record<string, SourceAvailability> }>('/api/settings'),
+      this.get<{ brief: WritingBrief; prompts: TaskPrompt[]; sourceAvailability?: Record<string, SourceAvailability>; providerSettingsError?: string }>('/api/settings'),
       this.get<{ events: Required<LedgerEvent>[]; stats: LedgerStats }>(`/api/events?history=suggestions&branch=${encodeURIComponent(activeDocument.id)}`)
     ]);
     const bootstrap: WorkspaceBootstrap = {
@@ -145,10 +147,9 @@ export class WorkspaceFacade {
       activeDocumentId: activeDocument.id,
       sourceAvailability: settings.sourceAvailability ?? {
         'local-craft': { available: true },
-        'fake-sentinel': { available: true },
-        openrouter: { available: false, reason: 'OpenRouter availability was not reported.' },
-        ollama: { available: false, reason: 'Ollama availability was not reported.' }
-      }
+        'fake-sentinel': { available: true }
+      },
+      ...(settings.providerSettingsError ? { providerSettingsError: settings.providerSettingsError } : {})
     };
     const extension = activeDocument.extensions.margin_note;
     const workspaceRevision = extension && typeof extension === 'object' && !Array.isArray(extension)
@@ -296,12 +297,19 @@ export class WorkspaceFacade {
   }
 
   async configureOpenRouter(key: string, model: string): Promise<Record<string, SourceAvailability>> {
-    const result = await this.post<{ sourceAvailability: Record<string, SourceAvailability> }>('/api/settings', {
-      kind: 'provider',
-      source: 'openrouter',
-      key,
-      model
+    const result = await this.configureProvider({
+      id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible',
+      baseUrl: 'https://openrouter.ai/api/v1', key, model
     });
+    return result.sourceAvailability;
+  }
+
+  configureProvider(profile: ProviderProfileInput): Promise<{ profileId: string; sourceAvailability: Record<string, SourceAvailability> }> {
+    return this.post('/api/settings', { kind: 'provider_profile', profile });
+  }
+
+  async deleteProvider(id: string): Promise<Record<string, SourceAvailability>> {
+    const result = await this.post<{ sourceAvailability: Record<string, SourceAvailability> }>('/api/settings', { kind: 'delete_provider_profile', id });
     return result.sourceAvailability;
   }
 

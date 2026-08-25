@@ -102,10 +102,15 @@ The implemented architecture slice provides:
   dispatch a contextual multi-option revision request; the same toolbar can request
   more options or accept one-shot custom writer instructions without introducing a
   separate chat history;
-- common malformed AI JSON repaired locally before validation, followed by one
-  corrective provider retry when output remains unusable; every malformed reply is
+- common malformed AI JSON repaired locally before validation, followed by at most
+  two corrective retries when output remains unusable; every malformed reply is
   retained in run diagnostics and logged to the browser console with its recovery
   outcome, while exhausted output failures do not produce a transient popup;
+- typed provider failures distinguish malformed output, truncation, transient
+  transport, rate limits, authentication, and configuration; bounded automatic
+  recovery retries transient failures and raises truncated output budgets, while
+  completed work is retained and failed providers can be retried manually as a new
+  run against an unchanged target;
 - atomic acceptance and undo/redo of prose plus input lifecycle state;
 - explicit `target_changed` and `target_removed` input states with recorded events;
 - selection- and whole-work strikethrough through the same attachment path;
@@ -130,25 +135,38 @@ rejects legacy reactive syntax.
 
 ## Optional providers
 
-Open **OpenRouter settings** at the bottom of the Inputs panel to enter an API key and model without
-leaving the editor. The server stores them in `data/provider-settings.json`, an ignored
+Open **Providers** at the bottom of the Inputs panel. Named profiles can use the
+OpenAI-compatible protocol (including OpenRouter, OpenAI, Ollama, and compatible local
+or hosted services) or Anthropic Messages. Presets fill the usual endpoint and
+protocol; enter the exact model ID accepted by that provider and an API key for remote
+services. More than one profile may be enabled for the same review.
+
+The server stores profiles in `data/provider-settings.json`, an ignored
 owner-readable file (`0600`), rather than in the document, browser storage, database,
 or event ledger. The Inputs panel displays only a masked credential hint such as
 `sk-or******456`. This POC local file is not encrypted; an OS keychain adapter remains
-the appropriate production replacement.
+the appropriate production replacement. Existing single-profile OpenRouter settings
+are migrated automatically.
+
+After saving, open **Filters**, then use the profile's **Use** control to include or
+exclude it from future work. **Show** only filters Inputs that already exist. Open
+**Runs** for the captured action, participating sources, outcome, attempts, recovery
+classification, and retained error details. A failed or partially successful run can
+retry only its failed configured providers; this creates a new auditable run and never
+overwrites the earlier attempt or repeats successful providers.
 
 For a server-start configuration instead, copy `.env.example` to `.env` and configure
-either OpenRouter or Ollama. Provider sources start **off** when configured through the
+OpenRouter, OpenAI, Anthropic, or Ollama. Provider sources start **off** when configured through the
 environment; click their source buttons to make them visible before dispatching.
 Unavailable sources are labelled **not configured** rather than appearing usable.
 Configured paid providers return to **off** after an app restart so a page load cannot
-silently spend money; enable **Use** for A3 before using a selection action or document
-review. The separate **Show** control only filters Inputs already returned and never
-changes which sources a future review will call.
+silently spend money; enable **Use** before using a selection action or document
+review.
 
-OpenRouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Ollama uses
-`OLLAMA_MODEL` and, optionally, `OLLAMA_BASE_URL` (default
-`http://127.0.0.1:11434/v1`). Both are called only from SvelteKit server routes.
+Environment profiles use the matching `*_API_KEY`, `*_MODEL`, and optional
+`*_BASE_URL` variables shown in `.env.example`. Ollama uses `OLLAMA_MODEL` and,
+optionally, `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434/v1`). Providers are
+called only from SvelteKit server routes.
 
 ## Persistence
 

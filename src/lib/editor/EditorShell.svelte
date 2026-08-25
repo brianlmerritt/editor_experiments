@@ -44,7 +44,6 @@
     attachmentRevision?: number;
     activeSuggestionId?: string | null;
     preview?: { suggestionId: string; text: string } | null;
-    paused?: boolean;
     onTextChange?: (detail: { text: string; characters: number; origin?: EditorTransactionOrigin }) => void;
     onEditorReady?: (snapshot: EditorDocumentSnapshot) => void;
     onAssetUpload?: (file: File) => Promise<UploadedImageAsset>;
@@ -58,7 +57,7 @@
 
   let {
     branchId = 'main', initialContent = '', initialDocument, zoomPercent = 100, suggestions = [], formats = [], attachmentRevision = 0,
-    activeSuggestionId = null, preview = null, paused = false,
+    activeSuggestionId = null, preview = null,
     onTextChange = () => {}, onEditorReady = () => {}, onAssetUpload = async () => { throw new Error('Asset upload is not configured'); }, onEditorTransaction = () => {},
     onUndoRequest = () => {}, onRedoRequest = () => {}, onSelectionChange = () => {},
     onSuggestionActivate = () => {}, onSuggestionHover = () => {}
@@ -86,7 +85,7 @@
   }
 
   function runFormatting(command: Command): boolean {
-    if (!view || paused) return false;
+    if (!view) return false;
     const handled = command(view.state, (transaction) => {
       transaction.setMeta('workspaceOrigin', { kind: 'human', source: 'formatting' } satisfies EditorTransactionOrigin);
       view?.dispatch(transaction);
@@ -101,7 +100,7 @@
   }
 
   function openLinkEditor(): void {
-    if (!currentFormatting.hasSelection || paused) return;
+    if (!currentFormatting.hasSelection) return;
     linkHref = currentFormatting.linkHref;
     linkEditorOpen = true;
   }
@@ -289,7 +288,6 @@
     });
     view = new EditorView(mount, {
       state,
-      editable: () => !paused,
       transformPasted: (slice) => normalizeListSlice(slice, schema),
       handlePaste: (_view, event, slice) => pasteImages(event, slice),
       dispatchTransaction(transaction) {
@@ -332,10 +330,6 @@
     if (!view) return;
     void attachmentRevision;
     pushSuggestionState(view, { suggestions, formats, documentId: branchId, activeId: activeSuggestionId, preview });
-  });
-
-  $effect(() => {
-    if (view) view.setProps({ editable: () => !paused });
   });
 
   export function syncAttachments(nextSuggestions: Suggestion[], nextFormats: FormatAttachment[]): void {
@@ -392,6 +386,9 @@
     if (!range) return;
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, range.from, range.to)).scrollIntoView());
     view.focus();
+    const anchor = [...view.dom.querySelectorAll<HTMLElement>('.mn-suggestion[data-suggestion-id]')]
+      .find((element) => element.dataset.suggestionId === suggestion.id);
+    anchor?.scrollIntoView({ block: 'center', inline: 'nearest' });
   }
   export function getSuggestionTop(suggestion: Suggestion): number {
     if (!view || !mount) return 18;
@@ -417,25 +414,25 @@
 </script>
 
 <div class="formatting-toolbar" aria-label="Document formatting">
-  <select aria-label="Paragraph style" value={currentFormatting.blockStyle} disabled={paused} onchange={chooseTextBlock}>
+  <select aria-label="Paragraph style" value={currentFormatting.blockStyle} onchange={chooseTextBlock}>
     <option value="paragraph">Paragraph</option>
     <option value="heading1">Heading 1</option>
     <option value="heading2">Heading 2</option>
     <option value="heading3">Heading 3</option>
   </select>
   <span class="toolbar-divider" aria-hidden="true"></span>
-  <button type="button" class:active={currentFormatting.bold} aria-pressed={currentFormatting.bold} aria-label="Bold" title="Bold (Command+B)" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('bold'))}><strong>B</strong></button>
-  <button type="button" class:active={currentFormatting.italic} aria-pressed={currentFormatting.italic} aria-label="Italic" title="Italic (Command+I)" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('italic'))}><em>I</em></button>
-  <button type="button" class:active={currentFormatting.underline} aria-pressed={currentFormatting.underline} aria-label="Underline" title="Underline (Command+U)" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('underline'))}><u>U</u></button>
-  <button type="button" class:active={currentFormatting.strikethrough} aria-pressed={currentFormatting.strikethrough} aria-label="Strikethrough" title="Strikethrough (Command+Shift+X)" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('strikethrough'))}><s>S</s></button>
+  <button type="button" class:active={currentFormatting.bold} aria-pressed={currentFormatting.bold} aria-label="Bold" title="Bold (Command+B)" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('bold'))}><strong>B</strong></button>
+  <button type="button" class:active={currentFormatting.italic} aria-pressed={currentFormatting.italic} aria-label="Italic" title="Italic (Command+I)" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('italic'))}><em>I</em></button>
+  <button type="button" class:active={currentFormatting.underline} aria-pressed={currentFormatting.underline} aria-label="Underline" title="Underline (Command+U)" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('underline'))}><u>U</u></button>
+  <button type="button" class:active={currentFormatting.strikethrough} aria-pressed={currentFormatting.strikethrough} aria-label="Strikethrough" title="Strikethrough (Command+Shift+X)" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleInlineMark('strikethrough'))}><s>S</s></button>
   <span class="toolbar-divider" aria-hidden="true"></span>
-  <button type="button" class:active={currentFormatting.bulletList} aria-pressed={currentFormatting.bulletList} aria-label="Bullet list" title="Bullet list" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleList('bullet_list'))}>• List</button>
-  <button type="button" class:active={currentFormatting.orderedList} aria-pressed={currentFormatting.orderedList} aria-label="Numbered list" title="Numbered list" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleList('ordered_list'))}>1. List</button>
-  <button type="button" aria-label="Normalise list" title="Repair list markers in the selected text" disabled={paused || !currentFormatting.hasSelection} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(normalizeSelectedList)}>Fix list</button>
-  <button type="button" class:active={currentFormatting.blockquote} aria-pressed={currentFormatting.blockquote} aria-label="Block quote" title="Block quote" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleBlockquote)}>“ ”</button>
+  <button type="button" class:active={currentFormatting.bulletList} aria-pressed={currentFormatting.bulletList} aria-label="Bullet list" title="Bullet list" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleList('bullet_list'))}>• List</button>
+  <button type="button" class:active={currentFormatting.orderedList} aria-pressed={currentFormatting.orderedList} aria-label="Numbered list" title="Numbered list" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleList('ordered_list'))}>1. List</button>
+  <button type="button" aria-label="Normalise list" title="Repair list markers in the selected text" disabled={!currentFormatting.hasSelection} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(normalizeSelectedList)}>Fix list</button>
+  <button type="button" class:active={currentFormatting.blockquote} aria-pressed={currentFormatting.blockquote} aria-label="Block quote" title="Block quote" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(toggleBlockquote)}>“ ”</button>
   <span class="toolbar-divider" aria-hidden="true"></span>
-  <button type="button" class:active={currentFormatting.link} aria-pressed={currentFormatting.link} aria-label="Edit link" title="Link (Command+K)" disabled={paused || !currentFormatting.hasSelection} onmousedown={(event) => event.preventDefault()} onclick={openLinkEditor}>Link</button>
-  <button type="button" aria-label="Clear formatting" title="Clear inline formatting and return selected blocks to paragraphs" disabled={paused} onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(clearFormatting)}>Clear</button>
+  <button type="button" class:active={currentFormatting.link} aria-pressed={currentFormatting.link} aria-label="Edit link" title="Link (Command+K)" disabled={!currentFormatting.hasSelection} onmousedown={(event) => event.preventDefault()} onclick={openLinkEditor}>Link</button>
+  <button type="button" aria-label="Clear formatting" title="Clear inline formatting and return selected blocks to paragraphs" onmousedown={(event) => event.preventDefault()} onclick={() => runFormatting(clearFormatting)}>Clear</button>
 </div>
 {#if linkEditorOpen}
   <form class="link-editor" onsubmit={applyLink}>
@@ -445,7 +442,7 @@
     <button type="button" onclick={() => linkEditorOpen = false}>Cancel</button>
   </form>
 {/if}
-<div class="editor-frame" class:is-paused={paused} style={`--editor-zoom:${zoomPercent / 100}`}>
+<div class="editor-frame" style={`--editor-zoom:${zoomPercent / 100}`}>
   <div class="editor" role="presentation" bind:this={mount} onmouseup={notifySelection} onkeyup={notifySelection}></div>
 </div>
 
@@ -465,7 +462,6 @@
   .link-editor button:disabled { opacity: .4; cursor: default; }
   .editor-frame { position: relative; min-height: 68vh; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 18px 60px rgb(38 31 22 / .08); overflow: hidden; }
   .editor { min-height: 68vh; }
-  .is-paused .editor { opacity: .72; }
   :global(.ProseMirror) { box-sizing: border-box; min-height: 68vh; padding: 48px clamp(24px, 3vw, 52px) 100px; outline: none; color: var(--ink); font-family: var(--font-reading); font-size: calc(20px * var(--editor-zoom, 1)); line-height: 1.82; caret-color: var(--accent); }
   :global(.ProseMirror p) { position: relative; margin: 0 0 1.2em; }
   :global(.ProseMirror h1), :global(.ProseMirror h2), :global(.ProseMirror h3), :global(.ProseMirror h4), :global(.ProseMirror h5), :global(.ProseMirror h6) { margin: 1.2em 0 .55em; font-family: var(--font-reading); line-height: 1.25; }

@@ -471,14 +471,19 @@ exact but mid-word range is rejected because it cannot produce a trustworthy vis
 attachment.
 
 Provider transport first repairs common JSON syntax damage, then applies the complete
-schema and attachment validation above. An output-only failure receives one corrective
-retry containing the validation failure; network, authentication, and configuration
-failures are not retried as formatting problems. A successful proposal records the
-number of provider attempts. If the retry also fails, the craft run retains the typed
-diagnostic without a transient user notification. Every malformed reply—including one
-successfully repaired locally or superseded by a valid retry—is retained on the craft
-run and logged to the browser console with its attempt number, recovery outcome, and a
-bounded copy of the raw provider output.
+schema and attachment validation above. A run makes at most three provider attempts.
+Output-only failures receive corrective retries containing the precise validation
+failure. Explicit truncation raises the output allowance from 6,000 to 12,000 and then
+at most 24,000 tokens. Rate limits and selected transient transport failures receive
+bounded retries; authentication and configuration failures stop for reconfiguration
+and are never disguised as malformed output. A successful proposal records the number
+of provider attempts. If recovery is exhausted, the craft run retains its typed
+diagnostics without a transient user notification. Every malformed reply—including
+one successfully repaired locally or superseded by a valid retry—is retained on the
+craft run and logged to the browser console with its attempt number, recovery outcome,
+and a bounded copy of the raw provider output. A manual retry creates a new run for
+only the failed, currently configured sources and first verifies that the live target
+is unchanged; it neither overwrites history nor repeats successful providers.
 
 Exact fingerprints prevent literal repetitions. A conservative second pass may
 coalesce paraphrased AI annotations only when they come from the same source, have the

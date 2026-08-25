@@ -4,13 +4,14 @@
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import Navigator from '$lib/components/Navigator.svelte';
-  import { categories, categoryMeta, makeId, sourceCatalog, suggestionFingerprint, wordCount, type Branch, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, wordCount, type Branch, type ProviderProtocol, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
   import { settings as providerSettings } from '$lib/state/settings.svelte';
   import type { ContextBucket, ContextScope } from '$lib/workspace/model';
   import { clampEditorZoom, clampNavigatorWidth, DEFAULT_EDITOR_ZOOM, DEFAULT_NAVIGATOR_WIDTH, maxNavigatorWidth, MAX_EDITOR_ZOOM, MIN_EDITOR_ZOOM, MIN_NAVIGATOR_WIDTH } from '$lib/workspace/layout';
-  import { summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
+  import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
+  import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
@@ -22,6 +23,7 @@
   let ledgerOpen = $state(false);
   let inputsOpen = $state(false);
   let inputControlsOpen = $state(false);
+  let runManagerOpen = $state(false);
   let inputStateFilter = $state('all');
   let inputSearch = $state('');
   let briefDraft = $state<WritingBrief>({ ...workspace.brief });
@@ -38,7 +40,11 @@
   let cardsElement = $state<HTMLDivElement>();
   let undoDismiss = $state<{ suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null>(null);
   let liveSuggestions = $state<Suggestion[]>([]);
-  let queuedCount = $state(0);
+  let pendingInputCount = $state(0);
+  let inputsHiddenByFilters = $state(0);
+  let duplicateInputsCombined = $state(0);
+  let inputsBeyondLimit = $state(0);
+  let displayableInputCount = $state(0);
   let isPaused = $state(false);
   let contextDrafts = $state<Record<string, ContextDraft>>({});
   let newContextTitle = $state('');
@@ -59,6 +65,7 @@
   let inputDropTarget = $state<{ id: string; position: 'before' | 'after' } | null>(null);
   let resizeCleanup: (() => void) | null = null;
   let inputDragCleanup: (() => void) | null = null;
+  let dismissedProviderIssueKey = $state<string | null>(null);
 
   const layoutStorageKey = 'margin-note:workbench-layout';
 
@@ -66,19 +73,33 @@
   let currentDocumentText = $derived(workspace.currentDocument?.content ?? '');
   let revisionSuggestion = $derived(workspace.suggestions.find((suggestion) => suggestion.id === revisionSuggestionId) ?? null);
   let hasRevisionProvider = $derived(
-    (workspace.sourceStates.openrouter === 'visible' && providerSettings.sourceAvailability.openrouter?.available === true)
-    || (workspace.sourceStates.ollama === 'visible' && providerSettings.sourceAvailability.ollama?.available === true)
+    providerSettings.sources.some((source) => source.number >= 3
+      && workspace.sourceStates[source.id] === 'visible'
+      && providerSettings.sourceAvailability[source.id]?.available === true)
   );
   let managedInputs = $derived.by(() => workspace.inputs
     .filter((input) => inputStateFilter === 'all' || input.state === inputStateFilter)
     .filter((input) => !inputSearch.trim() || `${input.payload.comment} ${input.source} ${input.category} ${input.state}`.toLowerCase().includes(inputSearch.trim().toLowerCase()))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
   let latestCraftActivity = $derived(summarizeLatestCraftActivity(workspace.runs, workspace.branchId));
-  let enabledRunSourceCount = $derived(sourceCatalog.filter((source) => workspace.sourceStates[source.id] !== 'off' && providerSettings.sourceAvailability[source.id]?.available === true).length);
+  let editingProviderAvailability = $derived(providerSettings.providerForm.id ? providerSettings.sourceAvailability[providerSettings.providerForm.id] : undefined);
+  let enabledRunSourceCount = $derived(providerSettings.sources.filter((source) => workspace.sourceStates[source.id] !== 'off' && providerSettings.sourceAvailability[source.id]?.available === true).length);
   let hiddenInputFilterCount = $derived(
     categories.filter((category) => !workspace.categoryVisibility[category]).length
-    + sourceCatalog.filter((source) => workspace.inputSourceVisibility[source.id] === false).length
+    + providerSettings.sources.filter((source) => workspace.inputSourceVisibility[source.id] === false).length
   );
+  let providerConfigurationIssue = $derived.by(() => {
+    const issue = latestProviderReconfigurationIssue(
+      workspace.runs,
+      workspace.branchId,
+      providerSettings.sources
+        .filter((source) => source.number >= 3 && workspace.sourceStates[source.id] !== undefined && workspace.sourceStates[source.id] !== 'off')
+        .map((source) => source.id)
+    );
+    if (!issue) return null;
+    const key = `${issue.runId}:${issue.sourceId}:${issue.error.message}`;
+    return key === dismissedProviderIssueKey ? null : { ...issue, key };
+  });
 
   const activityLabels: Record<CraftActivityState, string> = {
     running: 'Running',
@@ -184,21 +205,36 @@
   }
 
   function refreshLiveSuggestions(): void {
-    const seen = new Set<string>();
-    liveSuggestions = workspace.suggestions
-      .filter((suggestion) => suggestion.state === 'pending')
-      .filter((suggestion) => workspace.categoryVisibility[suggestion.category])
-      .filter((suggestion) => workspace.inputSourceVisibility[suggestion.source] !== false)
-      .filter((suggestion) => {
-        const fingerprint = suggestionFingerprint(suggestion);
-        if (seen.has(fingerprint)) return false;
-        seen.add(fingerprint);
-        return true;
-      })
-      .sort((a, b) => a.order - b.order)
-      .slice(0, workspace.densityCap);
-    queuedCount = Math.max(0, workspace.suggestions.filter((suggestion) => suggestion.state === 'pending').length - liveSuggestions.length);
+    const display = selectDisplayedInputs(
+      workspace.suggestions,
+      workspace.categoryVisibility,
+      workspace.inputSourceVisibility,
+      workspace.densityCap
+    );
+    liveSuggestions = display.displayed;
+    pendingInputCount = display.pendingCount;
+    inputsHiddenByFilters = display.hiddenByFilters;
+    duplicateInputsCombined = display.duplicatesCombined;
+    inputsBeyondLimit = display.beyondLimit;
+    displayableInputCount = display.displayableCount;
     if (editorReady) void tick().then(() => editor?.syncAttachments(liveSuggestions, workspace.formats));
+  }
+
+  function showMoreInputs(): void {
+    workspace.densityCap = Math.min(displayableInputCount, workspace.densityCap + 8);
+    refreshLiveSuggestions();
+  }
+
+  function showAllInputs(): void {
+    workspace.densityCap = Math.max(1, displayableInputCount);
+    refreshLiveSuggestions();
+  }
+
+  function fixProviderIssue(): void {
+    const issue = providerConfigurationIssue;
+    if (!issue) return;
+    dismissedProviderIssueKey = issue.key;
+    providerSettings.openProviders(issue.sourceId);
   }
 
   function showNotice(message: string): void {
@@ -225,7 +261,7 @@
   function stopPropagation(event: Event): void { event.stopPropagation(); }
 
   async function toggleRunSource(sourceId: string): Promise<void> {
-    if (sourceId === 'openrouter' && providerSettings.sourceAvailability.openrouter?.available !== true) providerSettings.openOpenRouter();
+    if (providerSettings.sourceAvailability[sourceId]?.available !== true) providerSettings.openProviders(sourceId);
     else await workspace.toggleRunSource(sourceId);
   }
 
@@ -234,19 +270,41 @@
     refreshLiveSuggestions();
   }
 
-  async function saveOpenRouter(event: SubmitEvent): Promise<void> {
+  async function saveProvider(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
-    const key = String(form.get('openrouter-key') ?? '');
-    const model = String(form.get('openrouter-model') ?? '');
+    const keepOpen = (event.submitter as HTMLButtonElement | null)?.value === 'add-another';
     try {
-      const configured = await providerSettings.saveOpenRouter({ key, model });
-      workspace.enableConfiguredSource('openrouter');
-      workspace.notice = `OpenRouter ${configured.model ?? providerSettings.openRouterModel} was saved locally and enabled for reviews.`;
+      const configured = await providerSettings.saveProvider({
+        id: String(form.get('provider-id') ?? '').trim() || undefined,
+        name: String(form.get('provider-name') ?? ''),
+        protocol: String(form.get('provider-protocol') ?? 'openai_compatible') as ProviderProtocol,
+        baseUrl: String(form.get('provider-base-url') ?? ''),
+        key: String(form.get('provider-key') ?? ''),
+        model: String(form.get('provider-model') ?? '')
+      }, { keepOpen });
+      workspace.syncAvailableSources();
+      workspace.enableConfiguredSource(configured.id);
+      workspace.notice = `${configured.availability.name ?? configured.id} ${configured.availability.model ?? ''} was saved locally and enabled for future requests.`;
       refreshLiveSuggestions();
     } catch (error) {
-      workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'OpenRouter configuration failed');
+      workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'Provider configuration failed');
     }
+  }
+
+  async function deleteProvider(sourceId: string): Promise<void> {
+    if (!confirm(`Remove provider profile “${providerSettings.sourceAvailability[sourceId]?.name ?? sourceId}”?`)) return;
+    try {
+      await providerSettings.deleteProvider(sourceId);
+      workspace.sourceStates[sourceId] = 'off';
+      workspace.notice = 'Provider profile removed. Existing run and Input provenance was retained.';
+    } catch (error) {
+      workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'Provider removal failed');
+    }
+  }
+
+  async function retryFailedRun(runId: string): Promise<void> {
+    await workspace.retryRun(runId);
   }
 
   async function changePause(): Promise<void> {
@@ -431,8 +489,10 @@
   }
 
   async function activateCard(id: string): Promise<void> {
+    const suggestion = liveSuggestions.find((item) => item.id === id);
     workspace.activate(id);
     await tick();
+    if (suggestion) editor?.focusSuggestion(suggestion);
     cardsElement?.querySelector<HTMLElement>(`.card-slot[data-suggestion-id="${id}"] .card`)?.focus({ preventScroll: true });
   }
 
@@ -620,7 +680,7 @@
     const kind = projectDialogKind;
     const value = projectDialogValue.trim();
     const current = workspace.currentProject;
-    if (!kind || !current || projectDialogPending) return;
+    if (!kind || projectDialogPending) return;
     projectDialogPending = true;
     workspace.lastError = null;
     try {
@@ -647,7 +707,7 @@
         showNotice(`${value} created. Its Spine is open and ready.`);
         return;
       }
-      if (value !== current.title) return;
+      if (!current || value !== current.title) return;
       if (documentSaveTimer) clearTimeout(documentSaveTimer);
       documentSaveTimer = null;
       editorReady = false;
@@ -736,7 +796,7 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
     <div class="top-actions">
-      <button class:paused={isPaused} onclick={changePause} title="Pause timers and provider spend">{isPaused ? '▶ Resume' : 'Ⅱ Pause'}</button>
+      <button class:paused={isPaused} onclick={changePause} title="Pause AI requests, automatic reviews, and provider spend">{isPaused ? '▶ Resume AI' : 'Ⅱ Pause AI'}</button>
       <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
       <button onclick={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
@@ -809,7 +869,6 @@
                 attachmentRevision={workspace.workspaceRevision}
                 activeSuggestionId={workspace.activeSuggestionId}
                 preview={workspace.preview}
-                paused={isPaused}
                 onTextChange={textChanged}
                 onEditorReady={(snapshot) => workspace.setEditorReady(snapshot)}
                 onAssetUpload={(file) => workspace.uploadAsset(file)}
@@ -827,26 +886,30 @@
             {/key}
           {/if}
 
-          {#if selection.text && !workspace.paused}
+          {#if selection.text}
             <div class="selection-menu">
               <span>{selection.text.split(/\s+/).length}w selected</span>
-              {#if revisionSuggestion}
-                <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
+              {#if !workspace.paused}
+                {#if revisionSuggestion}
+                  <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
+                {/if}
+                <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
+                <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
+                <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
+                <button type="button" onmousedown={preventDefault} onclick={() => runSelection('synonyms')}>Synonyms</button>
               {/if}
-              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
-              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
-              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
-              <button type="button" onmousedown={preventDefault} onclick={() => runSelection('synonyms')}>Synonyms</button>
               <button type="button" onmousedown={preventDefault} onclick={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
-              <button type="button" onmousedown={preventDefault} onclick={() => customRequestOpen = !customRequestOpen}>Custom request…</button>
-              {#if customRequestOpen}
-                <form class="custom-request" onsubmit={suggestCustomRevision}>
-                  <input bind:value={customRequest} aria-label="Custom revision request" placeholder="Describe the revision you want" />
-                  {#if !customRequest.trim()}
-                    <button class="request-example" type="button" onclick={() => customRequest = 'Keep Mara close but add to her anxiety'}>Use example: “Keep Mara close but add to her anxiety”</button>
-                  {/if}
-                  <button type="submit" disabled={!customRequest.trim()}>Suggest revisions</button>
-                </form>
+              {#if !workspace.paused}
+                <button type="button" onmousedown={preventDefault} onclick={() => customRequestOpen = !customRequestOpen}>Custom request…</button>
+                {#if customRequestOpen}
+                  <form class="custom-request" onsubmit={suggestCustomRevision}>
+                    <input bind:value={customRequest} aria-label="Custom revision request" placeholder="Describe the revision you want" />
+                    {#if !customRequest.trim()}
+                      <button class="request-example" type="button" onclick={() => customRequest = 'Keep Mara close but add to her anxiety'}>Use example: “Keep Mara close but add to her anxiety”</button>
+                    {/if}
+                    <button type="submit" disabled={!customRequest.trim()}>Suggest revisions</button>
+                  </form>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -857,8 +920,13 @@
         {#if reviewPanelVisible}<aside class="inputs-panel">
           <header class="inputs-panel-header">
             <div class="inputs-heading">
-              <div><span>Inputs</span><strong>{liveSuggestions.length} live</strong></div>
-              {#if queuedCount}<small>+{queuedCount} filtered or beyond the display limit</small>{/if}
+              <div><span>Inputs</span><strong>{liveSuggestions.length} shown</strong></div>
+              <small>
+                {pendingInputCount} pending
+                {#if inputsHiddenByFilters} · {inputsHiddenByFilters} hidden by filters{/if}
+                {#if duplicateInputsCombined} · {duplicateInputsCombined} similar combined{/if}
+                {#if inputsBeyondLimit} · {inputsBeyondLimit} beyond display limit{/if}
+              </small>
             </div>
             <div class="inputs-header-actions">
               <button
@@ -884,7 +952,7 @@
               </header>
               <p>
                 {latestCraftActivity.requestCount} {latestCraftActivity.requestCount === 1 ? 'passage' : 'passages'}
-                · {latestCraftActivity.proposalCount} {latestCraftActivity.proposalCount === 1 ? 'input' : 'inputs'}
+                · {latestCraftActivity.proposalCount} {latestCraftActivity.proposalCount === 1 ? 'input' : 'inputs'} generated
                 {#if latestCraftActivity.runningCount} · {latestCraftActivity.runningCount} running{/if}
               </p>
               {#if latestCraftActivity.firstError}<small>{latestCraftActivity.firstError}</small>{/if}
@@ -905,8 +973,8 @@
                     ><i>{categoryMeta[category].icon}</i>{categoryMeta[category].label}</button>
                   {/each}
                 </div>
-                <label class="density-control">Maximum visible
-                  <input type="range" min="1" max="20" bind:value={workspace.densityCap} oninput={refreshLiveSuggestions} />
+                <label class="density-control">Cards shown at once
+                  <input type="range" min="1" max={Math.max(20, displayableInputCount)} bind:value={workspace.densityCap} oninput={refreshLiveSuggestions} />
                   <output>{workspace.densityCap}</output>
                 </label>
               </div>
@@ -915,7 +983,7 @@
                 <header><strong>Sources</strong><small>Future reviews / existing Inputs</small></header>
                 <p class="control-explanation"><b>Use</b> controls future reviews. <b>Show</b> only filters Inputs already returned.</p>
                 <div class="source-controls">
-                  {#each sourceCatalog as source}
+                  {#each providerSettings.sources as source}
                     {@const availability = providerSettings.sourceAvailability[source.id]}
                     <div class="source-row">
                       <div><b>A{source.number}</b><span>{source.label}</span>{#if availability?.model}<small>{availability.model}</small>{/if}</div>
@@ -934,12 +1002,13 @@
                         title="Show or hide existing Inputs from this source"
                         onclick={() => toggleInputSource(source.id)}
                       >Show</button>
-                      {#if source.id === 'openrouter' && availability?.available !== true}
-                        <button class="configure-source" type="button" onclick={() => providerSettings.openOpenRouter()}>Configure</button>
+                      {#if availability?.protocol}
+                        <button class="configure-source" type="button" onclick={() => providerSettings.openProviders(source.id)}>Edit</button>
                       {/if}
                     </div>
                   {/each}
                 </div>
+                <button class="add-provider" type="button" onclick={() => providerSettings.openProviders()}>Add provider…</button>
               </div>
             </section>
           {/if}
@@ -980,15 +1049,21 @@
               </div>
             {/each}
           </div>
+          {#if inputsBeyondLimit}
+            <div class="display-limit-actions">
+              <span>{inputsBeyondLimit} more visible Inputs are ready.</span>
+              <button type="button" onclick={showMoreInputs}>Show next {Math.min(8, inputsBeyondLimit)}</button>
+              <button type="button" onclick={showAllInputs}>Show all {displayableInputCount}</button>
+            </div>
+          {/if}
           {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>X</kbd> reject</p>{/if}
           <footer class="inputs-panel-footer">
             <div>
               <strong>${workspace.costUsd.toFixed(4)}</strong><span>session provider spend</span>
-              {#if providerSettings.sourceAvailability.openrouter?.credentialHint}
-                <small>{providerSettings.sourceAvailability.openrouter.credentialHint} · {providerSettings.sourceAvailability.openrouter.model}</small>
-              {/if}
+              <small>{providerSettings.sources.filter((source) => source.number >= 3).length} configured provider {providerSettings.sources.filter((source) => source.number >= 3).length === 1 ? 'profile' : 'profiles'}</small>
             </div>
-            <button type="button" onclick={() => providerSettings.openOpenRouter()}>OpenRouter settings</button>
+            <button type="button" onclick={() => providerSettings.openProviders()}>Providers</button>
+            <button type="button" onclick={() => runManagerOpen = true}>Runs</button>
             <button type="button" onclick={openInputs}>History</button>
           </footer>
         </aside>{/if}
@@ -998,22 +1073,86 @@
     </main>
   </div>
 
-  <div class="pause-banner" class:mode-hidden={!isPaused}><b>Paused</b> — editing, dispatch timers, and provider spend are suspended.</div>
+  <div class="pause-banner" class:mode-hidden={!isPaused}><b>AI paused</b> — requests, automatic reviews, and provider spend are suspended. Writing remains available.</div>
+  {#if providerConfigurationIssue}
+    <section class="provider-alert" role="alert" aria-live="assertive">
+      <div>
+        <strong>Provider needs attention</strong>
+        <span>{providerSettings.sourceAvailability[providerConfigurationIssue.sourceId]?.name ?? providerConfigurationIssue.sourceId} · {providerSettings.sourceAvailability[providerConfigurationIssue.sourceId]?.model ?? 'model not reported'}</span>
+        <p>{providerConfigurationIssue.error.classification === 'authentication' ? 'The API key was rejected or is missing.' : providerConfigurationIssue.error.message}</p>
+      </div>
+      <button type="button" class="primary" onclick={fixProviderIssue}>Fix provider</button>
+      <button type="button" onclick={() => dismissedProviderIssueKey = providerConfigurationIssue?.key ?? null}>Dismiss</button>
+    </section>
+  {/if}
   {#if workspace.notice}<button class="notice" onclick={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
   {#if workspace.lastError}<button class="error" onclick={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
   {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button onclick={undoDragDismiss}>Undo</button></div>{/if}
 
-  {#if providerSettings.openRouterDialogOpen}
+  {#if providerSettings.providerDialogOpen}
     <div class="modal-backdrop" role="presentation">
       <div class="settings provider-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="provider-title" onclick={stopPropagation} onkeydown={stopPropagation}>
-        <header><div><small>AI source A3</small><h2 id="provider-title">OpenRouter</h2></div><button onclick={() => providerSettings.closeOpenRouter()}>×</button></header>
-        <form onsubmit={saveOpenRouter}>
-          <p class="provider-intro">The key and model are saved in the local server's ignored provider-settings file, readable only by your operating-system user. They are not written to the work, browser storage, or event ledger.</p>
-          <label>OpenRouter API key {#if providerSettings.sourceAvailability.openrouter?.credentialHint}<small>Saved as {providerSettings.sourceAvailability.openrouter.credentialHint}; leave blank to keep it</small>{/if}<input name="openrouter-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required={!providerSettings.sourceAvailability.openrouter?.available} bind:value={providerSettings.openRouterKey} placeholder={providerSettings.sourceAvailability.openrouter?.credentialHint ?? 'sk-or-…'} /></label>
-          <label>OpenRouter model ID<small>Exact OpenRouter model slug</small><input name="openrouter-model" required bind:value={providerSettings.openRouterModel} /></label>
+        <header><div><small>AI provider profiles</small><h2 id="provider-title">Providers</h2></div><button onclick={() => providerSettings.closeProviders()}>×</button></header>
+        {#if providerSettings.sources.some((source) => source.number >= 3)}
+          <div class="provider-list">
+            {#each providerSettings.sources.filter((source) => source.number >= 3) as source}
+              {@const configured = providerSettings.sourceAvailability[source.id]}
+              {@const health = summarizeProviderHealth(workspace.runs, source.id)}
+              <article>
+                <div><strong>{configured.name ?? source.label}</strong><span>{configured.model}</span><small>{configured.protocol?.replace('_', ' ')} · {configured.credentialHint ?? 'no key'} · {health.state.replaceAll('_', ' ')}</small></div>
+                <button type="button" onclick={() => providerSettings.openProviders(source.id)}>Edit</button>
+                {#if configured.configurable}<button type="button" class="danger" onclick={() => void deleteProvider(source.id)}>Remove</button>{/if}
+              </article>
+            {/each}
+          </div>
+        {/if}
+        <div class="provider-presets">
+          <span>Start from:</span>
+          <button type="button" onclick={() => providerSettings.usePreset('openrouter')}>OpenRouter</button>
+          <button type="button" onclick={() => providerSettings.usePreset('openai')}>OpenAI</button>
+          <button type="button" onclick={() => providerSettings.usePreset('anthropic')}>Anthropic</button>
+          <button type="button" onclick={() => providerSettings.usePreset('ollama')}>Ollama/local</button>
+        </div>
+        <form onsubmit={saveProvider}>
+          <p class="provider-intro">Profiles and keys are saved in the local server's ignored provider-settings file. Keys are never written to the project, browser storage, run history, or event ledger.</p>
+          <input name="provider-id" type="hidden" value={providerSettings.providerForm.id} />
+          <div class="form-grid">
+            <label>Profile name<input name="provider-name" required value={providerSettings.providerForm.name} /></label>
+            <label>Protocol<select name="provider-protocol" value={providerSettings.providerForm.protocol}><option value="openai_compatible">OpenAI compatible</option><option value="anthropic">Anthropic Messages</option></select></label>
+          </div>
+          <label>Base URL<input name="provider-base-url" required value={providerSettings.providerForm.baseUrl} /></label>
+          <label>API key {#if editingProviderAvailability?.credentialHint}<small>Saved as {editingProviderAvailability.credentialHint}; leave blank to keep it</small>{/if}<input name="provider-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={editingProviderAvailability?.credentialHint ?? 'Provider API key; optional for localhost'} /></label>
+          <label>Model ID<small>Exact model identifier accepted by this provider</small><input name="provider-model" required value={providerSettings.providerForm.model} /></label>
           {#if providerSettings.error}<p class="provider-error" role="alert">{providerSettings.error}</p>{/if}
-          <footer><p>The masked key confirms which credential is active without exposing it.</p><button type="button" onclick={() => providerSettings.closeOpenRouter()}>Cancel</button><button type="submit" class="primary" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
+          <footer><p>Saving a profile enables it for the next request; <b>Use</b> can turn participation off independently.</p><button type="button" onclick={() => providerSettings.closeProviders()}>Close</button><button type="submit" value="add-another" disabled={providerSettings.savingProvider}>Save and add another</button><button type="submit" class="primary" value="close" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
         </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if runManagerOpen}
+    <div class="modal-backdrop" role="presentation" onclick={() => runManagerOpen = false}>
+      <div class="settings run-manager" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="run-manager-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>Recovery and diagnostics</small><h2 id="run-manager-title">AI runs</h2></div><button onclick={() => runManagerOpen = false}>×</button></header>
+        <p class="provider-intro">Runs retain the captured action, Writing Context, provider attempts, recovery decisions, and final outcome. Retry creates a new run against the current unchanged target and current provider configuration.</p>
+        <div class="run-list">
+          {#each [...workspace.runs].reverse().slice(0, 50) as run}
+            {@const participatingSources = providerSettings.sources
+              .filter((source) => run.sourceStates[source.id] && run.sourceStates[source.id] !== 'off')
+              .map((source) => providerSettings.sourceAvailability[source.id]?.name ?? source.label)
+              .join(', ')}
+            <article class={`run-${run.state}`}>
+              <header><div><strong>{run.promptId}</strong><span>{run.scope ?? 'selection'} · {run.originalText.length} characters</span></div><b>{run.state}</b></header>
+              <p>{new Date(run.createdAt).toLocaleString()} · {participatingSources || 'No recorded sources'} · {run.proposalIds.length} Inputs · {run.contextManifest?.items.filter((item) => item.sent).length ?? 0} context items</p>
+              {#each run.errors as error}
+                <div class="run-diagnostic"><b>{error.source}</b><span>{error.classification?.replaceAll('_', ' ') ?? error.kind ?? 'error'}{#if error.attempt} · attempt {error.attempt}/{error.maxAttempts ?? error.attempt}{/if}{#if error.recovered} · recovered{/if}</span><small>{error.message}</small></div>
+              {/each}
+              {#if (run.state === 'failed' || run.state === 'partial') && run.errors.some((error) => !error.recovered && providerSettings.sourceAvailability[error.source]?.available)}<button type="button" onclick={() => void retryFailedRun(run.id)}>Retry failed providers</button>{/if}
+            </article>
+          {:else}
+            <p class="input-empty">No AI runs have been recorded for this document.</p>
+          {/each}
+        </div>
       </div>
     </div>
   {/if}
@@ -1244,6 +1383,7 @@
   .source-row > button.active { border-color: var(--accept); background: color-mix(in srgb, var(--accept) 9%, transparent); color: var(--accept); }
   .source-row > button:disabled { opacity: .32; cursor: default; }
   .source-row > .configure-source { color: var(--accent); }
+  .add-provider { margin-top: 8px; border: 1px dashed var(--line-strong); border-radius: 3px; background: transparent; color: var(--accent); padding: 7px 9px; font: 700 9px/1 var(--font-ui); cursor: pointer; }
   .cards { display: grid; gap: 10px; min-height: 0; padding-top: 14px; }
   .card-slot { position: relative; }
   .card-slot.dragging { opacity: .45; }
@@ -1254,6 +1394,9 @@
   .empty-notes > span { display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; color: var(--accept); }
   .empty-notes p { margin: 12px 0 5px; color: var(--ink-soft); font: 500 13px/1 var(--font-ui); }
   .empty-notes small { max-width: 230px; font: 10px/1.5 var(--font-ui); }
+  .display-limit-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px; margin-top: 12px; padding: 9px; border: 1px dashed var(--line-strong); border-radius: 3px; background: var(--paper); }
+  .display-limit-actions span { flex-basis: 100%; color: var(--muted); font: 9px/1.35 var(--font-ui); text-align: center; }
+  .display-limit-actions button { border: 1px solid var(--line-strong); border-radius: 3px; background: transparent; color: var(--accent); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
   .key-help { color: var(--muted); font: 9px/1.6 var(--font-ui); text-align: center; }
   kbd { display: inline-block; min-width: 18px; padding: 1px 4px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 3px; background: var(--paper); font: 8px/1.4 var(--font-mono); }
   .inputs-panel-footer { position: sticky; z-index: 4; bottom: 0; display: flex; align-items: center; gap: 5px; margin-top: 14px; padding: 10px 0 12px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); }
@@ -1263,6 +1406,13 @@
   .inputs-panel-footer small { flex-basis: 100%; overflow: hidden; color: var(--muted); font: 7px/1.35 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
   .ledger-panel { flex: 0 0 min(280px, 34vh); min-height: 0; overflow: auto; border-top: 1px solid var(--line); }
   .pause-banner { position: fixed; z-index: 45; top: 66px; left: 50%; transform: translateX(-50%); border: 1px solid #b5cbbf; border-radius: 3px; background: #eff8f2; color: #3f6250; padding: 8px 13px; box-shadow: 0 8px 30px rgb(20 45 30 / .12); font-size: 10px; }
+  .provider-alert { position: fixed; z-index: 70; top: 70px; right: 18px; display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; align-items: center; gap: 8px; width: min(620px, calc(100vw - 36px)); border: 1px solid #8f342c; border-radius: 4px; background: #6c2c26; color: #fff8f4; padding: 12px; box-shadow: 0 16px 40px rgb(55 16 12 / .28); }
+  .provider-alert > div { display: grid; gap: 3px; }
+  .provider-alert strong { font: 750 11px/1.2 var(--font-ui); }
+  .provider-alert span { opacity: .8; font: 8px/1.25 var(--font-mono); }
+  .provider-alert p { margin: 2px 0 0; font: 10px/1.35 var(--font-ui); }
+  .provider-alert button { border: 1px solid rgb(255 255 255 / .45); border-radius: 3px; background: transparent; color: inherit; padding: 7px 9px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .provider-alert button.primary { border-color: #fff8f4; background: #fff8f4; color: #6c2c26; }
   .notice, .error { position: fixed; z-index: 60; right: 18px; bottom: 18px; display: flex; gap: 16px; align-items: center; max-width: 420px; border: 1px solid #27433a; border-radius: 3px; background: #1f302a; color: #edf5f1; padding: 11px 13px; box-shadow: 0 12px 30px rgb(0 0 0 / .18); font-size: 10px; cursor: pointer; }
   .error { background: #5c2925; border-color: #743731; }
   .notice span, .error span { opacity: .6; }
@@ -1311,6 +1461,27 @@
   .provider-intro { margin: -6px 0 18px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
   .provider-error { margin: 8px 0 0; color: var(--reject); font: 600 10px/1.4 var(--font-ui); }
   .provider-identity { color: var(--muted); font: 9px/1.2 var(--font-mono); }
+  .provider-list { display: grid; gap: 6px; margin-bottom: 16px; }
+  .provider-list article { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 3px; padding: 9px; }
+  .provider-list article > div { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .provider-list article strong { font: 700 10px/1.2 var(--font-ui); }
+  .provider-list article span, .provider-list article small { overflow: hidden; color: var(--muted); font: 8px/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .provider-list article button, .provider-presets button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .provider-list article button.danger { color: var(--reject); }
+  .provider-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 16px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
+  .run-manager { width: min(860px, 100%); }
+  .run-list { display: grid; gap: 8px; }
+  .run-list > article { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; padding: 10px; }
+  .run-list > article.run-failed { border-left-color: var(--reject); }
+  .run-list > article > header { display: flex; justify-content: space-between; gap: 8px; }
+  .run-list > article > header div { display: grid; gap: 2px; }
+  .run-list > article > header strong { font: 700 10px/1.2 var(--font-ui); }
+  .run-list > article > header span, .run-list > article > p { margin: 0; color: var(--muted); font: 8px/1.4 var(--font-ui); }
+  .run-list > article > header b { color: var(--accent); font: 700 8px/1 var(--font-ui); text-transform: uppercase; }
+  .run-list > article > button { margin-top: 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: transparent; color: var(--accent); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .run-diagnostic { display: grid; grid-template-columns: auto 1fr; gap: 2px 7px; margin-top: 7px; padding: 7px; background: var(--paper-deep); font: 8px/1.35 var(--font-ui); }
+  .run-diagnostic span { color: var(--muted); }
+  .run-diagnostic small { grid-column: 1 / -1; color: var(--ink-soft); }
   .context-settings { width: min(840px, 100%); }
   .context-intro { margin: -8px 0 20px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
   .context-list { display: grid; gap: 14px; }

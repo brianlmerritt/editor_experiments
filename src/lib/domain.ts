@@ -1,5 +1,5 @@
 import { textTarget, type TargetSet } from '$lib/workspace/attachments';
-import type { AIContextManifest, AIInteractionIntent } from '$lib/ai/contracts';
+import type { AIContextManifest, AIInteractionIntent, AIInteractionRequest } from '$lib/ai/contracts';
 
 export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
 export type Category = (typeof categories)[number];
@@ -11,9 +11,25 @@ export type SourceKind = 'local' | 'ai';
 export type SourceState = 'visible' | 'invisible' | 'off';
 export type WritingMode = 'drafting' | 'revising';
 
+export type ProviderProtocol = 'openai_compatible' | 'anthropic';
+
+export interface ProviderProfileInput {
+  id?: string;
+  name: string;
+  protocol: ProviderProtocol;
+  baseUrl: string;
+  model: string;
+  key?: string;
+}
+
 export interface SourceAvailability {
   available: boolean;
+  name?: string;
   model?: string;
+  protocol?: ProviderProtocol;
+  baseUrl?: string;
+  sourceNumber?: number;
+  configurable?: boolean;
   reason?: string;
   credentialHint?: string;
   persistence?: 'local_file' | 'environment';
@@ -51,6 +67,8 @@ export interface InputProposal {
 }
 
 export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration' | 'contract';
+export type RecoveryClassification = 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract';
+export type RecoveryAction = 'none' | 'extract_local' | 'repair_local' | 'correct_output' | 'retry_transient' | 'increase_budget' | 'reconfigure' | 'human';
 
 export interface InputError {
   source: string;
@@ -58,8 +76,15 @@ export interface InputError {
   kind?: InputErrorKind;
   attempt?: number;
   recovered?: boolean;
-  outcome?: 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
+  outcome?: 'normalized_locally' | 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
   rawOutput?: string;
+  classification?: RecoveryClassification;
+  recoveryAction?: RecoveryAction;
+  status?: number;
+  maxAttempts?: number;
+  model?: string;
+  protocol?: ProviderProtocol;
+  latencyMs?: number;
 }
 
 export interface Provenance {
@@ -188,7 +213,7 @@ export interface GenerationRequest {
   }>;
 }
 
-export type RunState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'discarded';
+export type RunState = 'queued' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'discarded';
 
 export interface CraftRun {
   id: string;
@@ -205,6 +230,7 @@ export interface CraftRun {
   requestedContextManifest?: AIContextManifest;
   contextManifest?: AIContextManifest;
   permittedProposalKinds?: string[];
+  request?: AIInteractionRequest;
   sourceStates: Record<string, SourceState>;
   state: RunState;
   proposalIds: string[];
@@ -233,9 +259,7 @@ export const categoryMeta: Record<Category, { label: string; icon: string; inten
 
 export const sourceCatalog = [
   { id: 'local-craft', number: 1, kind: 'local' as const, label: 'Local craft checks' },
-  { id: 'fake-sentinel', number: 2, kind: 'ai' as const, label: 'Replay sentinel' },
-  { id: 'openrouter', number: 3, kind: 'ai' as const, label: 'OpenRouter' },
-  { id: 'ollama', number: 4, kind: 'ai' as const, label: 'Ollama' }
+  { id: 'fake-sentinel', number: 2, kind: 'ai' as const, label: 'Replay sentinel' }
 ];
 
 export function makeId(prefix: string): string {

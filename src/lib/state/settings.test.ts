@@ -7,74 +7,92 @@ function json(body: unknown): Response {
 }
 
 describe('Svelte settings state', () => {
-  it('owns the editable provider form and replaces availability after saving', async () => {
+  it('owns a named provider form and adds the configured source', async () => {
     const fetcher = vi.fn<FetchLike>(async (_input, init) => {
       expect(JSON.parse(String(init?.body))).toEqual({
-        kind: 'provider',
-        source: 'openrouter',
-        key: '',
-        model: 'anthropic/claude-sonnet-4.5'
-      });
-      return json({ sourceAvailability: {
-        openrouter: {
-          available: true,
-          model: 'anthropic/claude-sonnet-4.5',
-          credentialHint: 'sk-or******456',
-          persistence: 'local_file'
+        kind: 'provider_profile',
+        profile: {
+          id: 'anthropic', name: 'Anthropic', protocol: 'anthropic',
+          baseUrl: 'https://api.anthropic.com/v1', key: 'sk-ant-secret', model: 'claude-test'
         }
-      } });
+      });
+      return json({
+        profileId: 'anthropic',
+        sourceAvailability: {
+          anthropic: {
+            available: true, name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1',
+            model: 'claude-test', sourceNumber: 3, credentialHint: 'sk-an******ret', persistence: 'local_file'
+          }
+        }
+      });
     });
     const state = createSettingsState(new WorkspaceFacade(fetcher));
+    state.openProviders();
+    state.usePreset('anthropic');
+
+    expect(state.providerDialogOpen).toBe(true);
+    expect(state.providerForm).toMatchObject({ id: 'anthropic', protocol: 'anthropic' });
+
+    const configured = await state.saveProvider({
+      id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1',
+      key: 'sk-ant-secret', model: 'claude-test'
+    });
+
+    expect(configured.id).toBe('anthropic');
+    expect(configured.availability.credentialHint).toBe('sk-an******ret');
+    expect(state.providerDialogOpen).toBe(false);
+    expect(state.sources.map((source) => source.id)).toEqual(['local-craft', 'fake-sentinel', 'anthropic']);
+  });
+
+  it('requires provider name, endpoint, and model before transport', async () => {
+    const state = createSettingsState();
+    await expect(state.saveProvider({ name: '', protocol: 'openai_compatible', baseUrl: '', model: '' }))
+      .rejects.toThrow('Provider name, base URL, and model are required');
+    expect(state.error).toBe('Provider name, base URL, and model are required.');
+  });
+
+  it('can save a provider and reset the form without closing the provider dialog', async () => {
+    const fetcher = vi.fn<FetchLike>(async () => json({
+      profileId: 'openai',
+      sourceAvailability: {
+        openai: {
+          available: true, name: 'OpenAI', protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-test', sourceNumber: 3, credentialHint: 'sk-te******key', persistence: 'local_file'
+        }
+      }
+    }));
+    const state = createSettingsState(new WorkspaceFacade(fetcher));
+    state.openProviders();
+    state.usePreset('openai');
+
+    await state.saveProvider({
+      id: 'openai', name: 'OpenAI', protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1',
+      key: 'sk-test-key', model: 'gpt-test'
+    }, { keepOpen: true });
+
+    expect(state.providerDialogOpen).toBe(true);
+    expect(state.providerForm).toEqual({
+      id: '', name: 'OpenRouter', protocol: 'openai_compatible',
+      baseUrl: 'https://openrouter.ai/api/v1', key: '', model: ''
+    });
+    expect(state.sources.map((source) => source.id)).toContain('openai');
+  });
+
+  it('loads and edits masked profiles without exposing saved credentials', () => {
+    const state = createSettingsState();
     state.load({
       openrouter: {
-        available: true,
-        model: 'anthropic/claude-sonnet-4.5',
-        credentialHint: 'sk-or******123',
-        persistence: 'local_file'
+        available: true, name: 'OpenRouter', protocol: 'openai_compatible', baseUrl: 'https://openrouter.ai/api/v1',
+        model: 'anthropic/claude-fable-5', sourceNumber: 3, credentialHint: 'sk-or******123', persistence: 'local_file'
       }
     });
 
-    state.openOpenRouter();
-    expect(state.openRouterDialogOpen).toBe(true);
-    expect(state.openRouterKey).toBe('');
-    expect(state.openRouterModel).toBe('anthropic/claude-sonnet-4.5');
+    state.openProviders('openrouter');
 
-    const configured = await state.saveOpenRouter();
-
-    expect(configured.credentialHint).toBe('sk-or******456');
-    expect(state.openRouterDialogOpen).toBe(false);
-    expect(state.openRouterKey).toBe('');
-  });
-
-  it('requires both explicit fields when no provider is already configured', async () => {
-    const state = createSettingsState();
-    state.openOpenRouter();
-    expect(state.openRouterModel).toBe('anthropic/claude-fable-5');
-    await expect(state.saveOpenRouter({ key: '', model: '' })).rejects.toThrow('neither an OpenRouter API key nor a model ID');
-    expect(state.error).toBe('The form submitted neither an OpenRouter API key nor a model ID.');
-    state.openRouterKey = 'sk-or-test';
-    state.openRouterModel = 'provider/model';
-    expect(state.openRouterKey).toBe('sk-or-test');
-  });
-
-  it('validates and saves the submitted form values rather than stale reactive fields', async () => {
-    const fetcher = vi.fn<FetchLike>(async (_input, init) => {
-      expect(JSON.parse(String(init?.body))).toMatchObject({
-        key: 'sk-or-submitted-456',
-        model: 'anthropic/claude-fable-5'
-      });
-      return json({ sourceAvailability: {
-        openrouter: { available: true, model: 'anthropic/claude-fable-5', credentialHint: 'sk-or******456' }
-      } });
+    expect(state.providerForm).toEqual({
+      id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible',
+      baseUrl: 'https://openrouter.ai/api/v1', key: '', model: 'anthropic/claude-fable-5'
     });
-    const state = createSettingsState(new WorkspaceFacade(fetcher));
-
-    const configured = await state.saveOpenRouter({
-      key: 'sk-or-submitted-456',
-      model: 'anthropic/claude-fable-5'
-    });
-
-    expect(configured.available).toBe(true);
-    expect(configured.credentialHint).toBe('sk-or******456');
+    expect(state.sourceAvailability.openrouter.credentialHint).toBe('sk-or******123');
   });
 });

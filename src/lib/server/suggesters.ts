@@ -1,7 +1,7 @@
 import { env } from '$env/dynamic/private';
-import type { Category, GenerationRequest, InputError, InputProposal, SourceAvailability, Suggestion } from '$lib/domain';
+import type { Category, GenerationRequest, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
 import { isExactTextSpan, makeId } from '$lib/domain';
-import { maskCredential, readStoredOpenRouterSettings, writeStoredOpenRouterSettings } from '$lib/server/provider-settings';
+import { deleteStoredProviderProfile, maskCredential, readStoredProviderProfiles, upsertStoredProviderProfile, type StoredProviderProfile } from '$lib/server/provider-settings';
 import { jsonrepair } from 'jsonrepair';
 
 interface DraftSuggestion {
@@ -17,8 +17,10 @@ interface DraftSuggestion {
 }
 
 interface ConfiguredProvider {
-  id: 'openrouter' | 'ollama';
+  id: string;
+  name: string;
   number: number;
+  protocol: ProviderProtocol;
   baseUrl: string;
   key?: string;
   model: string;
@@ -26,6 +28,10 @@ interface ConfiguredProvider {
 }
 
 interface RuntimeProviderSettings {
+  profiles: Record<string, ConfiguredProvider>;
+}
+
+interface LegacyRuntimeProviderSettings {
   openrouter?: { key: string; model: string; persistence?: SourceAvailability['persistence'] };
   ollama?: { model: string; baseUrl?: string };
 }
@@ -38,76 +44,145 @@ export class ProviderOutputError extends Error {
   }
 }
 
+export class ProviderRequestError extends Error {
+  override readonly name = 'ProviderRequestError';
+
+  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = []) {
+    super(message);
+  }
+}
+
 const runtimeProviders = globalThis as typeof globalThis & {
-  __marginNoteProviderSettings?: RuntimeProviderSettings;
+  __marginNoteProviderSettings?: RuntimeProviderSettings | LegacyRuntimeProviderSettings;
 };
 
 function runtimeProviderSettings(): RuntimeProviderSettings {
-  runtimeProviders.__marginNoteProviderSettings ??= {};
-  return runtimeProviders.__marginNoteProviderSettings;
+  const current = runtimeProviders.__marginNoteProviderSettings;
+  if (current && 'profiles' in current && current.profiles && typeof current.profiles === 'object') return current;
+
+  const legacy = current as LegacyRuntimeProviderSettings | undefined;
+  const profiles: Record<string, ConfiguredProvider> = {};
+  if (legacy?.openrouter?.model) profiles.openrouter = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    number: 3,
+    protocol: 'openai_compatible',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    key: legacy.openrouter.key,
+    model: legacy.openrouter.model,
+    persistence: legacy.openrouter.persistence
+  };
+  if (legacy?.ollama?.model) profiles.ollama = {
+    id: 'ollama',
+    name: 'Ollama',
+    number: 4,
+    protocol: 'openai_compatible',
+    baseUrl: legacy.ollama.baseUrl ?? 'http://127.0.0.1:11434/v1',
+    model: legacy.ollama.model
+  };
+  const migrated = { profiles };
+  runtimeProviders.__marginNoteProviderSettings = migrated;
+  return migrated;
 }
 
 export function configureSuggestionProvider(
   input: { source: 'openrouter'; key?: string; model: string },
   options: { persist?: boolean } = {}
 ): void {
-  const stored = readStoredOpenRouterSettings();
-  const key = input.key?.trim() || stored.key || env.OPENROUTER_API_KEY;
-  const model = input.model.trim();
-  if (!key || !model) throw new Error('OpenRouter requires both an API key and a model.');
+  configureProviderProfile({
+    id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible',
+    baseUrl: 'https://openrouter.ai/api/v1', key: input.key, model: input.model
+  }, options);
+}
+
+function environmentKey(id: string): string | undefined {
+  if (id === 'openrouter') return env.OPENROUTER_API_KEY;
+  if (id === 'openai') return env.OPENAI_API_KEY;
+  if (id === 'anthropic') return env.ANTHROPIC_API_KEY;
+  return undefined;
+}
+
+export function configureProviderProfile(input: ProviderProfileInput, options: { persist?: boolean } = {}): ConfiguredProvider {
+  const stored = readStoredProviderProfiles().find((profile) => profile.id === input.id);
+  const id = input.id?.trim() || makeId('provider');
+  const key = input.key?.trim() || stored?.key || environmentKey(id);
+  const profileInput = { ...input, id, key };
+  const local = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/.test(input.baseUrl.trim());
+  if (!input.name.trim() || !input.model.trim() || !input.baseUrl.trim()) throw new Error('Provider name, base URL, and model are required.');
+  if (!key && !local) throw new Error('A remote provider requires an API key.');
   const persist = options.persist !== false;
-  if (persist) writeStoredOpenRouterSettings({ key, model });
-  runtimeProviderSettings().openrouter = {
-    key,
-    model,
-    persistence: persist || stored.key ? 'local_file' : 'environment'
+  const saved = persist ? upsertStoredProviderProfile(profileInput) : {
+    id,
+    name: input.name.trim(),
+    protocol: input.protocol,
+    baseUrl: input.baseUrl.trim().replace(/\/$/, ''),
+    model: input.model.trim(),
+    key
+  } satisfies StoredProviderProfile;
+  const provider: ConfiguredProvider = {
+    ...saved,
+    number: 3,
+    persistence: persist || stored?.key ? 'local_file' : key ? 'environment' : undefined
   };
+  runtimeProviderSettings().profiles[id] = provider;
+  return provider;
+}
+
+export function removeProviderProfile(id: string): void {
+  delete runtimeProviderSettings().profiles[id];
+  deleteStoredProviderProfile(id);
+}
+
+function environmentProfiles(): StoredProviderProfile[] {
+  const profiles: StoredProviderProfile[] = [];
+  if (env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) profiles.push({
+      id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible' as const,
+      baseUrl: 'https://openrouter.ai/api/v1', key: env.OPENROUTER_API_KEY, model: env.OPENROUTER_MODEL
+    });
+  if (env.OPENAI_API_KEY && env.OPENAI_MODEL) profiles.push({
+      id: 'openai', name: 'OpenAI', protocol: 'openai_compatible' as const,
+      baseUrl: env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1', key: env.OPENAI_API_KEY, model: env.OPENAI_MODEL
+    });
+  if (env.ANTHROPIC_API_KEY && env.ANTHROPIC_MODEL) profiles.push({
+      id: 'anthropic', name: 'Anthropic', protocol: 'anthropic' as const,
+      baseUrl: env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com/v1', key: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL
+    });
+  if (env.OLLAMA_MODEL) profiles.push({
+      id: 'ollama', name: 'Ollama', protocol: 'openai_compatible' as const,
+      baseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434/v1', model: env.OLLAMA_MODEL
+    });
+  return profiles;
 }
 
 function configuredProviders(): ConfiguredProvider[] {
-  const runtime = runtimeProviderSettings();
-  const stored = readStoredOpenRouterSettings();
-  const openrouterKey = runtime.openrouter?.key || stored.key || env.OPENROUTER_API_KEY;
-  const openrouterModel = runtime.openrouter?.model || stored.model || env.OPENROUTER_MODEL;
-  const openrouterPersistence = runtime.openrouter?.persistence || (stored.key ? 'local_file' : env.OPENROUTER_API_KEY ? 'environment' : undefined);
-  const ollamaModel = runtime.ollama?.model || env.OLLAMA_MODEL;
-  const ollamaBaseUrl = runtime.ollama?.baseUrl || env.OLLAMA_BASE_URL;
-  const providers: ConfiguredProvider[] = [];
-  if (openrouterKey && openrouterModel) {
-    providers.push({
-      id: 'openrouter',
-      number: 3,
-      baseUrl: 'https://openrouter.ai/api/v1',
-      key: openrouterKey,
-      model: openrouterModel,
-      persistence: openrouterPersistence
-    });
-  }
-  if (ollamaModel) {
-    providers.push({ id: 'ollama', number: 4, baseUrl: ollamaBaseUrl ?? 'http://127.0.0.1:11434/v1', model: ollamaModel });
-  }
-  return providers;
+  const stored = readStoredProviderProfiles();
+  const environment = environmentProfiles();
+  const runtime = Object.values(runtimeProviderSettings().profiles);
+  const profiles = new Map<string, StoredProviderProfile & { persistence?: SourceAvailability['persistence'] }>();
+  for (const profile of environment) profiles.set(profile.id, { ...profile, persistence: 'environment' });
+  for (const profile of stored) profiles.set(profile.id, { ...profile, persistence: 'local_file' });
+  for (const profile of runtime) profiles.set(profile.id, profile);
+  return [...profiles.values()].map((profile, index) => ({ ...profile, number: index + 3 }));
 }
 
 export function suggestionSourceAvailability(): Record<string, SourceAvailability> {
   const providers = configuredProviders();
-  const openrouter = providers.find((provider) => provider.id === 'openrouter');
-  const ollama = providers.find((provider) => provider.id === 'ollama');
-  return {
+  const availability: Record<string, SourceAvailability> = {
     'local-craft': { available: true },
-    'fake-sentinel': { available: true },
-    openrouter: openrouter
-      ? {
-          available: true,
-          model: openrouter.model,
-          credentialHint: maskCredential(openrouter.key ?? ''),
-          persistence: openrouter.persistence
-        }
-      : { available: false, reason: 'Configure OpenRouter here or set OPENROUTER_API_KEY and OPENROUTER_MODEL.' },
-    ollama: ollama
-      ? { available: true, model: ollama.model }
-      : { available: false, reason: 'Set OLLAMA_MODEL, then restart the app.' }
+    'fake-sentinel': { available: true }
   };
+  for (const provider of providers) availability[provider.id] = {
+    available: true,
+    name: provider.name,
+    model: provider.model,
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    sourceNumber: provider.number,
+    configurable: provider.persistence === 'local_file',
+    credentialHint: provider.key ? maskCredential(provider.key) : undefined,
+    persistence: provider.persistence
+  };
+  return availability;
 }
 
 function proposalFromDraft(draft: DraftSuggestion, request: GenerationRequest, source: string, sourceNumber: number, sourceKind: 'local' | 'ai', latencyMs: number, costUsd = 0): InputProposal {
@@ -354,7 +429,9 @@ function balancedJsonCandidates(content: string): string[] {
   return candidates;
 }
 
-function parseProviderJson(content: string): { value: unknown; repaired: boolean } {
+type ProviderJsonNormalization = 'none' | 'extracted' | 'repaired';
+
+function parseProviderJson(content: string): { value: unknown; normalization: ProviderJsonNormalization } {
   const trimmed = content.trim().replace(/^\uFEFF/, '');
   const fenced = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1].trim());
   const unclosedFence = /```(?:json)?\s*([\s\S]*)$/i.exec(trimmed)?.[1].trim();
@@ -371,20 +448,23 @@ function parseProviderJson(content: string): { value: unknown; repaired: boolean
   ].filter((candidate): candidate is string => Boolean(candidate)))];
   for (const candidate of candidates) {
     const withoutTrailingCommas = candidate.replace(/,\s*([}\]])/g, '$1');
-    const representations = [
-      { value: candidate, repaired: candidate !== trimmed },
-      { value: withoutTrailingCommas, repaired: candidate !== trimmed || withoutTrailingCommas !== candidate }
+    const representations: Array<{ value: string; normalization: ProviderJsonNormalization }> = [
+      { value: candidate, normalization: candidate === trimmed ? 'none' : 'extracted' },
+      { value: withoutTrailingCommas, normalization: withoutTrailingCommas !== candidate ? 'repaired' : candidate === trimmed ? 'none' : 'extracted' }
     ];
     try {
       const repaired = jsonrepair(candidate);
-      representations.push({ value: repaired, repaired: true });
+      representations.push({
+        value: repaired,
+        normalization: repaired !== candidate ? 'repaired' : candidate === trimmed ? 'none' : 'extracted'
+      });
     } catch {
       // The output is not locally repairable; other extracted candidates may be.
     }
     for (const representation of representations) {
       try {
         const parsed = JSON.parse(representation.value) as unknown;
-        if (typeof parsed === 'object' && parsed !== null) return { value: parsed, repaired: representation.repaired };
+        if (typeof parsed === 'object' && parsed !== null) return { value: parsed, normalization: representation.normalization };
       } catch {
         // Try the next locally recoverable representation.
       }
@@ -399,7 +479,7 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function parseProviderSuggestionsDetailed(content: string): {
   suggestions: Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }>;
-  locallyRepaired: boolean;
+  normalization: ProviderJsonNormalization;
 } {
   const parsedResult = parseProviderJson(content);
   const parsed = parsedResult.value;
@@ -433,7 +513,7 @@ function parseProviderSuggestionsDetailed(content: string): {
     }];
   });
   if (rawSuggestions.length && !valid.length) throw new ProviderOutputError('Provider JSON contained suggestions, but none matched the required suggestion schema.');
-  return { suggestions: valid, locallyRepaired: parsedResult.repaired };
+  return { suggestions: valid, normalization: parsedResult.normalization };
 }
 
 export function parseProviderSuggestions(content: string): Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> {
@@ -463,7 +543,100 @@ export function resolveProviderRange(
   return isExactTextSpan(passage, from, to, draft.sourceText) ? { from, to } : null;
 }
 
-async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: string, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number; providerAttempts: number; diagnostics: Array<Omit<InputError, 'source'>> }> {
+function statusRecovery(status: number): { classification: RecoveryClassification; recoveryAction: InputError['recoveryAction']; retryable: boolean } {
+  if (status === 401 || status === 403) return { classification: 'authentication', recoveryAction: 'reconfigure', retryable: false };
+  if (status === 429) return { classification: 'rate_limited', recoveryAction: 'retry_transient', retryable: true };
+  if ([408, 409, 425, 500, 502, 503, 504].includes(status)) return { classification: 'transient', recoveryAction: 'retry_transient', retryable: true };
+  if (status === 400 || status === 404 || status === 422) return { classification: 'configuration', recoveryAction: 'reconfigure', retryable: false };
+  return { classification: 'provider_unavailable', recoveryAction: 'human', retryable: false };
+}
+
+async function providerCompletion(
+  provider: ConfiguredProvider,
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  maxTokens: number
+): Promise<{ content: string; inputTokens?: number; outputTokens?: number; truncated: boolean }> {
+  const endpoint = provider.protocol === 'anthropic' ? '/messages' : '/chat/completions';
+  const headers = provider.protocol === 'anthropic'
+    ? { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...(provider.key ? { 'x-api-key': provider.key } : {}) }
+    : { 'content-type': 'application/json', ...(provider.key ? { authorization: `Bearer ${provider.key}` } : {}) };
+  const directOpenAI = provider.protocol === 'openai_compatible' && /^https:\/\/api\.openai\.com(?:\/|$)/.test(provider.baseUrl);
+  const body = provider.protocol === 'anthropic'
+    ? { model: provider.model, max_tokens: maxTokens, temperature: 0.3, messages }
+    : directOpenAI
+      ? { model: provider.model, max_completion_tokens: maxTokens, messages }
+      : { model: provider.model, max_tokens: maxTokens, temperature: 0.3, messages };
+  let response: Response;
+  try {
+    response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Provider network request failed';
+    throw new ProviderRequestError(message, [{
+      kind: 'provider_request',
+      classification: 'transient',
+      recoveryAction: 'retry_transient',
+      recovered: false,
+      message
+    }]);
+  }
+  const rawResponse = await response.text();
+  if (!response.ok) {
+    const detail = rawResponse.slice(0, 2000);
+    const recovery = statusRecovery(response.status);
+    throw new ProviderRequestError(`Provider returned ${response.status}${detail ? `: ${detail}` : ''}`, [{
+      kind: 'provider_request',
+      status: response.status,
+      classification: recovery.classification,
+      recoveryAction: recovery.recoveryAction,
+      recovered: false,
+      message: `Provider returned ${response.status}${detail ? `: ${detail}` : ''}`
+    }]);
+  }
+  let data: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(rawResponse) as unknown;
+    if (!record(parsed)) throw new Error('Provider response envelope was not an object.');
+    data = parsed;
+  } catch (error) {
+    const message = `Provider returned an invalid response envelope: ${error instanceof Error ? error.message : String(error)}`;
+    throw new ProviderRequestError(message, [{
+      kind: 'provider_request',
+      classification: 'transient',
+      recoveryAction: 'retry_transient',
+      recovered: false,
+      message,
+      rawOutput: rawResponse.slice(0, 6000)
+    }]);
+  }
+  if (provider.protocol === 'anthropic') {
+    const content = Array.isArray(data.content)
+      ? data.content.flatMap((item) => record(item) && item.type === 'text' && typeof item.text === 'string' ? [item.text] : []).join('\n')
+      : '';
+    const usage = record(data.usage) ? data.usage : {};
+    return {
+      content,
+      inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined,
+      outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined,
+      truncated: data.stop_reason === 'max_tokens'
+    };
+  }
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const first = record(choices[0]) ? choices[0] : {};
+  const message = record(first.message) ? first.message : {};
+  const usage = record(data.usage) ? data.usage : {};
+  return {
+    content: typeof message.content === 'string' ? message.content : '',
+    inputTokens: typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined,
+    outputTokens: typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined,
+    truncated: first.finish_reason === 'length'
+  };
+}
+
+async function requestConfiguredProvider(provider: ConfiguredProvider, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number; providerAttempts: number; diagnostics: Array<Omit<InputError, 'source'>> }> {
   const started = performance.now();
   const originalPrompt = assemblePrompt(request);
   let previousOutput = '';
@@ -471,27 +644,63 @@ async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: 
   let inputTokens = 0;
   let outputTokens = 0;
   const diagnostics: Array<Omit<InputError, 'source'>> = [];
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const messages = attempt === 1
-      ? [{ role: 'user', content: originalPrompt }]
+  const maxAttempts = 3;
+  let maxTokens = 6000;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const messages = attempt === 1 || !previousFailure
+      ? [{ role: 'user' as const, content: originalPrompt }]
       : [
-          { role: 'user', content: originalPrompt },
-          { role: 'assistant', content: previousOutput.slice(0, 12000) },
+          { role: 'user' as const, content: originalPrompt },
+          ...(previousOutput ? [{ role: 'assistant' as const, content: previousOutput.slice(0, 12000) }] : []),
           {
-            role: 'user',
+            role: 'user' as const,
             content: `Your previous response was rejected: ${previousFailure} Return the answer again as one valid JSON object matching the requested schema exactly. Return JSON only, with no Markdown fence or explanation.`
           }
         ];
-    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify({ model, temperature: 0.3, response_format: { type: 'json_object' }, messages })
-    });
-    if (!response.ok) throw new Error(`Provider returned ${response.status}`);
-    const data = await response.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
-    previousOutput = data.choices?.[0]?.message?.content ?? '{"suggestions":[]}';
-    inputTokens += data.usage?.prompt_tokens ?? 0;
-    outputTokens += data.usage?.completion_tokens ?? 0;
+    let completion;
+    try {
+      completion = await providerCompletion(provider, messages, maxTokens);
+    } catch (error) {
+      if (!(error instanceof ProviderRequestError)) throw error;
+      const diagnostic = error.diagnostics[0] ?? { kind: 'provider_request' as const, classification: 'provider_unavailable' as const, recoveryAction: 'human' as const, message: error.message };
+      const retryable = diagnostic.recoveryAction === 'retry_transient' && attempt < maxAttempts;
+      diagnostics.push({
+        ...diagnostic,
+        attempt,
+        maxAttempts,
+        model: provider.model,
+        protocol: provider.protocol,
+        outcome: retryable ? 'retry_requested' : 'rejected'
+      });
+      if (!retryable) throw new ProviderRequestError(error.message, diagnostics);
+      previousFailure = '';
+      previousOutput = '';
+      continue;
+    }
+    previousOutput = completion.content;
+    inputTokens += completion.inputTokens ?? 0;
+    outputTokens += completion.outputTokens ?? 0;
+    if (completion.truncated) {
+      const retryable = attempt < maxAttempts;
+      diagnostics.push({
+        kind: 'provider_output',
+        classification: 'truncated',
+        recoveryAction: retryable ? 'increase_budget' : 'human',
+        attempt,
+        maxAttempts,
+        model: provider.model,
+        protocol: provider.protocol,
+        recovered: false,
+        outcome: retryable ? 'retry_requested' : 'rejected',
+        message: `Provider stopped at the ${maxTokens}-token output limit.`,
+        rawOutput: previousOutput.slice(0, 6000)
+      });
+      if (!retryable) throw new ProviderOutputError('Provider output remained truncated after bounded recovery.', diagnostics);
+      maxTokens = Math.min(24000, Math.max(12000, maxTokens * 2));
+      previousFailure = '';
+      previousOutput = '';
+      continue;
+    }
     try {
       const parsedResult = parseProviderSuggestionsDetailed(previousOutput);
       const parsed = parsedResult.suggestions;
@@ -500,18 +709,26 @@ async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: 
         return range ? [{ ...item, from: request.from + range.from, to: request.from + range.to }] : [];
       });
       if (parsed.length && !drafts.length) throw new ProviderOutputError('Provider suggestions did not contain an exact, unambiguous source_text anchor.');
-      if (parsedResult.locallyRepaired) {
+      if (parsedResult.normalization !== 'none') {
+        const extracted = parsedResult.normalization === 'extracted';
         diagnostics.push({
           kind: 'provider_output',
+          classification: extracted ? 'output_nonconforming' : 'output_invalid',
+          recoveryAction: extracted ? 'extract_local' : 'repair_local',
           attempt,
+          maxAttempts,
+          model: provider.model,
+          protocol: provider.protocol,
           recovered: true,
-          outcome: 'repaired_locally',
-          message: 'Malformed provider output was repaired locally before validation.',
+          outcome: extracted ? 'normalized_locally' : 'repaired_locally',
+          message: extracted
+            ? 'Valid JSON was extracted from surrounding provider text.'
+            : 'Malformed provider output was repaired locally before validation.',
           rawOutput: previousOutput.slice(0, 6000)
         });
       }
-      if (attempt === 2 && diagnostics[0]) {
-        diagnostics[0] = { ...diagnostics[0], recovered: true, outcome: 'recovered_by_retry' };
+      for (let index = 0; index < diagnostics.length; index += 1) {
+        if (diagnostics[index].outcome === 'retry_requested') diagnostics[index] = { ...diagnostics[index], recovered: true, outcome: 'recovered_by_retry' };
       }
       return {
         drafts,
@@ -526,13 +743,18 @@ async function openAiShaped(baseUrl: string, apiKey: string | undefined, model: 
       previousFailure = error.message;
       diagnostics.push({
         kind: 'provider_output',
+        classification: 'output_invalid',
+        recoveryAction: attempt < maxAttempts ? 'correct_output' : 'human',
         attempt,
+        maxAttempts,
+        model: provider.model,
+        protocol: provider.protocol,
         recovered: false,
-        outcome: attempt === 1 ? 'retry_requested' : 'rejected',
+        outcome: attempt < maxAttempts ? 'retry_requested' : 'rejected',
         message: error.message,
         rawOutput: previousOutput.slice(0, 6000)
       });
-      if (attempt === 2) throw new ProviderOutputError(`${error.message} Automatic corrective retry also failed.`, diagnostics);
+      if (attempt === maxAttempts) throw new ProviderOutputError(`${error.message} Automatic corrective retries also failed.`, diagnostics);
     }
   }
   throw new ProviderOutputError('Provider output recovery exhausted.');
@@ -542,7 +764,7 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
   const proposals: InputProposal[] = [];
   const errors: InputError[] = [];
   const providers = configuredProviders();
-  const activeProviders = providers.filter((provider) => request.sourceStates[provider.id] !== 'off');
+  const activeProviders = providers.filter((provider) => request.sourceStates[provider.id] && request.sourceStates[provider.id] !== 'off');
   const selectionRequest = request.prompt.id !== 'sentinel';
   if (request.sourceStates['local-craft'] !== 'off') {
     const started = performance.now();
@@ -557,9 +779,9 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
     proposals.push(...scriptedChecks(request).map((draft) => proposalFromDraft(draft, request, 'fake-sentinel', 2, 'ai', 280, 0.00002)));
   }
   for (const provider of providers) {
-    if (request.sourceStates[provider.id] === 'off') continue;
+    if (!request.sourceStates[provider.id] || request.sourceStates[provider.id] === 'off') continue;
     try {
-      const result = await openAiShaped(provider.baseUrl, provider.key, provider.model, request);
+      const result = await requestConfiguredProvider(provider, request);
       errors.push(...result.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
       proposals.push(...result.drafts.map((draft) => {
         const proposal = proposalFromDraft(draft, request, provider.id, provider.number, 'ai', result.latencyMs);
@@ -570,7 +792,7 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
         return proposal;
       }));
     } catch (error) {
-      if (error instanceof ProviderOutputError && error.diagnostics.length) {
+      if ((error instanceof ProviderOutputError || error instanceof ProviderRequestError) && error.diagnostics.length) {
         errors.push(...error.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
       } else {
         errors.push({
@@ -582,9 +804,9 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
     }
   }
   const availability = suggestionSourceAvailability();
-  for (const source of ['openrouter', 'ollama'] as const) {
-    if (request.sourceStates[source] !== 'off' && !availability[source].available) {
-      errors.push({ source, kind: 'configuration', message: availability[source].reason ?? 'Source is not configured.' });
+  for (const [source, participation] of Object.entries(request.sourceStates)) {
+    if (participation !== 'off' && source !== 'local-craft' && source !== 'fake-sentinel' && !availability[source]?.available) {
+      errors.push({ source, kind: 'configuration', classification: 'configuration', recoveryAction: 'reconfigure', message: availability[source]?.reason ?? 'Source is not configured.' });
     }
   }
   return { proposals, errors };

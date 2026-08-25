@@ -78,6 +78,27 @@ describe('WorkspaceFacade', () => {
     });
   });
 
+  it('keeps a recoverable provider-settings warning separate from the loaded writing workspace', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input) => {
+      const path = String(input);
+      if (path === '/api/workspace') return json(persistent);
+      if (path === '/api/settings') return json({
+        brief,
+        prompts,
+        sourceAvailability: { 'local-craft': { available: true }, 'fake-sentinel': { available: true } },
+        providerSettingsError: 'Could not parse provider settings.'
+      });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0 } });
+      return json({ error: 'unexpected path' }, 404);
+    });
+
+    const result = await new WorkspaceFacade(fetcher).load();
+
+    expect(result.persistent).toEqual(persistent);
+    expect(result.activeDocumentId).toBe('main');
+    expect(result.providerSettingsError).toBe('Could not parse provider settings.');
+  });
+
   it('persists Svelte commits before mirroring them through the document driver', async () => {
     const order: string[] = [];
     const fetcher = vi.fn<FetchLike>(async (input, init) => {
@@ -149,12 +170,13 @@ describe('WorkspaceFacade', () => {
     const fetcher = vi.fn<FetchLike>(async (input, init) => {
       expect(String(input)).toBe('/api/settings');
       expect(JSON.parse(String(init?.body))).toEqual({
-        kind: 'provider',
-        source: 'openrouter',
-        key: 'secret-key',
-        model: 'provider/model'
+        kind: 'provider_profile',
+        profile: {
+          id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible',
+          baseUrl: 'https://openrouter.ai/api/v1', key: 'secret-key', model: 'provider/model'
+        }
       });
-      return json({ sourceAvailability: { openrouter: { available: true, model: 'provider/model' } } });
+      return json({ profileId: 'openrouter', sourceAvailability: { openrouter: { available: true, model: 'provider/model' } } });
     });
 
     const result = await new WorkspaceFacade(fetcher).configureOpenRouter('secret-key', 'provider/model');

@@ -42,7 +42,7 @@ describe('domain contracts', () => {
     expect(wordCount('  one\n two   three ')).toBe(3);
     expect(wordCount('')).toBe(0);
     expect(makeId('test')).toMatch(/^test_[a-z0-9]+_[a-z0-9]+$/);
-    expect(sourceCatalog.map((source) => source.number)).toEqual([1, 2, 3, 4]);
+    expect(sourceCatalog.map((source) => source.number)).toEqual([1, 2]);
   });
 
   it('coalesces repeated live suggestions while preserving their ledger identity', () => {

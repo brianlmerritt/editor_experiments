@@ -4,7 +4,7 @@ import { textTarget } from '$lib/workspace/attachments';
 import type { WorkspaceFacade } from '$lib/workspace/facade';
 import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
-import { richDocumentFromProseMirror } from '$lib/workspace/rich-document';
+import { richDocumentFromProseMirror, richDocumentText } from '$lib/workspace/rich-document';
 import type { AIInteractionRequest, AIInteractionService } from '$lib/ai/contracts';
 import { WorkspaceState } from './workspace.svelte';
 
@@ -111,6 +111,28 @@ const selectionPrompt: TaskPrompt = {
 };
 
 describe('semantic workspace history', () => {
+  it('switches the document identity and rich content together after history loads', async () => {
+    type SuggestionHistoryResult = Awaited<ReturnType<WorkspaceFacade['suggestionHistory']>>;
+    let releaseHistory!: (value: SuggestionHistoryResult) => void;
+    const facade = fakeFacade();
+    facade.suggestionHistory = vi.fn(() => new Promise<SuggestionHistoryResult>((resolve) => { releaseHistory = resolve; }));
+    const workspace = new WorkspaceState(facade);
+    workspace.branchId = 'main';
+    workspace.documents = [document('Original'), { ...document('Target text'), id: 'target', title: 'Target' }];
+    workspace['loadDocumentDomain'](workspace.documents[0]);
+
+    const switching = workspace.switchBranch('target');
+
+    expect(workspace.branchId).toBe('main');
+    expect(richDocumentText(workspace.richDocument)).toBe('Original');
+
+    releaseHistory({ events: [], stats: { events: 0, costUsd: 0 } });
+    await switching;
+
+    expect(workspace.branchId).toBe('target');
+    expect(richDocumentText(workspace.richDocument)).toBe('Target text');
+  });
+
   it('keeps a formatting-only editor transaction in Svelte history and canonical rich content', () => {
     const workspace = new WorkspaceState(fakeFacade());
     workspace.branchId = 'main';
@@ -242,6 +264,29 @@ describe('semantic workspace history', () => {
     expect(workspace.workspaceRevision).toBe(1);
   });
 
+  it('pauses AI dispatch while continuing to accept human editor transactions', async () => {
+    const requestInputs = vi.fn(async () => ({ proposals: [], errors: [] }));
+    const workspace = new WorkspaceState(fakeFacade(requestInputs));
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+
+    await workspace.togglePause();
+    workspace.recordEditorTransaction({
+      before: beforeDocument,
+      after: afterDocument,
+      changes: [{ nodeId: 'main', from: 1, to: 8, insertedLength: 3, deletedText: 'noticed', insertedText: 'saw' }],
+      origin: { kind: 'human' }
+    });
+    const proposals = await workspace.runSelectionPass({ from: 1, to: 4, text: 'saw' }, selectionPrompt);
+
+    expect(workspace.paused).toBe(true);
+    expect(workspace.currentDocument?.content).toBe('saw');
+    expect(workspace.documentSnapshot?.text).toBe('saw');
+    expect(proposals).toEqual([]);
+    expect(requestInputs).not.toHaveBeenCalled();
+  });
+
   it('moves an in-flight run through an edit before its target and adopts the proposal at the new range', async () => {
     let finish!: (value: { proposals: InputProposal[]; errors: [] }) => void;
     const requestInputs = vi.fn(() => new Promise<{ proposals: InputProposal[]; errors: [] }>((resolve) => { finish = resolve; }));
@@ -320,6 +365,32 @@ describe('semantic workspace history', () => {
     warning.mockRestore();
   });
 
+  it('logs recovered provider normalization as information instead of a malformed-output warning', async () => {
+    const requestInputs = vi.fn(async () => ({
+      proposals: [],
+      errors: [{
+        source: 'openrouter', kind: 'provider_output' as const, classification: 'output_nonconforming' as const,
+        recoveryAction: 'extract_local' as const, recovered: true, outcome: 'normalized_locally' as const,
+        message: 'Valid JSON was extracted from surrounding provider text.'
+      }]
+    }));
+    const information = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const workspace = new WorkspaceState(fakeFacade(requestInputs));
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+
+    expect(await workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt)).toEqual([]);
+    expect(workspace.runs.at(-1)?.state).toBe('completed');
+    expect(information).toHaveBeenCalledWith('[Margin Note] Provider output normalized', expect.objectContaining({
+      documentId: 'main', outcome: 'normalized_locally'
+    }));
+    expect(warning).not.toHaveBeenCalled();
+    information.mockRestore();
+    warning.mockRestore();
+  });
+
   it('captures a typed activity, target, and inspectable context before dispatch', async () => {
     const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
       proposals: [{ kind: 'craft_input', payload: proposal() }],
@@ -385,6 +456,37 @@ describe('semantic workspace history', () => {
       state: 'failed',
       errors: [expect.objectContaining({ kind: 'contract', outcome: 'rejected' })]
     });
+  });
+
+  it('manually retries a failed run as a new activity against the unchanged live target', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>()
+      .mockImplementationOnce(async (request) => ({
+        proposals: [],
+        diagnostics: [{ source: 'local-craft', kind: 'provider_request', classification: 'transient', recoveryAction: 'human', recovered: false, message: 'Recovery exhausted' }],
+        context: request.context
+      }))
+      .mockImplementationOnce(async (request) => ({
+        proposals: [{ kind: 'craft_input', payload: proposal() }],
+        diagnostics: [],
+        context: request.context
+      }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+
+    expect(await workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt)).toEqual([]);
+    const failed = workspace.runs.at(-1)!;
+    expect(failed.state).toBe('failed');
+
+    const adopted = await workspace.retryRun(failed.id);
+
+    expect(adopted).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(workspace.runs).toHaveLength(2);
+    expect(workspace.runs[1].activityId).not.toBe(failed.activityId);
+    expect(workspace.activities.map((activity) => activity.state)).toEqual(['failed', 'completed']);
+    expect(workspace.currentDocument?.content).toBe('noticed');
   });
 
   it('does not resurrect a dismissed input after preceding text moves its target', async () => {

@@ -79,8 +79,15 @@ export interface AIServiceDiagnostic {
   kind?: 'provider_output' | 'provider_request' | 'configuration' | 'contract';
   attempt?: number;
   recovered?: boolean;
-  outcome?: 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
+  outcome?: 'normalized_locally' | 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
   rawOutput?: string;
+  classification?: 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract';
+  recoveryAction?: 'none' | 'extract_local' | 'repair_local' | 'correct_output' | 'retry_transient' | 'increase_budget' | 'reconfigure' | 'human';
+  status?: number;
+  maxAttempts?: number;
+  model?: string;
+  protocol?: 'openai_compatible' | 'anthropic';
+  latencyMs?: number;
 }
 
 export interface AIInteractionResult<T = unknown> {
