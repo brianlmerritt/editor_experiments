@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { InputProposal, LedgerEvent, Suggestion, TaskPrompt } from '$lib/domain';
+import type { CraftRun, InputProposal, LedgerEvent, Suggestion, TaskPrompt } from '$lib/domain';
 import { textTarget } from '$lib/workspace/attachments';
-import type { WorkspaceFacade } from '$lib/workspace/facade';
+import type { CommitReceipt, WorkspaceFacade } from '$lib/workspace/facade';
 import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
 import { richDocumentFromProseMirror, richDocumentText } from '$lib/workspace/rich-document';
@@ -99,6 +99,9 @@ function fakeFacade(requestInputs?: WorkspaceFacade['requestInputs']): Workspace
       documentId: transaction.documentId,
       durableRevision: 2,
       updatedAt: '2026-08-18T00:00:01Z'
+    })),
+    saveProject: vi.fn(async (id, title, extensions = {}) => ({
+      id, title, extensions, revision: 2, updatedAt: '2026-08-18T00:00:01Z'
     }))
   } as unknown as WorkspaceFacade;
 }
@@ -111,7 +114,22 @@ const selectionPrompt: TaskPrompt = {
 };
 
 describe('semantic workspace history', () => {
-  it('switches the document identity and rich content together after history loads', async () => {
+  it('clears live Inputs without turning them into never-ask-again rejections', async () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+    workspace.inputs = [input(), { ...input(), id: 'input-hidden', state: 'hidden' }, { ...input(), id: 'input-accepted', state: 'accepted' }];
+
+    expect(await workspace.clearPendingInputs()).toBe(2);
+    expect(workspace.inputs.map((item) => item.state)).toEqual(['cleared', 'cleared', 'accepted']);
+    expect(workspace.canUndo).toBe(true);
+
+    workspace.undoWorkspace();
+    expect(workspace.inputs.map((item) => item.state)).toEqual(['pending', 'hidden', 'accepted']);
+  });
+
+  it('switches document identity and rich content without waiting for lazy history', async () => {
     type SuggestionHistoryResult = Awaited<ReturnType<WorkspaceFacade['suggestionHistory']>>;
     let releaseHistory!: (value: SuggestionHistoryResult) => void;
     const facade = fakeFacade();
@@ -123,14 +141,45 @@ describe('semantic workspace history', () => {
 
     const switching = workspace.switchBranch('target');
 
-    expect(workspace.branchId).toBe('main');
-    expect(richDocumentText(workspace.richDocument)).toBe('Original');
-
-    releaseHistory({ events: [], stats: { events: 0, costUsd: 0 } });
-    await switching;
-
     expect(workspace.branchId).toBe('target');
     expect(richDocumentText(workspace.richDocument)).toBe('Target text');
+    await switching;
+
+    releaseHistory({ events: [], stats: { events: 0, costUsd: 0 } });
+    await vi.waitFor(() => expect(facade.suggestionHistory).toHaveBeenCalledWith('target'));
+  });
+
+  it('keeps a dirty document navigable while its durable save completes in the background', async () => {
+    let releaseCommit!: (value: Awaited<ReturnType<WorkspaceFacade['commit']>>) => void;
+    const facade = fakeFacade();
+    facade.commit = vi.fn(() => new Promise<CommitReceipt>((resolve) => { releaseCommit = resolve; }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.branchId = 'main';
+    workspace.documents = [document('noticed'), { ...document('Target text'), id: 'target', title: 'Target' }];
+    workspace.setEditorReady(beforeDocument);
+    workspace.recordEditorTransaction({
+      before: beforeDocument,
+      after: afterDocument,
+      changes: [{ nodeId: 'main', from: 1, to: 8, insertedLength: 3 }],
+      origin: { kind: 'human' }
+    });
+    workspace.markCurrentDocumentDirty();
+
+    const saving = workspace.persistCurrentDocument('Background save');
+    expect(workspace.currentDocumentSaveState).toBe('saving');
+    expect(workspace.documents.find((item) => item.id === 'main')?.content).toBe('saw');
+
+    await workspace.switchBranch('target');
+    expect(workspace.branchId).toBe('target');
+    expect(workspace.currentDocument?.content).toBe('Target text');
+    await workspace.switchBranch('main');
+    expect(workspace.currentDocument?.content).toBe('saw');
+
+    await vi.waitFor(() => expect(facade.commit).toHaveBeenCalledTimes(1));
+    releaseCommit({ transactionId: 'commit', documentId: 'main', durableRevision: 2, updatedAt: '2026-08-18T00:00:01Z' });
+    await saving;
+    expect(workspace.currentDocumentSaveState).toBe('saved');
   });
 
   it('keeps a formatting-only editor transaction in Svelte history and canonical rich content', () => {
@@ -425,7 +474,7 @@ describe('semantic workspace history', () => {
       target: { exactText: 'noticed', sourceRevision: 0 }
     });
     expect(request.context.items.map((item) => item.title)).toEqual(expect.arrayContaining([
-      'Heighten', 'Writing brief', 'Main draft', 'Story Spine', 'Mara'
+      'Heighten', 'Main draft', 'Spine (including story brief)', 'Mara'
     ]));
     expect(workspace.activities.at(-1)).toMatchObject({ state: 'completed', runIds: [request.runId] });
     expect(workspace.runs.at(-1)?.contextManifest).toEqual(request.context);
@@ -437,6 +486,107 @@ describe('semantic workspace history', () => {
       contextManifestId: request.runId
     });
     expect(workspace.currentDocument?.content).toBe('noticed');
+  });
+
+  it('publishes each provider check as it completes without waiting for the review activity', async () => {
+    const releases = new Map<string, (result: Awaited<ReturnType<AIInteractionService['execute']>>) => void>();
+    const execute = vi.fn<AIInteractionService['execute']>((request) => {
+      const source = request.sources.find((item) => item.participation !== 'off')?.sourceId ?? 'unknown';
+      return new Promise((resolve) => releases.set(source, resolve));
+    });
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'visible' };
+    workspace.setEditorReady(beforeDocument);
+    const arrivals: string[][] = [];
+    const prompt = { id: 'sentinel', name: 'Review Instructions', version: 1, instruction: 'Review this passage.' };
+
+    const review = workspace.runCraftPass(prompt, undefined, (inputs) => arrivals.push(inputs.map((item) => item.source)));
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    expect(workspace.runs.map((run) => Object.entries(run.sourceStates).filter(([, state]) => state !== 'off').map(([source]) => source))).toEqual([
+      ['local-craft'], ['fake-sentinel']
+    ]);
+
+    releases.get('fake-sentinel')?.({
+      proposals: [{ kind: 'craft_input', payload: { ...proposal(), proposalId: 'sentinel-proposal', source: 'fake-sentinel', sourceNumber: 2, category: 'cadence', comment: 'Vary the sentence rhythm.' } }],
+      diagnostics: [],
+      context: execute.mock.calls[1][0].context
+    });
+    await vi.waitFor(() => expect(arrivals).toEqual([['fake-sentinel']]));
+    expect(workspace.inputs.map((item) => item.source)).toEqual(['fake-sentinel']);
+    expect(workspace.activities.at(-1)?.state).toBe('running');
+
+    releases.get('local-craft')?.({
+      proposals: [{ kind: 'craft_input', payload: { ...proposal(), proposalId: 'local-proposal', source: 'local-craft', sourceNumber: 1, sourceKind: 'local', comment: 'Use a direct perception verb.' } }],
+      diagnostics: [],
+      context: execute.mock.calls[0][0].context
+    });
+    await review;
+
+    expect(arrivals).toEqual([['fake-sentinel'], ['local-craft']]);
+    expect(workspace.inputs.map((item) => item.source).sort()).toEqual(['fake-sentinel', 'local-craft']);
+    expect(workspace.activities.at(-1)?.state).toBe('completed');
+  });
+
+  it('freezes writer context choices while retaining omitted evidence in the manifest', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({ proposals: [], diagnostics: [], context: request.context }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [
+      document(),
+      { ...document('Keep Mara in close third.'), id: 'spine', role: 'spine', title: 'Spine' },
+      { ...document('The station clock is unreliable.'), id: 'research', role: 'navigator_node', title: 'Station research' }
+    ];
+    workspace.contextBuckets = [{
+      id: 'context-mara', projectId: 'project', documentId: null, scope: 'project', title: 'Mara',
+      role: 'fact', content: 'Mara dislikes clocks.', revision: 2, extensions: {}, updatedAt: '2026-08-18T00:00:00Z'
+    }];
+    workspace.setEditorReady(beforeDocument);
+
+    await workspace.runCraftPass(selectionPrompt, {
+      includeMaterial: false,
+      includeRelationships: false,
+      includeTodos: false,
+      addedSourceIds: ['research']
+    });
+
+    const request = execute.mock.calls[0][0] as AIInteractionRequest;
+    expect(request.context.items.find((item) => item.sourceId === 'context-mara')).toMatchObject({ sent: false, omissionReason: 'writer_excluded' });
+    expect(request.context.items.find((item) => item.sourceId === 'research')).toMatchObject({ sent: true, inclusion: 'writer_added' });
+    expect(workspace.runs[0].requestedContextManifest).toEqual(request.context);
+  });
+
+  it('reconciles orphaned running work into an explicit durable decision', async () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+    const run: CraftRun = {
+      id: 'run-interrupted', activityId: 'activity-interrupted', batchId: 'activity-interrupted', scope: 'document',
+      documentId: 'main', sourceRevision: 1, target: textTarget('main', 1, 8, 'noticed'), originalText: 'noticed',
+      promptId: 'sentinel', promptVersion: 1, sourceStates: { openrouter: 'visible' }, state: 'running', proposalIds: [], errors: [],
+      createdAt: '2026-08-18T00:00:00Z'
+    };
+    workspace.runs = [run];
+    workspace.activities = [{
+      id: 'activity-interrupted', documentId: 'main', scope: 'document', intent: 'review', actionId: 'sentinel', actionVersion: 1,
+      state: 'running', runIds: ['run-interrupted'], createdAt: '2026-08-18T00:00:00Z'
+    }];
+
+    expect(workspace['reconcileInterruptedRuns']()).toBe(1);
+    expect(workspace.runs[0]).toMatchObject({
+      state: 'failed',
+      errors: [expect.objectContaining({ source: 'openrouter', classification: 'interrupted', recovered: false })]
+    });
+    expect(workspace.activities[0].state).toBe('failed');
+
+    await workspace.completeInterruptedRun('run-interrupted');
+    expect(workspace.runs[0]).toMatchObject({ state: 'discarded', errors: [expect.objectContaining({ recovered: true, outcome: 'rejected' })] });
+    expect(workspace.activities[0].state).toBe('discarded');
   });
 
   it('rejects proposals when the service alters required Writing Context', async () => {
@@ -485,6 +635,7 @@ describe('semantic workspace history', () => {
     expect(execute).toHaveBeenCalledTimes(2);
     expect(workspace.runs).toHaveLength(2);
     expect(workspace.runs[1].activityId).not.toBe(failed.activityId);
+    expect(workspace.runs[0].errors[0]).toMatchObject({ recovered: true, outcome: 'recovered_by_retry' });
     expect(workspace.activities.map((activity) => activity.state)).toEqual(['failed', 'completed']);
     expect(workspace.currentDocument?.content).toBe('noticed');
   });

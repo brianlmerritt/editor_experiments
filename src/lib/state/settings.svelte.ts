@@ -10,6 +10,35 @@ export interface ProviderForm {
   model: string;
 }
 
+export type ProviderPreset = 'openrouter' | 'openai' | 'anthropic' | 'ollama';
+const providerPresetStorageKey = 'margin-note:last-provider-service';
+
+function rememberProviderPreset(preset: ProviderPreset): void {
+  if (typeof localStorage === 'undefined') return;
+  try { localStorage.setItem(providerPresetStorageKey, preset); } catch { /* Browser storage may be unavailable. */ }
+}
+
+function rememberedProviderPreset(): ProviderPreset {
+  if (typeof localStorage === 'undefined') return 'openrouter';
+  try {
+    const stored = localStorage.getItem(providerPresetStorageKey);
+    return stored === 'openrouter' || stored === 'openai' || stored === 'anthropic' || stored === 'ollama'
+      ? stored
+      : 'openrouter';
+  } catch {
+    return 'openrouter';
+  }
+}
+
+export function providerPresetFor(form: Pick<ProviderForm, 'protocol' | 'baseUrl'>): ProviderPreset | null {
+  const baseUrl = form.baseUrl.trim().replace(/\/$/, '').toLowerCase();
+  if (form.protocol === 'openai_compatible' && baseUrl === 'https://openrouter.ai/api/v1') return 'openrouter';
+  if (form.protocol === 'openai_compatible' && baseUrl === 'https://api.openai.com/v1') return 'openai';
+  if (form.protocol === 'anthropic' && baseUrl === 'https://api.anthropic.com/v1') return 'anthropic';
+  if (form.protocol === 'openai_compatible' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/v1$/.test(baseUrl)) return 'ollama';
+  return null;
+}
+
 export interface SettingsSource {
   id: string;
   number: number;
@@ -29,15 +58,14 @@ function unavailableSources(): Record<string, SourceAvailability> {
   return Object.fromEntries(sourceCatalog.map((source) => [source.id, { available: true }]));
 }
 
-function blankProvider(): ProviderForm {
-  return {
-    id: '',
-    name: 'OpenRouter',
-    protocol: 'openai_compatible',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    key: '',
-    model: ''
+function blankProvider(preset: ProviderPreset = rememberedProviderPreset()): ProviderForm {
+  const presets: Record<ProviderPreset, ProviderForm> = {
+    openrouter: { id: '', name: 'OpenRouter', protocol: 'openai_compatible', baseUrl: 'https://openrouter.ai/api/v1', key: '', model: '' },
+    openai: { id: '', name: 'OpenAI', protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1', key: '', model: '' },
+    anthropic: { id: '', name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', key: '', model: '' },
+    ollama: { id: '', name: 'Ollama', protocol: 'openai_compatible', baseUrl: 'http://127.0.0.1:11434/v1', key: '', model: '' }
   };
+  return { ...presets[preset] };
 }
 
 function initialSettings(): SettingsSnapshot {
@@ -93,16 +121,13 @@ export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
           key: '',
           model: profile.model ?? ''
         };
+        const preset = providerPresetFor(state.providerForm);
+        if (preset) rememberProviderPreset(preset);
       } else state.providerForm = blankProvider();
     },
-    usePreset(preset: 'openrouter' | 'openai' | 'anthropic' | 'ollama') {
-      const presets: Record<typeof preset, ProviderForm> = {
-        openrouter: { id: 'openrouter', name: 'OpenRouter', protocol: 'openai_compatible', baseUrl: 'https://openrouter.ai/api/v1', key: '', model: '' },
-        openai: { id: 'openai', name: 'OpenAI', protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1', key: '', model: '' },
-        anthropic: { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', key: '', model: '' },
-        ollama: { id: 'ollama', name: 'Ollama', protocol: 'openai_compatible', baseUrl: 'http://127.0.0.1:11434/v1', key: '', model: '' }
-      };
-      state.providerForm = { ...presets[preset] };
+    usePreset(preset: ProviderPreset) {
+      rememberProviderPreset(preset);
+      state.providerForm = { ...blankProvider(preset), id: state.providerForm.id };
       state.error = null;
     },
     setProviderField<K extends keyof ProviderForm>(field: K, value: ProviderForm[K]) {
@@ -134,6 +159,8 @@ export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
       try {
         const result = await facade.configureProvider(profile);
         applyAvailability(result.sourceAvailability);
+        const preset = providerPresetFor(profile);
+        if (preset) rememberProviderPreset(preset);
         state.providerDialogOpen = options.keepOpen === true;
         state.providerForm = blankProvider();
         return { id: result.profileId, availability: availability(result.profileId) };

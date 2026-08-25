@@ -1,12 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WorkspaceFacade, type FetchLike } from '$lib/workspace/facade';
-import { createSettingsState } from './settings.svelte';
+import { createSettingsState, providerPresetFor } from './settings.svelte';
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
 describe('Svelte settings state', () => {
+  it('identifies the selected provider service from protocol and endpoint', () => {
+    expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'https://openrouter.ai/api/v1/' })).toBe('openrouter');
+    expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1' })).toBe('openai');
+    expect(providerPresetFor({ protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1' })).toBe('anthropic');
+    expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'http://localhost:11434/v1' })).toBe('ollama');
+    expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'https://example.test/v1' })).toBeNull();
+  });
+
   it('owns a named provider form and adds the configured source', async () => {
     const fetcher = vi.fn<FetchLike>(async (_input, init) => {
       expect(JSON.parse(String(init?.body))).toEqual({
@@ -31,7 +39,7 @@ describe('Svelte settings state', () => {
     state.usePreset('anthropic');
 
     expect(state.providerDialogOpen).toBe(true);
-    expect(state.providerForm).toMatchObject({ id: 'anthropic', protocol: 'anthropic' });
+    expect(state.providerForm).toMatchObject({ id: '', protocol: 'anthropic' });
 
     const configured = await state.saveProvider({
       id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1',
@@ -76,6 +84,22 @@ describe('Svelte settings state', () => {
       baseUrl: 'https://openrouter.ai/api/v1', key: '', model: ''
     });
     expect(state.sources.map((source) => source.id)).toContain('openai');
+  });
+
+  it('uses the most recently selected service for the next new provider', () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value)
+    });
+    const state = createSettingsState();
+    state.openProviders();
+    state.usePreset('anthropic');
+    state.closeProviders();
+    state.openProviders();
+
+    expect(state.providerForm).toMatchObject({ name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1' });
+    vi.unstubAllGlobals();
   });
 
   it('loads and edits masked profiles without exposing saved credentials', () => {

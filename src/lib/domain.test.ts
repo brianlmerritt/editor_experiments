@@ -65,6 +65,14 @@ describe('domain contracts', () => {
     expect(result.suppressed[0].canonical.id).toBe('sg_rejected');
   });
 
+  it('allows a cleared suggestion to be raised again by a later review', () => {
+    const cleared = suggestion({ id: 'sg_cleared', state: 'cleared' });
+    const repeated = suggestion({ id: 'sg_again' });
+    const result = coalesceDuplicateSuggestions([cleared, repeated]);
+    expect(result.suggestions.map((item) => item.state)).toEqual(['cleared', 'pending']);
+    expect(result.suppressed).toEqual([]);
+  });
+
   it('recognizes exact source spans only at stable text boundaries', () => {
     const passage = 'Mara watched the porter turn the key.';
     expect(isExactTextSpan(passage, 17, 23, 'porter')).toBe(true);

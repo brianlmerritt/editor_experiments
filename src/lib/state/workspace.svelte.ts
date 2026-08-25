@@ -1,5 +1,5 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
-import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
+import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIContextSelection, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
 import { FacadeAIInteractionService } from '$lib/ai/service';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
@@ -34,6 +34,12 @@ const defaultBrief: WritingBrief = { version: 1, form: 'fiction', pov: 'close th
 const defaultPrompt: TaskPrompt = { id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Flag craft issues precisely.' };
 const attachmentBehaviourVersion = 2;
 const authorityVersion = 2;
+const defaultAIContextSelection: AIContextSelection = {
+  includeMaterial: true,
+  includeRelationships: true,
+  includeTodos: true,
+  addedSourceIds: []
+};
 
 function isInputProposalPayload(value: unknown): value is InputProposal {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -67,6 +73,8 @@ interface NavigatorHistoryEntry {
   after: NavigatorHistorySnapshot;
   createdAt: number;
 }
+
+export type DocumentSaveState = 'saved' | 'pending' | 'saving' | 'failed';
 
 export class WorkspaceState {
   sessionId = $state('session_pending');
@@ -107,9 +115,11 @@ export class WorkspaceState {
   generating = $state(false);
   notice = $state<string | null>(null);
   lastError = $state<string | null>(null);
+  documentSaveStates = $state<Record<string, DocumentSaveState>>({});
   private dispatches = new Map<string, AbortController>();
   private dispatchRunIds = new Map<string, string>();
-  private documentSave: Promise<void> = Promise.resolve();
+  private documentSaves = new Map<string, Promise<void>>();
+  private documentSaveVersions = new Map<string, number>();
   private initialized = false;
 
   private readonly aiService: AIInteractionService;
@@ -157,12 +167,71 @@ export class WorkspaceState {
     return this.documents.find((document) => document.id === this.branchId) ?? null;
   }
 
+  get currentDocumentSaveState(): DocumentSaveState {
+    return this.documentSaveStates[this.branchId] ?? 'saved';
+  }
+
+  get workspaceSaveState(): DocumentSaveState {
+    const states = Object.values(this.documentSaveStates);
+    if (states.includes('failed')) return 'failed';
+    if (states.includes('saving')) return 'saving';
+    if (states.includes('pending')) return 'pending';
+    return 'saved';
+  }
+
+  get unsavedDocumentCount(): number {
+    return Object.values(this.documentSaveStates).filter((state) => state !== 'saved').length;
+  }
+
+  markCurrentDocumentDirty(): void {
+    if (this.currentDocument) this.documentSaveStates[this.branchId] = 'pending';
+  }
+
   get currentContext(): ContextBucket[] {
     return this.contextBuckets.filter((bucket) => bucket.projectId === this.projectId && (bucket.scope === 'project' || bucket.documentId === this.branchId));
   }
 
   get projectNodes(): WorkspaceDocument[] {
     return this.documents.filter((document) => document.projectId === this.projectId);
+  }
+
+  get aiContextMaterials(): WorkspaceDocument[] {
+    return this.projectNodes
+      .filter((document) => !['spine', 'todos', 'navigator_todo'].includes(document.role ?? '') && document.content.trim())
+      .sort((left, right) => left.title.localeCompare(right.title, undefined, { numeric: true }));
+  }
+
+  contextSelection(actionId: string): AIContextSelection {
+    const stored = this.currentProject?.extensions.ai_context_preferences;
+    const preferences = stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? stored as Record<string, unknown>
+      : {};
+    const value = preferences[actionId];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...defaultAIContextSelection, addedSourceIds: [] };
+    const selection = value as Record<string, unknown>;
+    return {
+      includeMaterial: selection.includeMaterial !== false,
+      includeRelationships: selection.includeRelationships !== false,
+      includeTodos: selection.includeTodos !== false,
+      addedSourceIds: Array.isArray(selection.addedSourceIds) ? selection.addedSourceIds.map(String) : []
+    };
+  }
+
+  async saveContextSelection(actionId: string, selection: AIContextSelection): Promise<void> {
+    const project = this.currentProject;
+    if (!project) return;
+    const stored = project.extensions.ai_context_preferences;
+    const preferences = stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? stored as Record<string, unknown>
+      : {};
+    const saved = await this.facade.saveProject(project.id, project.title, {
+      ...project.extensions,
+      ai_context_preferences: {
+        ...preferences,
+        [actionId]: JSON.parse(JSON.stringify(selection))
+      }
+    });
+    this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
   }
 
   get spineNode(): WorkspaceDocument | null {
@@ -293,7 +362,7 @@ export class WorkspaceState {
   }
 
   navigatorNodeType(node: WorkspaceDocument): string {
-    if (node.role === 'spine') return 'Spine';
+    if (node.role === 'spine') return 'Spine · includes story brief';
     if (node.role === 'navigator_collection') return 'Collection';
     if (node.role === 'navigator_todo') return 'Todo';
     return this.navigator.collections.find((item) => item.id === nodeCollectionId(node))?.singularName ?? 'Document';
@@ -328,10 +397,12 @@ export class WorkspaceState {
         this.lastError = `Writing workspace loaded, but AI provider settings are unavailable: ${loaded.providerSettingsError}`;
       }
       const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
+      const interruptedRuns = this.reconcileInterruptedRuns();
       if (migratedLegacyInputs) {
         this.notice = `${migratedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
-        await this.persistDomainState('Archive legacy input targets');
       }
+      if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
+      if (migratedLegacyInputs || interruptedRuns) await this.persistDomainState(interruptedRuns ? 'Reconcile interrupted AI runs' : 'Archive legacy input targets');
       this.costUsd = loaded.stats.costUsd;
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('margin-note:project', this.projectId);
@@ -542,6 +613,28 @@ export class WorkspaceState {
     await this.persistDomainState(label);
   }
 
+  async clearPendingInputs(): Promise<number> {
+    const clearable = this.inputs.filter((item) => item.state === 'pending' || item.state === 'hidden');
+    if (!clearable.length || !this.documentSnapshot) return 0;
+    const clearableIds = new Set(clearable.map((item) => item.id));
+    const before = this.historySnapshot(this.documentSnapshot);
+    this.inputs = this.inputs.map((item) => clearableIds.has(item.id) ? { ...item, state: 'cleared' as const } : item);
+    if (this.activeSuggestionId && clearableIds.has(this.activeSuggestionId)) this.activeSuggestionId = null;
+    this.preview = null;
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(this.documentSnapshot);
+    this.pushHistory({
+      id: makeId('transaction'),
+      source: 'input',
+      label: `Clear ${clearable.length} pending ${clearable.length === 1 ? 'Input' : 'Inputs'}`,
+      before,
+      after,
+      createdAt: Date.now()
+    });
+    await this.persistDomainState('Clear pending Inputs');
+    return clearable.length;
+  }
+
   async log(type: LedgerEvent['type'], payload: Record<string, unknown>, suggestionId?: string): Promise<void> {
     const event: LedgerEvent = { type, sessionId: this.sessionId, branchId: this.branchId, suggestionId, payload };
     try {
@@ -663,6 +756,60 @@ export class WorkspaceState {
     } : item);
   }
 
+  private reconcileInterruptedRuns(): number {
+    const interrupted = this.runs.filter((run) => run.state === 'queued' || run.state === 'running');
+    if (!interrupted.length) return 0;
+    const completedSources = new Map<string, Set<string>>();
+    for (const run of interrupted) {
+      completedSources.set(run.id, new Set(run.proposalIds.flatMap((id) => {
+        const input = this.inputs.find((item) => item.id === id);
+        return input ? [input.source] : [];
+      })));
+    }
+    const completedAt = new Date().toISOString();
+    this.runs = this.runs.map((run) => {
+      if (run.state !== 'queued' && run.state !== 'running') return run;
+      const succeeded = completedSources.get(run.id) ?? new Set<string>();
+      const existing = new Set(run.errors.map((error) => error.source));
+      const interruptedSources = Object.entries(run.sourceStates)
+        .filter(([sourceId, state]) => state !== 'off' && !succeeded.has(sourceId) && !existing.has(sourceId))
+        .map(([sourceId]) => sourceId);
+      const sources = interruptedSources.length ? interruptedSources : ['interaction_service'];
+      return {
+        ...run,
+        state: run.proposalIds.length ? 'partial' as const : 'failed' as const,
+        errors: [...run.errors, ...sources.map((source) => ({
+          source,
+          kind: 'provider_request' as const,
+          classification: 'interrupted' as const,
+          recoveryAction: 'retry_transient' as const,
+          recovered: false,
+          message: 'The previous session ended before this passage reached a durable outcome.'
+        }))],
+        completedAt
+      };
+    });
+    for (const activityId of new Set(interrupted.map((run) => run.activityId).filter(Boolean) as string[])) {
+      this.refreshAIActivity(activityId);
+    }
+    return interrupted.length;
+  }
+
+  async completeInterruptedRun(runId: string): Promise<void> {
+    const run = this.runs.find((item) => item.id === runId);
+    if (!run || !run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)) return;
+    this.runs = this.runs.map((item) => item.id === runId ? {
+      ...item,
+      state: 'discarded',
+      errors: item.errors.map((error) => error.classification === 'interrupted'
+        ? { ...error, recovered: true, outcome: 'rejected' as const }
+        : error),
+      completedAt: new Date().toISOString()
+    } : item);
+    if (run.activityId) this.refreshAIActivity(run.activityId);
+    await this.persistDomainState('Complete interrupted AI run without retry');
+  }
+
   private actionSnapshot(prompt: TaskPrompt, intent: AIInteractionIntent): AIActionSnapshot {
     return {
       id: prompt.id,
@@ -673,7 +820,11 @@ export class WorkspaceState {
     };
   }
 
-  private contextManifest(action: AIActionSnapshot, target: AIContextManifest['target']): AIContextManifest {
+  private contextManifest(
+    action: AIActionSnapshot,
+    target: AIContextManifest['target'],
+    selection: AIContextSelection = defaultAIContextSelection
+  ): AIContextManifest {
     const items: AIContextItem[] = [
       {
         id: `action:${action.id}:v${action.version}`,
@@ -688,47 +839,45 @@ export class WorkspaceState {
         sent: true
       },
       {
-        id: `brief:v${this.brief.version}`,
-        sourceType: 'spine',
-        sourceId: 'writing-brief',
-        sourceRevision: this.brief.version,
-        role: 'constraint',
-        title: 'Writing brief',
-        content: `Form: ${this.brief.form}\nPOV: ${this.brief.pov}\nTense: ${this.brief.tense}\nDistance: ${this.brief.distance}\nCanon: ${this.brief.canon}`,
-        reason: 'Current writing constraints',
-        inclusion: 'required',
-        sent: true
-      },
-      {
         id: `target:${target.documentId}:${target.sourceRevision}`,
         sourceType: 'manuscript',
         sourceId: target.documentId,
         sourceRevision: target.sourceRevision,
         role: 'target',
-        title: this.currentDocument?.title ?? 'Current passage',
+        title: this.currentDocument?.role === 'spine' ? 'Spine (including story brief)' : this.currentDocument?.title ?? 'Current passage',
         content: target.exactText,
         reason: 'Exact captured request target',
         inclusion: 'required',
         sent: true
       }
     ];
-    const addDocument = (document: WorkspaceDocument | null, sourceType: 'spine' | 'material', role: 'constraint' | 'fact', reason: string) => {
-      if (!document || document.id === target.documentId || !document.content.trim()) return;
+    const addDocument = (
+      document: WorkspaceDocument | null,
+      sourceType: 'spine' | 'material',
+      role: 'constraint' | 'fact',
+      reason: string,
+      inclusion: AIContextItem['inclusion'] = 'resolved',
+      sent = true
+    ) => {
+      if (!document || document.id === target.documentId || (sourceType !== 'spine' && !document.content.trim())) return;
       items.push({
         id: `${sourceType}:${document.id}:${document.revision}`,
         sourceType,
         sourceId: document.id,
         sourceRevision: document.revision,
         role,
-        title: document.title,
+        title: sourceType === 'spine' ? 'Spine (including story brief)' : document.title,
         content: document.content,
         reason,
-        inclusion: 'resolved',
-        sent: true
+        inclusion,
+        sent,
+        ...(sent ? {} : { omissionReason: 'writer_excluded' as const })
       });
     };
-    addDocument(this.spineNode, 'spine', 'constraint', 'Protected project Spine');
-    if (this.navigatorFocusNode?.role !== 'spine') addDocument(this.navigatorFocusNode, 'material', 'fact', 'Selected Navigator Material');
+    addDocument(this.spineNode, 'spine', 'constraint', 'Protected project Spine', 'required');
+    if (this.navigatorFocusNode?.role !== 'spine') {
+      addDocument(this.navigatorFocusNode, 'material', 'fact', 'Selected Navigator Material', 'resolved', selection.includeMaterial);
+    }
     for (const bucket of this.currentContext) {
       const role = bucket.role === 'constraint' || bucket.role === 'fact' || bucket.role === 'guidance' || bucket.role === 'reference'
         ? bucket.role
@@ -743,7 +892,8 @@ export class WorkspaceState {
         content: bucket.content,
         reason: bucket.scope === 'project' ? 'Applicable project context' : 'Applicable document context',
         inclusion: 'resolved',
-        sent: true
+        sent: selection.includeMaterial,
+        ...(selection.includeMaterial ? {} : { omissionReason: 'writer_excluded' as const })
       });
     }
     for (const relationship of this.selectedNodeRelations) {
@@ -757,7 +907,8 @@ export class WorkspaceState {
         content: `${relationship.label}: ${relationship.node.title}${relationship.note ? `\n${relationship.note}` : ''}`,
         reason: 'Direct confirmed relationship of the selected Navigator item',
         inclusion: 'resolved',
-        sent: true
+        sent: selection.includeRelationships,
+        ...(selection.includeRelationships ? {} : { omissionReason: 'writer_excluded' as const })
       });
     }
     for (const todo of this.selectedNodeTodos.filter((item) => item.state === 'open')) {
@@ -772,8 +923,18 @@ export class WorkspaceState {
         content: todoDocument?.content.trim() || todo.title,
         reason: 'Open Todo attached to the selected Navigator item',
         inclusion: 'resolved',
-        sent: true
+        sent: selection.includeTodos,
+        ...(selection.includeTodos ? {} : { omissionReason: 'writer_excluded' as const })
       });
+    }
+    for (const sourceId of selection.addedSourceIds) {
+      addDocument(
+        this.projectNodes.find((document) => document.id === sourceId) ?? null,
+        'material',
+        'fact',
+        'Writer-added Material',
+        'writer_added'
+      );
     }
     return {
       workspaceRevision: this.workspaceRevision,
@@ -783,7 +944,23 @@ export class WorkspaceState {
     };
   }
 
-  async runCraftPass(prompt: TaskPrompt): Promise<Suggestion[]> {
+  reviewContextPreview(prompt: TaskPrompt, selection: AIContextSelection): AIContextManifest | null {
+    const document = this.currentDocument;
+    if (!document) return null;
+    const text = document.content;
+    return this.contextManifest(this.actionSnapshot(prompt, 'review'), {
+      documentId: document.id,
+      sourceRevision: this.workspaceRevision,
+      target: textTarget(document.id, 0, text.length, text),
+      exactText: text
+    }, selection);
+  }
+
+  async runCraftPass(
+    prompt: TaskPrompt,
+    contextSelection: AIContextSelection = this.contextSelection(prompt.id),
+    onProgress?: (inputs: Suggestion[]) => void
+  ): Promise<Suggestion[]> {
     if (!this.documentSnapshot) return [];
     const activity = this.beginAIActivity(prompt, 'document');
     const ranges = documentCraftParagraphs(this.documentSnapshot);
@@ -792,11 +969,26 @@ export class WorkspaceState {
       await this.persistDomainState('Complete empty AI activity');
       return [];
     }
-    const results = await Promise.all(ranges.map((range) => this.requestInputRun(
-      { ...range, prompt },
-      `${this.branchId}:paragraph:${range.from}:${range.to}`,
-      activity
-    )));
+    const enabledSources = Object.entries(this.sourceStates).filter(([, state]) => state !== 'off');
+    if (!enabledSources.length) {
+      this.refreshAIActivity(activity.id);
+      await this.persistDomainState('Complete AI activity without sources');
+      return [];
+    }
+    const isolatedSourceStates = (activeSourceId: string): Record<string, SourceState> => Object.fromEntries(
+      Object.entries(this.sourceStates).map(([sourceId, state]) => [sourceId, sourceId === activeSourceId ? state : 'off'])
+    );
+    const results = await Promise.all(ranges.flatMap((range) => enabledSources.map(async ([sourceId]) => {
+      const inputs = await this.requestInputRun(
+        { ...range, prompt },
+        `${this.branchId}:${sourceId}:paragraph:${range.from}:${range.to}`,
+        activity,
+        isolatedSourceStates(sourceId),
+        contextSelection
+      );
+      onProgress?.(inputs);
+      return inputs;
+    })));
     return results.flat();
   }
 
@@ -849,19 +1041,32 @@ export class WorkspaceState {
       source.id,
       failedSources.has(source.id) ? 'visible' : 'off'
     ])) as Record<string, SourceState>;
-    return this.requestInputRun(
+    const result = await this.requestInputRun(
       { from: target.start, to: target.end, text: previous.originalText, prompt },
       `${this.branchId}:retry:${previous.id}`,
       activity,
       retrySourceStates
     );
+    const retry = this.runs.find((run) => run.activityId === activity.id);
+    if (retry && (retry.state === 'completed' || retry.state === 'partial')) {
+      const stillFailed = new Set(retry.errors.filter((error) => !error.recovered).map((error) => error.source));
+      this.runs = this.runs.map((run) => run.id === previous.id ? {
+        ...run,
+        errors: run.errors.map((error) => failedSources.has(error.source) && !stillFailed.has(error.source)
+          ? { ...error, recovered: true, outcome: 'recovered_by_retry' as const }
+          : error)
+      } : run);
+      await this.persistDomainState('Link successful retry to failed run');
+    }
+    return result;
   }
 
   private async requestInputRun(
     input: Omit<GenerationRequest, 'sessionId' | 'branchId' | 'brief' | 'sourceStates' | 'mode'>,
     rangeKey: string,
     activity: AIActivityRecord,
-    requestedSourceStates: Record<string, SourceState> = this.sourceStates
+    requestedSourceStates: Record<string, SourceState> = this.sourceStates,
+    contextSelection: AIContextSelection = defaultAIContextSelection
   ): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
@@ -882,7 +1087,7 @@ export class WorkspaceState {
       target: textTarget(this.branchId, input.from, input.to, input.text),
       exactText: input.text
     };
-    const context = this.contextManifest(action, capturedTarget);
+    const context = this.contextManifest(action, capturedTarget, contextSelection);
     const run: CraftRun = {
       id: makeId('run'),
       batchId: activity.id,
@@ -1165,11 +1370,9 @@ export class WorkspaceState {
     const previous = this.branchId;
     const targetDocument = this.documents.find((document) => document.id === id);
     if (!targetDocument) throw new Error(`Document not found: ${id}`);
-    const data = await this.facade.suggestionHistory(id);
     this.branchId = id;
-    this.ledger = data.events;
-    this.costUsd = data.stats.costUsd;
     const migratedLegacyInputs = this.loadDocumentDomain(targetDocument);
+    const interruptedRuns = this.reconcileInterruptedRuns();
     this.documentSnapshot = null;
     this.undoStack = [];
     this.redoStack = [];
@@ -1177,8 +1380,16 @@ export class WorkspaceState {
       localStorage.setItem('margin-note:document', id);
       localStorage.setItem('margin-note:branch', id);
     }
-    if (migratedLegacyInputs) await this.persistDomainState('Archive legacy input targets');
-    await this.log('branch_switched', { from: previous, to: id });
+    if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
+    if (migratedLegacyInputs || interruptedRuns) await this.persistDomainState(interruptedRuns ? 'Reconcile interrupted AI runs' : 'Archive legacy input targets');
+    void this.facade.suggestionHistory(id).then((data) => {
+      if (this.branchId !== id) return;
+      this.ledger = data.events;
+      this.costUsd = data.stats.costUsd;
+    }).catch((error) => {
+      if (this.branchId === id) this.lastError = error instanceof Error ? error.message : 'Could not load document history';
+    });
+    void this.log('branch_switched', { from: previous, to: id });
   }
 
   async switchProject(id: string): Promise<void> {
@@ -2169,20 +2380,20 @@ export class WorkspaceState {
     const current = this.currentDocument?.extensions ?? {};
     return {
       ...current,
-      margin_note: JSON.parse(JSON.stringify({
+      margin_note: {
         revision: this.workspaceRevision,
         authorityVersion,
         behaviourVersion: attachmentBehaviourVersion,
-        inputs: this.inputs,
+        inputs: [...this.inputs],
         document: this.richDocument,
-        formats: this.formats,
-        runs: this.runs,
-        activities: this.activities,
-        sourceStates: this.sourceStates,
-        inputSourceVisibility: this.inputSourceVisibility,
-        behaviours: this.behaviours
-      }))
-    } as WorkspaceDocument['extensions'];
+        formats: [...this.formats],
+        runs: [...this.runs],
+        activities: [...this.activities],
+        sourceStates: { ...this.sourceStates },
+        inputSourceVisibility: { ...this.inputSourceVisibility },
+        behaviours: { ...this.behaviours }
+      }
+    } as unknown as WorkspaceDocument['extensions'];
   }
 
   private async persistDomainState(reason: string): Promise<void> {
@@ -2202,7 +2413,19 @@ export class WorkspaceState {
       sessionId: this.sessionId,
       reason
     };
-    this.documentSave = this.documentSave.then(async () => {
+    const saveVersion = (this.documentSaveVersions.get(document.id) ?? 0) + 1;
+    this.documentSaveVersions.set(document.id, saveVersion);
+    this.documentSaveStates[document.id] = 'saving';
+    this.documents = this.documents.map((item) => item.id === document.id
+      ? { ...item, content: transaction.content, extensions: transaction.extensions, updatedAt: new Date().toISOString() }
+      : item);
+    this.refreshBranches();
+    const previousSave = this.documentSaves.get(document.id) ?? Promise.resolve();
+    const save = previousSave.catch(() => undefined).then(async () => {
+      // Yield a browser frame before the facade serialises a potentially large
+      // document domain. Navigation and editing remain responsive while the
+      // durable write continues through this document's queue.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       const receipt = await this.facade.commit(transaction);
       this.documents = this.documents.map((item) => item.id === receipt.documentId
         ? {
@@ -2214,10 +2437,16 @@ export class WorkspaceState {
         }
         : item);
       this.refreshBranches();
+      if (this.documentSaveVersions.get(document.id) === saveVersion) this.documentSaveStates[document.id] = 'saved';
     }).catch((error) => {
       this.lastError = error instanceof Error ? error.message : 'Workspace commit failed';
+      if (this.documentSaveVersions.get(document.id) === saveVersion) this.documentSaveStates[document.id] = 'failed';
     });
-    await this.documentSave;
+    this.documentSaves.set(document.id, save);
+    void save.finally(() => {
+      if (this.documentSaves.get(document.id) === save) this.documentSaves.delete(document.id);
+    });
+    await save;
   }
 
   private async coalesceSuggestions(items: Suggestion[]): Promise<void> {

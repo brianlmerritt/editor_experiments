@@ -440,8 +440,8 @@
     {:else}
       <span class="disclosure placeholder"></span>
     {/if}
-    <span class="structural-icon" title={node.role === 'spine' ? 'Project Spine' : 'Document'} aria-hidden="true">{node.role === 'spine' ? '▥' : '▤'}</span>
-    <button class="node-link" onclick={() => onOpenNode(node.id)} title={`${label} · ${workspace.navigatorNodeType(node)}`}><span>{label}</span><small>{workspace.navigatorNodeType(node)}</small></button>
+    <span class="structural-icon" title={node.role === 'spine' ? 'Project Spine: story brief and overall writing direction' : 'Document'} aria-hidden="true">{node.role === 'spine' ? '▥' : '▤'}</span>
+    <button class="node-link" onclick={() => onOpenNode(node.id)} title={node.role === 'spine' ? 'Open the project Spine, including its story brief and overall writing direction' : `${label} · ${workspace.navigatorNodeType(node)}`}><span>{label}</span><small>{workspace.navigatorNodeType(node)}</small></button>
   </div>
   {#if children.length && workspace.navigatorExpanded(key)}
     {#each children as child (child.id)}{@render nodeRow(child, depth + 1)}{/each}

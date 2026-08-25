@@ -41,6 +41,7 @@ export class FacadeAIInteractionService implements AIInteractionService {
       };
     }
     const generation = craftGeneration(request.generation);
+    const spine = request.context.items.find((item) => item.sent && item.sourceType === 'spine');
     const sourceStates = Object.fromEntries(request.sources.map((source) => [source.sourceId, source.participation])) as Record<string, SourceState>;
     const legacyRequest: GenerationRequest = {
       text: request.target.exactText,
@@ -48,7 +49,16 @@ export class FacadeAIInteractionService implements AIInteractionService {
       to: target.end,
       branchId: request.documentId,
       sessionId: request.sessionId,
-      brief: generation.brief,
+      // The Spine is the writing authority. The legacy brief shape remains only
+      // as transport compatibility until the old craft endpoint is retired.
+      brief: spine ? {
+        ...generation.brief,
+        version: spine.sourceRevision,
+        pov: 'See project Spine',
+        tense: 'See project Spine',
+        distance: 'See project Spine',
+        canon: spine.content
+      } : generation.brief,
       prompt: {
         id: request.action.id,
         name: request.action.name,

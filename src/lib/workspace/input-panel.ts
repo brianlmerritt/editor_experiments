@@ -7,6 +7,7 @@ export interface CraftActivitySummary {
   scope: 'document' | 'selection';
   state: CraftActivityState;
   requestCount: number;
+  completedCount: number;
   runningCount: number;
   proposalCount: number;
   errorCount: number;
@@ -77,6 +78,7 @@ export function summarizeLatestCraftActivity(runs: CraftRun[], documentId: strin
     scope: latest.scope ?? 'document',
     state,
     requestCount: batch.length,
+    completedCount: batch.length - runningCount,
     runningCount,
     proposalCount: batch.reduce((total, run) => total + run.proposalIds.length, 0),
     errorCount: unrecoveredErrors.length,

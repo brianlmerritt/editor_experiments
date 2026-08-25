@@ -4,7 +4,7 @@ import type { AIContextManifest, AIInteractionIntent, AIInteractionRequest } fro
 export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
 export type Category = (typeof categories)[number];
 
-export const suggestionStates = ['pending', 'accepted', 'rejected', 'superseded', 'stale', 'hidden', 'target_changed', 'target_removed'] as const;
+export const suggestionStates = ['pending', 'accepted', 'rejected', 'cleared', 'superseded', 'stale', 'hidden', 'target_changed', 'target_removed'] as const;
 export type SuggestionState = (typeof suggestionStates)[number];
 export type SuggestionType = 'replacement' | 'insertion' | 'annotation';
 export type SourceKind = 'local' | 'ai';
@@ -67,7 +67,7 @@ export interface InputProposal {
 }
 
 export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration' | 'contract';
-export type RecoveryClassification = 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract';
+export type RecoveryClassification = 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract' | 'interrupted';
 export type RecoveryAction = 'none' | 'extract_local' | 'repair_local' | 'correct_output' | 'retry_transient' | 'increase_budget' | 'reconfigure' | 'human';
 
 export interface InputError {

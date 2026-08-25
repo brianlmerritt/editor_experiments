@@ -4,21 +4,21 @@
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import Navigator from '$lib/components/Navigator.svelte';
-  import { categories, categoryMeta, makeId, wordCount, type Branch, type ProviderProtocol, type Suggestion, type TaskPrompt, type WritingBrief } from '$lib/domain';
+  import { categories, categoryMeta, makeId, wordCount, type Branch, type ProviderProtocol, type Suggestion, type TaskPrompt } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
-  import { settings as providerSettings } from '$lib/state/settings.svelte';
+  import { providerPresetFor, settings as providerSettings } from '$lib/state/settings.svelte';
   import type { ContextBucket, ContextScope } from '$lib/workspace/model';
   import { clampEditorZoom, clampNavigatorWidth, DEFAULT_EDITOR_ZOOM, DEFAULT_NAVIGATOR_WIDTH, maxNavigatorWidth, MAX_EDITOR_ZOOM, MIN_EDITOR_ZOOM, MIN_NAVIGATOR_WIDTH } from '$lib/workspace/layout';
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
+  import type { AIContextSelection } from '$lib/ai/contracts';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
   let editor = $state<EditorShell | null>(null);
   let selection = $state({ from: 1, to: 1, text: '' });
   let selectedVariants = $state<Record<string, number>>({});
-  let settingsOpen = $state(false);
   let contextOpen = $state(false);
   let ledgerOpen = $state(false);
   let inputsOpen = $state(false);
@@ -26,7 +26,6 @@
   let runManagerOpen = $state(false);
   let inputStateFilter = $state('all');
   let inputSearch = $state('');
-  let briefDraft = $state<WritingBrief>({ ...workspace.brief });
   let sentinelInstruction = $state('');
   let editTimer: ReturnType<typeof setTimeout> | null = null;
   let documentSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -35,8 +34,6 @@
   let editSession = { started: 0, characters: 0, text: '' };
   let editorReady = $state(false);
   let workspaceReady = $state(false);
-  let displayedDocumentRevision = $state(1);
-  let documentSaving = $state(false);
   let cardsElement = $state<HTMLDivElement>();
   let undoDismiss = $state<{ suggestion: Suggestion; timer: ReturnType<typeof setTimeout> } | null>(null);
   let liveSuggestions = $state<Suggestion[]>([]);
@@ -66,11 +63,20 @@
   let resizeCleanup: (() => void) | null = null;
   let inputDragCleanup: (() => void) | null = null;
   let dismissedProviderIssueKey = $state<string | null>(null);
+  let contextPreflightOpen = $state(false);
+  let contextPickerOpen = $state(false);
+  let contextPreflightLocked = $state(false);
+  let contextPreflightTargetId = $state<string | null>(null);
+  let reviewContextSelection = $state<AIContextSelection>({ includeMaterial: true, includeRelationships: true, includeTodos: true, addedSourceIds: [] });
+  let clearInputsConfirmOpen = $state(false);
 
   const layoutStorageKey = 'margin-note:workbench-layout';
 
   let selectedPrompt = $derived(workspace.prompts.find((prompt) => prompt.id === 'sentinel') ?? workspace.prompts[0]);
+  let reviewPrompt = $derived(selectedPrompt ? { ...selectedPrompt, instruction: sentinelInstruction.trim() || selectedPrompt.instruction } : null);
   let currentDocumentText = $derived(workspace.currentDocument?.content ?? '');
+  let documentSaveState = $derived(workspace.workspaceSaveState);
+  let unsavedDocumentCount = $derived(workspace.unsavedDocumentCount);
   let revisionSuggestion = $derived(workspace.suggestions.find((suggestion) => suggestion.id === revisionSuggestionId) ?? null);
   let hasRevisionProvider = $derived(
     providerSettings.sources.some((source) => source.number >= 3
@@ -83,6 +89,7 @@
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
   let latestCraftActivity = $derived(summarizeLatestCraftActivity(workspace.runs, workspace.branchId));
   let editingProviderAvailability = $derived(providerSettings.providerForm.id ? providerSettings.sourceAvailability[providerSettings.providerForm.id] : undefined);
+  let activeProviderPreset = $derived(providerPresetFor(providerSettings.providerForm));
   let enabledRunSourceCount = $derived(providerSettings.sources.filter((source) => workspace.sourceStates[source.id] !== 'off' && providerSettings.sourceAvailability[source.id]?.available === true).length);
   let hiddenInputFilterCount = $derived(
     categories.filter((category) => !workspace.categoryVisibility[category]).length
@@ -100,6 +107,13 @@
     const key = `${issue.runId}:${issue.sourceId}:${issue.error.message}`;
     return key === dismissedProviderIssueKey ? null : { ...issue, key };
   });
+  let reviewContextManifest = $derived(reviewPrompt && contextPreflightOpen
+    ? workspace.reviewContextPreview(reviewPrompt, reviewContextSelection)
+    : null);
+  let interruptedRuns = $derived(workspace.runs.filter((run) =>
+    run.documentId === workspace.branchId
+    && run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)));
+  let clearableInputCount = $derived(workspace.inputs.filter((input) => input.state === 'pending' || input.state === 'hidden').length);
 
   const activityLabels: Record<CraftActivityState, string> = {
     running: 'Running',
@@ -128,10 +142,8 @@
       editorZoom = DEFAULT_EDITOR_ZOOM;
     }
     void workspace.initialize().then(() => {
-      briefDraft = { ...workspace.brief };
       sentinelInstruction = workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.instruction ?? '';
       workspaceReady = true;
-      displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
       refreshLiveSuggestions();
     });
     const keydown = (event: KeyboardEvent) => handleReviewKeys(event);
@@ -307,6 +319,60 @@
     await workspace.retryRun(runId);
   }
 
+  function openReviewPreflight(): void {
+    if (!selectedPrompt) return;
+    sentinelInstruction = selectedPrompt.instruction;
+    reviewContextSelection = workspace.contextSelection(selectedPrompt.id);
+    contextPreflightTargetId = workspace.branchId;
+    contextPickerOpen = false;
+    contextPreflightOpen = true;
+  }
+
+  function toggleAddedContext(sourceId: string): void {
+    if (contextPreflightLocked) return;
+    reviewContextSelection = {
+      ...reviewContextSelection,
+      addedSourceIds: reviewContextSelection.addedSourceIds.includes(sourceId)
+        ? reviewContextSelection.addedSourceIds.filter((id) => id !== sourceId)
+        : [...reviewContextSelection.addedSourceIds, sourceId]
+    };
+  }
+
+  async function openContextSource(sourceId: string): Promise<void> {
+    if (contextPreflightLocked) return;
+    contextPreflightOpen = false;
+    if (workspace.projectNodes.some((document) => document.id === sourceId)) await workspace.switchBranch(sourceId);
+  }
+
+  async function runReviewFromPreflight(): Promise<void> {
+    if (!selectedPrompt || contextPreflightTargetId !== workspace.branchId) return;
+    contextPreflightLocked = true;
+    try {
+      let prompt = selectedPrompt;
+      const instruction = sentinelInstruction.trim();
+      if (!instruction) return;
+      if (instruction !== prompt.instruction) {
+        await workspace.savePrompt({ ...prompt, instruction });
+        prompt = workspace.prompts.find((item) => item.id === prompt.id) ?? { ...prompt, instruction };
+      }
+      await workspace.saveContextSelection(prompt.id, reviewContextSelection);
+      const running = runSentinels(reviewContextSelection, prompt);
+      contextPreflightOpen = false;
+      await running;
+    } finally {
+      contextPreflightLocked = false;
+    }
+  }
+
+  async function retryInterrupted(): Promise<void> {
+    for (const run of interruptedRuns) await workspace.retryRun(run.id);
+    refreshLiveSuggestions();
+  }
+
+  async function completeInterrupted(): Promise<void> {
+    for (const run of interruptedRuns) await workspace.completeInterruptedRun(run.id);
+  }
+
   async function changePause(): Promise<void> {
     const change = workspace.togglePause();
     isPaused = workspace.paused;
@@ -383,21 +449,33 @@
     refreshLiveSuggestions();
   }
 
+  async function clearPendingInputs(): Promise<void> {
+    const cleared = await workspace.clearPendingInputs();
+    clearInputsConfirmOpen = false;
+    refreshLiveSuggestions();
+    showNotice(cleared ? `${cleared} pending ${cleared === 1 ? 'Input was' : 'Inputs were'} cleared. Runs and history were retained.` : 'There are no pending Inputs to clear.');
+  }
+
   function scheduleDocumentSave(reason: string): void {
     if (documentSaveTimer) clearTimeout(documentSaveTimer);
-    documentSaving = true;
-    documentSaveTimer = setTimeout(async () => {
+    workspace.markCurrentDocumentDirty();
+    documentSaveTimer = setTimeout(() => {
       documentSaveTimer = null;
-      await workspace.persistCurrentDocument(reason);
-      displayedDocumentRevision = workspace.currentDocument?.revision ?? displayedDocumentRevision;
-      documentSaving = false;
+      void workspace.persistCurrentDocument(reason);
     }, 1200);
   }
 
-  async function runSentinels(): Promise<void> {
-    if (!selectedPrompt || workspace.paused) return;
+  function enqueueScheduledDocumentSave(reason: string): void {
+    if (!documentSaveTimer) return;
+    clearTimeout(documentSaveTimer);
+    documentSaveTimer = null;
+    void workspace.persistCurrentDocument(reason);
+  }
+
+  async function runSentinels(contextSelection?: AIContextSelection, prompt: TaskPrompt | null = selectedPrompt): Promise<void> {
+    if (!prompt || workspace.paused) return;
     workspace.notice = null;
-    const incoming = await workspace.runCraftPass(selectedPrompt);
+    const incoming = await workspace.runCraftPass(prompt, contextSelection, () => refreshLiveSuggestions());
     if (!workspace.notice) showNotice(incoming.length
       ? `${incoming.length} new ${incoming.length === 1 ? 'input' : 'inputs'} added.`
       : 'Review complete; no new inputs.');
@@ -605,14 +683,6 @@
     refreshLiveSuggestions();
   }
 
-  async function saveSettings(): Promise<void> {
-    await workspace.saveBrief(briefDraft);
-    const prompt = workspace.prompts.find((item) => item.id === 'sentinel');
-    if (prompt && sentinelInstruction !== prompt.instruction) await workspace.savePrompt({ ...prompt, instruction: sentinelInstruction });
-    settingsOpen = false;
-    showNotice(`Brief v${workspace.brief.version} saved; older notes expired.`);
-  }
-
   async function forkBranch(): Promise<void> {
     const name = window.prompt('Name this branch', `Alternative ${workspace.branches.length}`)?.trim();
     if (!name) return;
@@ -628,31 +698,19 @@
       await workspace.openNavigatorNode(id, navigation);
       return;
     }
-    if (documentSaveTimer) {
-      clearTimeout(documentSaveTimer);
-      documentSaveTimer = null;
-      await workspace.persistCurrentDocument('Saved before switching document');
-      documentSaving = false;
-    }
+    enqueueScheduledDocumentSave('Background save before switching document');
     editorReady = false;
     selection = { from: 1, to: 1, text: '' };
     await workspace.openNavigatorNode(id, navigation);
-    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
   }
 
   async function switchProject(id: string): Promise<void> {
     if (id === workspace.projectId) return;
-    if (documentSaveTimer) {
-      clearTimeout(documentSaveTimer);
-      documentSaveTimer = null;
-      await workspace.persistCurrentDocument('Saved before switching project');
-      documentSaving = false;
-    }
+    enqueueScheduledDocumentSave('Background save before switching project');
     editorReady = false;
     selection = { from: 1, to: 1, text: '' };
     await workspace.switchProject(id);
-    displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
     refreshLiveSuggestions();
   }
 
@@ -693,16 +751,11 @@
       }
       if (kind === 'create') {
         if (!value) return;
-        if (documentSaveTimer) {
-          clearTimeout(documentSaveTimer);
-          documentSaveTimer = null;
-          await workspace.persistCurrentDocument('Saved before creating project');
-        }
+        enqueueScheduledDocumentSave('Background save before creating project');
         editorReady = false;
         selection = { from: 1, to: 1, text: '' };
         await workspace.createProject(value);
         projectDialogKind = null;
-        displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
         refreshLiveSuggestions();
         showNotice(`${value} created. Its Spine is open and ready.`);
         return;
@@ -714,7 +767,6 @@
       selection = { from: 1, to: 1, text: '' };
       await workspace.resetCurrentProject();
       projectDialogKind = null;
-      displayedDocumentRevision = workspace.currentDocument?.revision ?? 1;
       refreshLiveSuggestions();
       showNotice(`${current.title} started over. Its new Spine is open.`);
     } catch (error) {
@@ -798,7 +850,6 @@
     <div class="top-actions">
       <button class:paused={isPaused} onclick={changePause} title="Pause AI requests, automatic reviews, and provider spend">{isPaused ? '▶ Resume AI' : 'Ⅱ Pause AI'}</button>
       <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
-      <button onclick={() => { briefDraft = { ...workspace.brief }; settingsOpen = true; }}>Brief <span>v{workspace.brief.version}</span></button>
       <a href="/review">Compare</a>
       <button onclick={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
       <button class="layout-toggle" class:active={navigatorVisible} aria-label={navigatorVisible ? 'Hide Navigator' : 'Show Navigator'} aria-pressed={navigatorVisible} title={navigatorVisible ? 'Hide Navigator' : 'Show Navigator'} onclick={toggleNavigatorPane}><span class="pane-icon pane-icon-left" aria-hidden="true"></span></button>
@@ -828,8 +879,14 @@
           </div>
           <div class="pane-status">
             <span>{wordCount(currentDocumentText)} words</span>
-            <span>v{displayedDocumentRevision}</span>
-            <span class:saving={documentSaving}>{documentSaving ? 'Saving…' : 'Saved'}</span>
+            <span>v{workspace.currentDocument?.revision ?? 1}</span>
+            <span class="save-status save-{documentSaveState}" aria-live="polite" title={documentSaveState === 'failed' ? 'A background save failed; the affected document remains in Svelte workspace state' : documentSaveState === 'saved' ? 'All changes saved' : `${unsavedDocumentCount} ${unsavedDocumentCount === 1 ? 'document is' : 'documents are'} saving in the background`}>
+              <svg viewBox="0 0 30 20" aria-hidden="true">
+                <path class="save-book" d="M2 4.5c4.2-1.5 8.2-.8 13 2v10c-4.8-2.8-8.8-3.5-13-2zM28 4.5c-4.2-1.5-8.2-.8-13 2v10c4.8-2.8 8.8-3.5 13-2z" />
+                <g class="save-pen"><path d="M9 11.5l8.5-8.5 2 2-8.5 8.5-3 .9z" /><path d="M17.5 3l2 2" /></g>
+              </svg>
+              <span>{documentSaveState === 'failed' ? 'Save failed' : documentSaveState === 'saved' ? 'Saved' : `Saving${unsavedDocumentCount > 1 ? ` ${unsavedDocumentCount}` : ''}…`}</span>
+            </span>
           </div>
           <div class="pane-actions">
             <div class="history-actions" aria-label="Writing undo and redo">
@@ -939,10 +996,46 @@
                 type="button"
                 class="review-document"
                 disabled={workspace.generating || workspace.paused || !enabledRunSourceCount}
-                onclick={runSentinels}
-              >{workspace.generating ? 'Reviewing…' : 'Review document'}</button>
+                onclick={openReviewPreflight}
+              >{workspace.generating ? 'Reviewing…' : 'Perform review'}</button>
             </div>
           </header>
+
+          {#if contextPreflightOpen && reviewContextManifest}
+            <section class="context-preflight" aria-label="Writing Context preflight">
+              <header><div><strong>Writing Context</strong><small>Perform review preflight</small></div><span>{contextPreflightLocked ? 'Locked while running' : 'Check before sending'}</span></header>
+              <label class="review-instructions"><b>Review Instructions</b><textarea rows="4" disabled={contextPreflightLocked} bind:value={sentinelInstruction}></textarea><small>Tell the selected reviewers what to examine in this run.</small></label>
+              <div class="context-required">
+                <b>Always included</b>
+                {#each reviewContextManifest.items.filter((item) => item.inclusion === 'required' && item.sourceType !== 'action') as item}
+                  <button type="button" disabled={contextPreflightLocked} onclick={() => void openContextSource(item.sourceId)}><span>🔒 {item.title}</span><small>{item.sourceRevision ? `v${item.sourceRevision}` : 'current'} · open source</small></button>
+                {/each}
+              </div>
+              <div class="context-options">
+                <b>Include applicable context</b>
+                <label><input type="checkbox" checked={reviewContextSelection.includeMaterial} disabled={contextPreflightLocked} onchange={(event) => reviewContextSelection = { ...reviewContextSelection, includeMaterial: event.currentTarget.checked }} />Material</label>
+                <label><input type="checkbox" checked={reviewContextSelection.includeRelationships} disabled={contextPreflightLocked} onchange={(event) => reviewContextSelection = { ...reviewContextSelection, includeRelationships: event.currentTarget.checked }} />Relationships</label>
+                <label><input type="checkbox" checked={reviewContextSelection.includeTodos} disabled={contextPreflightLocked} onchange={(event) => reviewContextSelection = { ...reviewContextSelection, includeTodos: event.currentTarget.checked }} />Open Todos</label>
+              </div>
+              <button class="add-context" type="button" disabled={contextPreflightLocked} aria-expanded={contextPickerOpen} onclick={() => contextPickerOpen = !contextPickerOpen}>+ Add context…</button>
+              {#if contextPickerOpen}
+                <div class="context-picker">
+                  {#each workspace.aiContextMaterials.filter((item) => item.id !== contextPreflightTargetId) as item}
+                    <label><input type="checkbox" checked={reviewContextSelection.addedSourceIds.includes(item.id)} onchange={() => toggleAddedContext(item.id)} /><span>{workspace.navigatorNodeLabel(item)}</span><small>{workspace.navigatorNodeType(item)}</small></label>
+                  {:else}
+                    <p>No other Material exists in this project.</p>
+                  {/each}
+                </div>
+              {/if}
+              <div class="context-manifest-summary">
+                <span>{reviewContextManifest.items.filter((item) => item.sent).length} included</span>
+                <span>{reviewContextManifest.items.filter((item) => !item.sent).length} omitted</span>
+                <span>0 trimmed</span>
+              </div>
+              {#if contextPreflightTargetId !== workspace.branchId}<p class="context-warning">Return to the original review document before running.</p>{/if}
+              <footer><button type="button" disabled={contextPreflightLocked} onclick={() => contextPreflightOpen = false}>Cancel</button><button type="button" class="primary" disabled={contextPreflightLocked || !sentinelInstruction.trim() || contextPreflightTargetId !== workspace.branchId} onclick={() => void runReviewFromPreflight()}>{contextPreflightLocked ? 'Reviewing…' : 'Perform review'}</button></footer>
+            </section>
+          {/if}
 
           {#if latestCraftActivity}
             <section class={`craft-activity activity-${latestCraftActivity.state}`} aria-live="polite">
@@ -951,11 +1044,17 @@
                 <span>{activityLabels[latestCraftActivity.state]}</span>
               </header>
               <p>
-                {latestCraftActivity.requestCount} {latestCraftActivity.requestCount === 1 ? 'passage' : 'passages'}
+                {latestCraftActivity.completedCount}/{latestCraftActivity.requestCount} checks complete
                 · {latestCraftActivity.proposalCount} {latestCraftActivity.proposalCount === 1 ? 'input' : 'inputs'} generated
                 {#if latestCraftActivity.runningCount} · {latestCraftActivity.runningCount} running{/if}
               </p>
               {#if latestCraftActivity.firstError}<small>{latestCraftActivity.firstError}</small>{/if}
+              {#if interruptedRuns.length}
+                <div class="interrupted-actions">
+                  <button type="button" disabled={workspace.generating} onclick={() => void retryInterrupted()}>Retry {interruptedRuns.length} interrupted {interruptedRuns.length === 1 ? 'passage' : 'passages'}</button>
+                  <button type="button" disabled={workspace.generating} onclick={() => void completeInterrupted()}>Complete without {interruptedRuns.length === 1 ? 'it' : 'them'}</button>
+                </div>
+              {/if}
             </section>
           {/if}
 
@@ -1106,23 +1205,24 @@
             {/each}
           </div>
         {/if}
-        <div class="provider-presets">
-          <span>Start from:</span>
-          <button type="button" onclick={() => providerSettings.usePreset('openrouter')}>OpenRouter</button>
-          <button type="button" onclick={() => providerSettings.usePreset('openai')}>OpenAI</button>
-          <button type="button" onclick={() => providerSettings.usePreset('anthropic')}>Anthropic</button>
-          <button type="button" onclick={() => providerSettings.usePreset('ollama')}>Ollama/local</button>
+        <div class="provider-presets" aria-label="Provider service">
+          <span>Provider service:</span>
+          <button type="button" class:active={activeProviderPreset === 'openrouter'} aria-pressed={activeProviderPreset === 'openrouter'} onclick={() => providerSettings.usePreset('openrouter')}>OpenRouter</button>
+          <button type="button" class:active={activeProviderPreset === 'openai'} aria-pressed={activeProviderPreset === 'openai'} onclick={() => providerSettings.usePreset('openai')}>OpenAI</button>
+          <button type="button" class:active={activeProviderPreset === 'anthropic'} aria-pressed={activeProviderPreset === 'anthropic'} onclick={() => providerSettings.usePreset('anthropic')}>Anthropic</button>
+          <button type="button" class:active={activeProviderPreset === 'ollama'} aria-pressed={activeProviderPreset === 'ollama'} onclick={() => providerSettings.usePreset('ollama')}>Ollama/local</button>
+          {#if !activeProviderPreset}<small>Custom endpoint</small>{/if}
         </div>
         <form onsubmit={saveProvider}>
           <p class="provider-intro">Profiles and keys are saved in the local server's ignored provider-settings file. Keys are never written to the project, browser storage, run history, or event ledger.</p>
           <input name="provider-id" type="hidden" value={providerSettings.providerForm.id} />
           <div class="form-grid">
-            <label>Profile name<input name="provider-name" required value={providerSettings.providerForm.name} /></label>
-            <label>Protocol<select name="provider-protocol" value={providerSettings.providerForm.protocol}><option value="openai_compatible">OpenAI compatible</option><option value="anthropic">Anthropic Messages</option></select></label>
+            <label>Profile name<input name="provider-name" required value={providerSettings.providerForm.name} oninput={(event) => providerSettings.setProviderField('name', event.currentTarget.value)} /></label>
+            <label>Protocol<select name="provider-protocol" value={providerSettings.providerForm.protocol} onchange={(event) => providerSettings.setProviderField('protocol', event.currentTarget.value as ProviderProtocol)}><option value="openai_compatible">OpenAI compatible</option><option value="anthropic">Anthropic Messages</option></select></label>
           </div>
-          <label>Base URL<input name="provider-base-url" required value={providerSettings.providerForm.baseUrl} /></label>
-          <label>API key {#if editingProviderAvailability?.credentialHint}<small>Saved as {editingProviderAvailability.credentialHint}; leave blank to keep it</small>{/if}<input name="provider-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={editingProviderAvailability?.credentialHint ?? 'Provider API key; optional for localhost'} /></label>
-          <label>Model ID<small>Exact model identifier accepted by this provider</small><input name="provider-model" required value={providerSettings.providerForm.model} /></label>
+          <label>Base URL<input name="provider-base-url" required value={providerSettings.providerForm.baseUrl} oninput={(event) => providerSettings.setProviderField('baseUrl', event.currentTarget.value)} /></label>
+          <label>API key {#if editingProviderAvailability?.credentialHint}<small>Saved as {editingProviderAvailability.credentialHint}; leave blank to keep it</small>{:else if activeProviderPreset === 'openrouter'}<small>Use an OpenRouter key, normally beginning sk-or-</small>{:else if activeProviderPreset === 'openai'}<small>Use an OpenAI project key</small>{:else if activeProviderPreset === 'anthropic'}<small>Use an Anthropic API key</small>{/if}<input name="provider-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={editingProviderAvailability?.credentialHint ?? 'Provider API key; optional for localhost'} /></label>
+          <label>Model ID<small>{activeProviderPreset === 'openrouter' ? 'Use the complete namespaced ID, for example openai/gpt-5.6-terra' : 'Exact model identifier accepted by this provider'}</small><input name="provider-model" required value={providerSettings.providerForm.model} oninput={(event) => providerSettings.setProviderField('model', event.currentTarget.value)} /></label>
           {#if providerSettings.error}<p class="provider-error" role="alert">{providerSettings.error}</p>{/if}
           <footer><p>Saving a profile enables it for the next request; <b>Use</b> can turn participation off independently.</p><button type="button" onclick={() => providerSettings.closeProviders()}>Close</button><button type="submit" value="add-another" disabled={providerSettings.savingProvider}>Save and add another</button><button type="submit" class="primary" value="close" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
         </form>
@@ -1148,6 +1248,7 @@
                 <div class="run-diagnostic"><b>{error.source}</b><span>{error.classification?.replaceAll('_', ' ') ?? error.kind ?? 'error'}{#if error.attempt} · attempt {error.attempt}/{error.maxAttempts ?? error.attempt}{/if}{#if error.recovered} · recovered{/if}</span><small>{error.message}</small></div>
               {/each}
               {#if (run.state === 'failed' || run.state === 'partial') && run.errors.some((error) => !error.recovered && providerSettings.sourceAvailability[error.source]?.available)}<button type="button" onclick={() => void retryFailedRun(run.id)}>Retry failed providers</button>{/if}
+              {#if run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)}<button type="button" onclick={() => void workspace.completeInterruptedRun(run.id)}>Complete without this passage</button>{/if}
             </article>
           {:else}
             <p class="input-empty">No AI runs have been recorded for this document.</p>
@@ -1188,12 +1289,22 @@
             <option value="pending">Pending</option>
             <option value="accepted">Accepted</option>
             <option value="rejected">Rejected</option>
+            <option value="cleared">Cleared</option>
             <option value="target_changed">Target changed</option>
             <option value="target_removed">Target removed</option>
             <option value="stale">Stale</option>
           </select>
         </div>
-        <p class="input-summary">{managedInputs.length} of {workspace.inputs.length} inputs</p>
+        <div class="input-summary-area">
+          <div class="input-summary"><span>{managedInputs.length} of {workspace.inputs.length} inputs</span><button type="button" disabled={!clearableInputCount} onclick={() => clearInputsConfirmOpen = true}>Clear pending Inputs{clearableInputCount ? ` (${clearableInputCount})` : ''}</button></div>
+          {#if clearInputsConfirmOpen}
+            <div class="clear-inputs-confirm" role="alertdialog" aria-labelledby="clear-inputs-title">
+              <div><strong id="clear-inputs-title">Clear {clearableInputCount} pending {clearableInputCount === 1 ? 'Input' : 'Inputs'}?</strong><small>They will leave the panel but may be raised again by a future review. Accepted work, AI runs, diagnostics, and provenance remain available, and this action can be undone.</small></div>
+              <button type="button" onclick={() => clearInputsConfirmOpen = false}>Cancel</button>
+              <button type="button" class="danger" onclick={() => void clearPendingInputs()}>Clear Inputs</button>
+            </div>
+          {/if}
+        </div>
         <div class="input-list">
           {#if !managedInputs.length}<p class="input-empty">No inputs match this view.</p>{/if}
           {#each managedInputs as input}
@@ -1210,23 +1321,6 @@
             </article>
           {/each}
         </div>
-      </div>
-    </div>
-  {/if}
-
-  {#if settingsOpen}
-    <div class="modal-backdrop" role="presentation" onclick={() => settingsOpen = false}>
-      <div class="settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="brief-title" onclick={stopPropagation} onkeydown={stopPropagation}>
-        <header><div><small>Shared model context</small><h2 id="brief-title">Writing brief <span>v{workspace.brief.version}</span></h2></div><button onclick={() => settingsOpen = false}>×</button></header>
-        <div class="form-grid">
-          <label>Form<select bind:value={briefDraft.form}><option value="fiction">Fiction</option><option value="non-fiction">Non-fiction</option></select></label>
-          <label>Point of view<input bind:value={briefDraft.pov} /></label>
-          <label>Tense<input bind:value={briefDraft.tense} /></label>
-          <label>Narrative distance<input bind:value={briefDraft.distance} /></label>
-        </div>
-        <label>Canon / background<textarea rows="7" bind:value={briefDraft.canon} placeholder="Characters, world rules, facts the suggesters must preserve…"></textarea><small>{briefDraft.canon.length} / 6000 characters sent in the POC</small></label>
-        <label>Sentinel task prompt <span class="version">v{workspace.prompts.find((prompt) => prompt.id === 'sentinel')?.version ?? 1}</span><textarea rows="5" bind:value={sentinelInstruction}></textarea></label>
-        <footer><p>Saving a material brief change expires live suggestions from older brief versions.</p><button onclick={() => settingsOpen = false}>Cancel</button><button class="primary" onclick={saveSettings}>Save new version</button></footer>
       </div>
     </div>
   {/if}
@@ -1314,7 +1408,20 @@
   .pane-identity strong { overflow: hidden; color: var(--ink); font: 650 12px/1.2 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
   .pane-status { display: flex; flex: 0 1 auto; align-items: center; gap: 8px; color: var(--muted); font: 9px/1 var(--font-ui); white-space: nowrap; }
   .pane-status span + span { padding-left: 8px; border-left: 1px solid var(--line); }
-  .pane-status .saving { color: var(--accent); }
+  .save-status { display: inline-flex; align-items: center; gap: 4px; }
+  .save-status svg { width: 24px; height: 16px; overflow: visible; }
+  .save-book { fill: color-mix(in srgb, var(--accent) 8%, var(--paper)); stroke: currentColor; stroke-width: 1.1; stroke-linejoin: round; }
+  .save-pen { fill: color-mix(in srgb, var(--accent) 20%, var(--paper)); stroke: currentColor; stroke-width: 1; stroke-linecap: round; stroke-linejoin: round; transform-box: fill-box; transform-origin: center; }
+  .save-pending, .save-saving { color: var(--accent); }
+  .save-pending .save-pen, .save-saving .save-pen { animation: write-save 1.05s ease-in-out infinite; }
+  .save-failed { color: #a33d32; }
+  @keyframes write-save {
+    0%, 100% { transform: translate(-1px, 1px) rotate(-2deg); }
+    50% { transform: translate(3px, -1px) rotate(3deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .save-pending .save-pen, .save-saving .save-pen { animation: none; }
+  }
   .pane-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
   .history-actions, .zoom-actions { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); }
   .pane-actions button, .pane-menu summary { display: grid; min-width: 28px; height: 29px; place-items: center; border: 0; background: transparent; color: var(--muted); font: 600 9px/1 var(--font-ui); cursor: pointer; }
@@ -1352,11 +1459,42 @@
   .inputs-header-actions button.active { border-color: var(--accent); color: var(--accent); }
   .inputs-header-actions .review-document { border-color: var(--accent); background: var(--accent); color: white; }
   .inputs-header-actions button:disabled { opacity: .42; cursor: default; }
+  .context-preflight { display: grid; gap: 10px; margin-top: 10px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 4px; background: var(--paper); padding: 11px; }
+  .context-preflight > header { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+  .context-preflight > header div { display: grid; gap: 3px; }
+  .context-preflight > header strong { color: var(--ink-soft); font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
+  .context-preflight > header small, .context-preflight > header span { color: var(--muted); font: 8px/1.3 var(--font-ui); }
+  .context-required { display: grid; gap: 4px; }
+  .review-instructions { display: grid; gap: 5px; }
+  .review-instructions b { color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
+  .review-instructions textarea { box-sizing: border-box; width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink); padding: 8px; font: 10px/1.4 var(--font-ui); }
+  .review-instructions small { color: var(--muted); font: 8px/1.3 var(--font-ui); }
+  .context-required > b, .context-options > b { color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
+  .context-required button { display: flex; align-items: center; justify-content: space-between; gap: 7px; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink-soft); padding: 7px; text-align: left; cursor: pointer; }
+  .context-required button small { color: var(--muted); font: 7px/1 var(--font-ui); white-space: nowrap; }
+  .context-options { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
+  .context-options > b { flex-basis: 100%; }
+  .context-options label, .context-picker label { display: flex; align-items: center; gap: 5px; color: var(--ink-soft); font: 9px/1.2 var(--font-ui); }
+  .context-options input, .context-picker input { accent-color: var(--accent); }
+  .add-context { justify-self: start; border: 1px dashed var(--line-strong); border-radius: 3px; background: transparent; color: var(--accent); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .context-picker { display: grid; max-height: 180px; gap: 3px; overflow: auto; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; padding: 6px; }
+  .context-picker label { padding: 5px; }
+  .context-picker label span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .context-picker label small { color: var(--muted); font: 7px/1 var(--font-ui); }
+  .context-picker p { margin: 6px; color: var(--muted); font: 9px/1.4 var(--font-ui); }
+  .context-manifest-summary { display: flex; gap: 8px; color: var(--muted); font: 8px/1 var(--font-mono); }
+  .context-warning { margin: 0; color: var(--reject); font: 9px/1.4 var(--font-ui); }
+  .context-preflight > footer, .interrupted-actions { display: flex; justify-content: flex-end; gap: 5px; }
+  .context-preflight > footer button, .interrupted-actions button { border: 1px solid var(--line-strong); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 7px 9px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .context-preflight > footer .primary { border-color: var(--accent); background: var(--accent); color: white; }
+  .context-preflight button:disabled, .context-preflight input:disabled { opacity: .45; cursor: default; }
   .craft-activity { margin-top: 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--paper) 80%, transparent); padding: 9px 10px; }
   .craft-activity > header { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-soft); font: 700 9px/1.2 var(--font-ui); }
   .craft-activity > header span { color: var(--accent); }
   .craft-activity p, .craft-activity small { margin: 5px 0 0; color: var(--muted); font: 9px/1.4 var(--font-ui); }
   .craft-activity small { display: block; color: var(--reject); }
+  .interrupted-actions { justify-content: flex-start; margin-top: 8px; }
+  .interrupted-actions button:first-child { border-color: var(--accent); color: var(--accent); }
   .activity-failed, .activity-partial { border-left-color: var(--reject); }
   .activity-failed > header span, .activity-partial > header span { color: var(--reject); }
   .activity-discarded, .activity-cancelled { border-left-color: #887b61; }
@@ -1430,7 +1568,15 @@
   .input-manager .close { border: 0; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
   .input-controls { display: grid; grid-template-columns: 1fr 190px; gap: 9px; margin-top: 18px; }
   .input-controls input, .input-controls select { width: 100%; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink); padding: 9px 10px; outline: none; font-size: 11px; }
-  .input-summary { margin: 10px 0; color: var(--muted); font-size: 9px; }
+  .input-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; color: var(--muted); font-size: 9px; }
+  .input-summary-area { min-height: 0; }
+  .input-summary button, .clear-inputs-confirm button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
+  .input-summary button:disabled { opacity: .4; cursor: default; }
+  .clear-inputs-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-bottom: 10px; border: 1px solid #d9b9b3; border-radius: 4px; background: #9a44390d; padding: 10px; }
+  .clear-inputs-confirm > div { display: grid; gap: 3px; }
+  .clear-inputs-confirm strong { color: var(--ink-soft); font: 700 10px/1.2 var(--font-ui); }
+  .clear-inputs-confirm small { color: var(--muted); font: 8px/1.4 var(--font-ui); }
+  .clear-inputs-confirm button.danger { border-color: var(--reject); color: var(--reject); }
   .input-list { overflow: auto; display: grid; gap: 8px; padding-right: 4px; }
   .input-list article { border: 1px solid var(--line); border-radius: 4px; background: #fffefa; padding: 12px; }
   .input-list article strong { font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
@@ -1445,7 +1591,7 @@
   .settings { width: min(720px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); box-shadow: 0 30px 80px rgb(26 22 17 / .22); padding: 25px; }
   .settings > header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 20px; }
   .settings h2 { margin: 3px 0 0; font: 500 24px/1.2 var(--font-reading); }
-  .settings h2 span, .settings header small { color: var(--muted); font: 600 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
+  .settings header small { color: var(--muted); font: 600 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .08em; }
   .settings header button { border: 0; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .settings label { display: grid; gap: 6px; margin-bottom: 12px; color: var(--ink-soft); font: 600 10px/1.3 var(--font-ui); }
@@ -1469,6 +1615,8 @@
   .provider-list article button, .provider-presets button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
   .provider-list article button.danger { color: var(--reject); }
   .provider-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 16px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
+  .provider-presets button.active { border-color: var(--accent); background: var(--accent); color: white; box-shadow: 0 0 0 2px var(--accent-soft); }
+  .provider-presets > small { color: var(--reject); font: 700 8px/1 var(--font-ui); }
   .run-manager { width: min(860px, 100%); }
   .run-list { display: grid; gap: 8px; }
   .run-list > article { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; padding: 10px; }

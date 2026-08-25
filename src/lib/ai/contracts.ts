@@ -10,6 +10,13 @@ export type AIContextSourceType = 'action' | 'spine' | 'material' | 'relationshi
 export type AIContextInclusion = 'required' | 'resolved' | 'writer_added';
 export type AIContextOmissionReason = 'writer_excluded' | 'not_applicable' | 'budget';
 
+export interface AIContextSelection {
+  includeMaterial: boolean;
+  includeRelationships: boolean;
+  includeTodos: boolean;
+  addedSourceIds: string[];
+}
+
 export interface AICapturedTarget {
   documentId: string;
   sourceRevision: number;
@@ -81,7 +88,7 @@ export interface AIServiceDiagnostic {
   recovered?: boolean;
   outcome?: 'normalized_locally' | 'repaired_locally' | 'recovered_by_retry' | 'retry_requested' | 'rejected';
   rawOutput?: string;
-  classification?: 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract';
+  classification?: 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract' | 'interrupted';
   recoveryAction?: 'none' | 'extract_local' | 'repair_local' | 'correct_output' | 'retry_transient' | 'increase_budget' | 'reconfigure' | 'human';
   status?: number;
   maxAttempts?: number;

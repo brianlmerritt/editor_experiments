@@ -84,7 +84,7 @@ describe('Inputs panel craft activity', () => {
       run('run-2', 'running')
     ], 'main');
 
-    expect(summary).toMatchObject({ id: 'batch-1', state: 'running', requestCount: 2, runningCount: 1, proposalCount: 1 });
+    expect(summary).toMatchObject({ id: 'batch-1', state: 'running', requestCount: 2, completedCount: 1, runningCount: 1, proposalCount: 1 });
   });
 
   it('reports partial completion and only unrecovered errors', () => {

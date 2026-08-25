@@ -45,7 +45,8 @@ and deterministic replay sentinel are enabled by default.
 
 For a quick tour:
 
-1. Click **Review document** in the Inputs panel to populate its live Inputs.
+1. Click **Perform review** in the Inputs panel, edit the **Review Instructions**, and
+   start the review. Inputs appear progressively as each passage/provider check completes.
 2. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, and `X`
    for keyboard review. Drag an Input's grip to reorder it, or focus the grip and use
    Arrow Up/Down.
@@ -111,10 +112,23 @@ The implemented architecture slice provides:
   recovery retries transient failures and raises truncated output budgets, while
   completed work is retained and failed providers can be retried manually as a new
   run against an unchanged target;
+- document review opens a Writing Context preflight with locked target and
+  **Spine (including story brief)** evidence; optional Material, relationships, Todos, and writer-added
+  Navigator Material are remembered per project/action and frozen into each run;
+- Review Instructions live in that Inputs preflight rather than in a separate Brief
+  screen. The Spine owns the story brief and overall writing direction;
+- enabled providers run as independent passage/provider checks within one review
+  activity, so successful Inputs become visible immediately and one slow or failed
+  provider does not hold back another provider's result;
+- startup reconciliation turns orphaned queued/running work into explicit interrupted
+  run evidence with retry and complete-without-this-passage actions;
 - atomic acceptance and undo/redo of prose plus input lifecycle state;
 - explicit `target_changed` and `target_removed` input states with recorded events;
 - selection- and whole-work strikethrough through the same attachment path;
 - a first-class input manager rather than margin-only access;
+- an undoable **Clear pending Inputs** action that removes the current live batch from
+  the panel without treating it as rejection or suppressing the same issue in a later
+  review; run evidence and accepted work are retained;
 - durable attachment state in document versions.
 
 It does not yet provide complete rich format/style precedence, durable session
@@ -155,6 +169,13 @@ classification, and retained error details. A failed or partially successful run
 retry only its failed configured providers; this creates a new auditable run and never
 overwrites the earlier attempt or repeats successful providers.
 
+**Perform review** first opens the Writing Context preflight. Edit the **Review
+Instructions**, inspect the required target and **Spine (including story brief)**,
+choose whether applicable Material, relationships, and open Todos are included, and
+use **Add context…** for other content-bearing project Material. Those choices are
+remembered for that project and action, but the exact content and revisions are
+captured afresh for every run. Inputs appear as individual provider checks complete.
+
 For a server-start configuration instead, copy `.env.example` to `.env` and configure
 OpenRouter, OpenAI, Anthropic, or Ollama. Provider sources start **off** when configured through the
 environment; click their source buttons to make them visible before dispatching.
@@ -178,6 +199,10 @@ called only from SvelteKit server routes.
 - Inputs, formats, behaviour profiles, and workspace revision are stored under the
   document's `extensions.margin_note` payload and included in immutable document
   versions. Craft run records are stored there as well.
+- Svelte captures dirty documents into independent background save queues. Navigator
+  changes do not wait for a durable write or history fetch, and the editor header's
+  animated book-and-pen indicator reports pending, saving, saved, or failed state
+  across all documents.
 - On load, the durable document hydrates Svelte and the facade's downstream mirror;
   the browser mirror does not replace live Svelte state.
 - Immediate undo/redo is intentionally session-local in this POC; durable document

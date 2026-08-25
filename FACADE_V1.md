@@ -146,6 +146,13 @@ On failure, the façade must not roll the workspace back silently. It retains th
 outbox, reports the failure, and retries or asks the writer to resolve a genuine
 conflict.
 
+The current POC uses a document-scoped background queue. Svelte captures and keeps
+the outgoing document snapshot before navigation, then the editor opens the selected
+document without waiting for SQLite, the browser mirror, or history retrieval. Saves
+for the same document remain ordered; different documents may save independently.
+The workspace exposes pending, saving, saved, and failed state to the UI. Potentially
+large facade serialisation is yielded until after navigation can render.
+
 ## Transactions, undo, and the façade
 
 The domain reducer creates forward and inverse patches and owns the active undo/redo

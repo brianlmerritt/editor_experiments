@@ -388,6 +388,13 @@ and configuration failures stop for reconfiguration. Manual retry is a separate 
 targets only the failed providers that remain configured, and is allowed only while
 the captured live target remains unchanged.
 
+On workspace load, a persisted `queued` or `running` run has no surviving browser
+dispatcher and is therefore reconciled as interrupted rather than left running
+forever. Completed Inputs remain intact. Each missing participating source receives
+an explicit interrupted diagnostic, the aggregate activity is recalculated, and the
+writer can retry the unchanged passage or complete it without retrying. Either choice
+is persisted as run evidence.
+
 ## Concurrency and delayed replies
 
 The writer may continue editing while AI runs. Dispatch never locks the manuscript.
@@ -465,9 +472,21 @@ The first boundary slice is now represented in code:
 - Svelte creates and persists explicit AI activity and run records;
 - every craft run captures an immutable action, target, source revision, permitted
   proposal kinds, source participation, and Writing Context manifest before dispatch;
-- the deterministic resolver currently includes the action, writing brief, exact
-  target, protected Spine, selected Navigator Material, applicable legacy context,
+- the deterministic resolver currently includes the action, exact target, protected
+  Spine (which owns the story brief and overall writing direction), selected Navigator Material, applicable legacy context,
   direct confirmed relationships, and open attached Todos;
+- document review now opens a Writing Context preflight in the Inputs panel. The
+  target and protected Spine are required; Material, direct confirmed
+  relationships, and open attached Todos can be included or omitted; additional
+  content-bearing Material can be selected from the project Navigator data;
+- Review Instructions are writer-adjustable in the Inputs preflight and captured as
+  the versioned action for the run; they are not part of the project Spine;
+- each enabled source is dispatched as its own passage/provider check inside the
+  shared activity. Completed checks publish Inputs progressively while retaining the
+  same frozen context and independent recovery provenance;
+- review context choices are remembered per project and action. The chosen stable
+  source IDs are resolved into exact immutable per-passage revisions at dispatch;
+  every run retains included and writer-omitted manifest entries;
 - a narrow interaction service receives the complete request and translates it for
   the existing craft endpoint without reading WorkspaceState, the editor, or
   persistence;
@@ -484,10 +503,13 @@ The first boundary slice is now represented in code:
   rate limits, authentication, and configuration, with at most three attempts;
 - the provider and run managers expose provider health state, participating sources,
   retained diagnostics and attempts, and a new-run retry of failed sources against an
-  unchanged target.
+  unchanged target;
+- startup reconciliation converts orphaned queued/running work into an explicit
+  interrupted failure while preserving completed Inputs and offering retry or
+  complete-without-this-passage actions.
 
-This is the basement, not the complete AI system. The visible Writing Context editor,
-general project-change proposals, model role routing, resumable workflow graphs,
+This is the basement, not the complete AI system. General project-change proposals,
+model role routing, resumable workflow graphs,
 existing-work assimilation, and their UX remain to be implemented deliberately on
 this boundary.
 
@@ -495,7 +517,8 @@ this boundary.
 
 This boundary does not yet decide:
 
-- the final Writing Context inspector layout;
+- how the initial document-review preflight evolves for selection, discussion,
+  generation, project-change, long-work budgeting, and split-pane workflows;
 - how actions are created, shared, pinned, grouped, or invoked;
 - whether discussions appear as threaded Input cards or a dedicated right-panel view;
 - the default context inheritance rules for future split panes;

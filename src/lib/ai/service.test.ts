@@ -54,6 +54,7 @@ describe('Facade AI interaction service', () => {
       to: 11,
       prompt: { id: 'heighten', name: 'Heighten', version: 2, instruction: 'Use a stronger verb.' },
       sourceStates: { openrouter: 'visible' },
+      brief: expect.objectContaining({ version: 3, pov: 'See project Spine', canon: 'Keep Mara in close third.' }),
       context: [{ title: 'Spine', role: 'constraint', scope: 'project', content: 'Keep Mara in close third.', revision: 3 }]
     }), undefined);
     expect(result.context).toBe(domainRequest.context);

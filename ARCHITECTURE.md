@@ -553,7 +553,12 @@ current runs, inputs, formats, behaviours, and workspace revision in durable doc
 versions. Legacy string documents migrate to paragraph blocks without a destructive
 database migration. The `content` string remains a derived plain-text representation
 for search, word counts, AI and export compatibility; it is not the rich-document
-authority. `EditorShell` owns a transient ProseMirror view only. It reports every
+authority. Editing marks the active document dirty in Svelte immediately. A
+document-scoped facade queue captures that canonical snapshot, lets navigation switch
+to another in-memory document without awaiting persistence, and performs the durable
+write in order after yielding a browser frame. History retrieval is lazy and cannot
+delay the document identity/content switch.
+`EditorShell` owns a transient ProseMirror view only. It reports every
 document transaction—including formatting-only changes—to Svelte before rendering,
 then receives Svelte's transformed input and format projection in that same editor
 transaction. It does not save, fork, export, or dispatch AI from editor-held text.
