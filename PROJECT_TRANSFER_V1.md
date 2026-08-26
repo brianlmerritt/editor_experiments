@@ -4,6 +4,10 @@ Margin Note's native project file is a portable project archive with the extensi
 `.mnote.zip`. It is a ZIP container with a versioned JSON manifest, neutral rich-document
 records, project context, and binary assets.
 Markdown remains a publishing/interchange export; it is not a project backup.
+This archive transfers a writer's Margin Note project, not the application source,
+Codex conversation, or machine-local provider configuration. See
+[DEVELOPMENT_HANDOFF.md](./DEVELOPMENT_HANDOFF.md) for a complete move between
+computers.
 
 The first lossless exporter exposed a serious retention defect: document revisions
 repeat growing AI run and Input arrays, producing archives hundreds of megabytes in

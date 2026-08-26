@@ -13,6 +13,8 @@ ProseMirror or desktop Word is recorded in
 [DOCUMENT_SYSTEM_ADAPTERS.md](./DOCUMENT_SYSTEM_ADAPTERS.md).
 Native complete-project `.mnote.zip` export and the validated inverse-import contract
 are specified in [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
+Moving development, writing projects, Codex context, and provider configuration
+between computers is covered by [DEVELOPMENT_HANDOFF.md](./DEVELOPMENT_HANDOFF.md).
 The Phase 1 AI request, Writing Context, provider, proposal, and adoption contract is
 documented in [AI_BOUNDARY.md](./AI_BOUNDARY.md). It also defines existing-work
 assimilation: using a manuscript, supplied reviews, and the current project vocabulary
@@ -53,6 +55,11 @@ were installed with lifecycle scripts disabled, run `npx svelte-kit sync` once b
 
 Open the local URL printed by Vite. No API keys are required: the local craft checks
 and deterministic replay sentinel are enabled by default.
+
+For a new computer, do not copy `node_modules`, `.svelte-kit`, the SQLite ledger, or
+provider settings as though they were one portable workspace. Follow
+[DEVELOPMENT_HANDOFF.md](./DEVELOPMENT_HANDOFF.md) for the separate Git,
+`.mnote.zip`, Codex-context, and credential transfer paths.
 
 For a quick tour:
 
