@@ -17,7 +17,9 @@ describe('native project import inspection', () => {
 
   it('validates a compact archive and sanitizes provider state before adoption', async () => {
     const workspace = repository.workspace();
-    const project = repository.saveProject(workspace.projects[0].id, 'Moon Dark');
+    const project = repository.saveProject(workspace.projects[0].id, 'Moon Dark', {
+      ai_actions: [{ id: 'discuss', name: 'Discuss', responseContract: 'commentary' }]
+    });
     const spine = repository.saveDocument({
       id: workspace.documents.find((document) => document.role === 'spine')!.id,
       content: 'The moon was dark.',
@@ -49,6 +51,7 @@ describe('native project import inspection', () => {
     const adopted = repository.importProject(candidate.input);
     expect(adopted.project.id).not.toBe(project.id);
     expect(adopted.project.title).toBe('Moon Dark');
+    expect(adopted.project.extensions.ai_actions).toEqual([{ id: 'discuss', name: 'Discuss', responseContract: 'commentary' }]);
     expect(adopted.documents.find((document) => document.role === 'spine')?.content).toBe('The moon was dark.');
     expect(repository.workspace().projects).toHaveLength(2);
   });

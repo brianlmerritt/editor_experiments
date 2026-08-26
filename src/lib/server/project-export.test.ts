@@ -24,7 +24,8 @@ describe('native project export', () => {
     const durable = repository.workspace();
     const project = repository.saveProject(durable.projects[0].id, 'Harsh Mercy', {
       navigator: { version: 1, collections: [{ id: 'scenes' }] },
-      ai_context_preferences: { review: { includeMaterial: true } }
+      ai_context_preferences: { review: { includeMaterial: true } },
+      ai_actions: [{ id: 'review-passage', name: 'Review passage', responseContract: 'annotated_findings' }]
     });
     const document = repository.saveDocument({
       id: durable.documents[0].id,
@@ -65,6 +66,7 @@ describe('native project export', () => {
     expect(exportedDocument.extensions.margin_note.sourceStates).toEqual({ 'local-craft': 'visible', openrouter: 'off' });
     expect(exportedDocument.extensions.margin_note.runs).toHaveLength(1);
     expect(exportedProject.extensions).not.toHaveProperty('navigator');
+    expect(exportedProject.extensions.ai_actions).toEqual([{ id: 'review-passage', name: 'Review passage', responseContract: 'annotated_findings' }]);
     expect(structure.navigator).toEqual({ version: 1, collections: [{ id: 'scenes' }] });
     expect(files[`assets/files/${asset.id}`]).toEqual(Uint8Array.from([1, 2, 3]));
     expect(manifest.exportMode).toBe('compact');

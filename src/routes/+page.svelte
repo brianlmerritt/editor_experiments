@@ -4,6 +4,7 @@
   import SuggestionCard from '$lib/components/SuggestionCard.svelte';
   import LedgerTail from '$lib/components/LedgerTail.svelte';
   import Navigator from '$lib/components/Navigator.svelte';
+  import AIActionManager from '$lib/components/AIActionManager.svelte';
   import { categories, categoryMeta, makeId, wordCount, type Branch, type ProviderProtocol, type Suggestion, type TaskPrompt } from '$lib/domain';
   import { targetLabel } from '$lib/workspace/attachments';
   import { workspace } from '$lib/state/workspace.svelte';
@@ -13,6 +14,7 @@
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
   import type { AIContextSelection } from '$lib/ai/contracts';
+  import type { AIActionDefinition, AIActionTargetScope } from '$lib/ai/actions';
   import type { ProjectExportMode, ProjectImportPreview } from '$lib/workspace/project-transfer';
   import type { StorageAnalysis } from '$lib/workspace/retention';
 
@@ -80,6 +82,14 @@
   let contextPreflightTargetId = $state<string | null>(null);
   let reviewContextSelection = $state<AIContextSelection>({ includeMaterial: true, includeRelationships: true, includeTodos: true, addedSourceIds: [] });
   let clearInputsConfirmOpen = $state(false);
+  let actionManagerOpen = $state(false);
+  let actionRunnerOpen = $state(false);
+  let actionRunnerId = $state('');
+  let actionRunnerScope = $state<AIActionTargetScope>('selection');
+  let actionRunnerRange = $state<{ from: number; to: number; text: string } | null>(null);
+  let actionRunnerContext = $state<AIContextSelection>({ includeMaterial: true, includeRelationships: true, includeTodos: true, addedSourceIds: [] });
+  let actionRunnerLocked = $state(false);
+  let actionContextPickerOpen = $state(false);
 
   const layoutStorageKey = 'margin-note:workbench-layout';
 
@@ -125,6 +135,10 @@
     run.documentId === workspace.branchId
     && run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)));
   let clearableInputCount = $derived(workspace.inputs.filter((input) => input.state === 'pending' || input.state === 'hidden').length);
+  let selectedAction = $derived(workspace.actions.find((action) => action.id === actionRunnerId) ?? null);
+  let actionContextManifest = $derived(selectedAction && actionRunnerOpen
+    ? workspace.actionContextPreview(selectedAction, actionRunnerScope, actionRunnerRange, actionRunnerContext)
+    : null);
 
   const activityLabels: Record<CraftActivityState, string> = {
     running: 'Running',
@@ -373,6 +387,76 @@
     } finally {
       contextPreflightLocked = false;
     }
+  }
+
+  function openActionRunner(scope: AIActionTargetScope = selection.text.trim() ? 'selection' : 'document', actionId?: string): void {
+    const available = workspace.actions.filter((action) => action.allowedTargets.includes(scope)
+      && (!action.requiresSelection || Boolean(selection.text.trim())));
+    const action = available.find((item) => item.id === actionId) ?? available[0];
+    if (!action) {
+      showNotice(scope === 'selection' ? 'No project action can run on this selection.' : 'No project action can run on the current document.');
+      return;
+    }
+    actionRunnerId = action.id;
+    actionRunnerScope = scope;
+    actionRunnerRange = scope === 'selection' ? { ...selection } : null;
+    actionRunnerContext = workspace.actionContextSelection(action);
+    actionContextPickerOpen = false;
+    actionRunnerOpen = true;
+  }
+
+  function chooseAction(id: string): void {
+    const action = workspace.actions.find((item) => item.id === id);
+    if (!action) return;
+    actionRunnerId = id;
+    if (!action.allowedTargets.includes(actionRunnerScope)) {
+      actionRunnerScope = action.defaultTarget;
+      actionRunnerRange = actionRunnerScope === 'selection' ? { ...selection } : null;
+    }
+    actionRunnerContext = workspace.actionContextSelection(action);
+  }
+
+  function changeActionScope(scope: AIActionTargetScope): void {
+    actionRunnerScope = scope;
+    actionRunnerRange = scope === 'selection' ? { ...selection } : null;
+  }
+
+  function toggleActionContext(sourceId: string): void {
+    if (actionRunnerLocked) return;
+    actionRunnerContext = {
+      ...actionRunnerContext,
+      addedSourceIds: actionRunnerContext.addedSourceIds.includes(sourceId)
+        ? actionRunnerContext.addedSourceIds.filter((id) => id !== sourceId)
+        : [...actionRunnerContext.addedSourceIds, sourceId]
+    };
+  }
+
+  async function runConfiguredAction(): Promise<void> {
+    const action = selectedAction;
+    if (!action || !actionContextManifest) return;
+    actionRunnerLocked = true;
+    try {
+      await workspace.saveContextSelection(action.id, actionRunnerContext);
+      const running = workspace.runAIAction(action, actionRunnerScope, actionRunnerRange, actionRunnerContext);
+      actionRunnerOpen = false;
+      const incoming = await running;
+      refreshLiveSuggestions();
+      if (incoming[0]) void activateCard(incoming[0].id);
+      if (!workspace.notice) showNotice(incoming.length
+        ? `${action.name}: ${incoming.length} new ${incoming.length === 1 ? 'Input' : 'Inputs'}.`
+        : `${action.name} completed without a usable Input.`);
+    } finally {
+      actionRunnerLocked = false;
+    }
+  }
+
+  async function saveAction(action: AIActionDefinition): Promise<void> {
+    const saved = await workspace.saveAIAction(action);
+    actionRunnerId = saved.id;
+  }
+
+  async function deleteAction(id: string): Promise<void> {
+    await workspace.deleteAIAction(id);
   }
 
   async function retryInterrupted(): Promise<void> {
@@ -1076,6 +1160,7 @@
                 {#if revisionSuggestion}
                   <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
                 {/if}
+                <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => openActionRunner('selection')}>Actions…</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
@@ -1118,6 +1203,8 @@
                 aria-expanded={inputControlsOpen}
                 onclick={() => inputControlsOpen = !inputControlsOpen}
               >Filters{hiddenInputFilterCount ? ` ${hiddenInputFilterCount}` : ''}</button>
+              <button type="button" disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Run action</button>
+              <button type="button" onclick={() => actionManagerOpen = true}>Manage actions</button>
               <button
                 type="button"
                 class="review-document"
@@ -1313,6 +1400,41 @@
   {#if workspace.notice}<button class="notice" onclick={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
   {#if workspace.lastError}<button class="error" onclick={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
   {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button onclick={undoDragDismiss}>Undo</button></div>{/if}
+
+  {#if actionRunnerOpen && selectedAction}
+    <div class="modal-backdrop" role="presentation" onclick={() => { if (!actionRunnerLocked) actionRunnerOpen = false; }}>
+      <div class="settings action-runner" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="action-runner-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>Project AI action</small><h2 id="action-runner-title">Run action</h2></div><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>×</button></header>
+        <label>Action<select value={selectedAction.id} disabled={actionRunnerLocked} onchange={(event) => chooseAction(event.currentTarget.value)}>{#each workspace.actions as action}<option value={action.id}>{action.name}</option>{/each}</select></label>
+        <p class="provider-intro"><strong>{selectedAction.description || selectedAction.name}</strong><br />{selectedAction.instruction}</p>
+        <fieldset class="action-targets"><legend>One target</legend>{#if selectedAction.allowedTargets.includes('selection')}<label><input type="radio" name="action-target" value="selection" checked={actionRunnerScope === 'selection'} disabled={actionRunnerLocked || !selection.text.trim()} onchange={() => changeActionScope('selection')} />Selection{actionRunnerRange ? ` · ${actionRunnerRange.text.trim().split(/\s+/).length} words` : ''}</label>{/if}{#if selectedAction.allowedTargets.includes('document')}<label><input type="radio" name="action-target" value="document" checked={actionRunnerScope === 'document'} disabled={actionRunnerLocked || selectedAction.requiresSelection} onchange={() => changeActionScope('document')} />Current document</label>{/if}</fieldset>
+        <div class="action-contract"><span>Response</span><strong>{selectedAction.responseContract.replaceAll('_', ' ')}</strong><span>Maximum</span><strong>{selectedAction.maxOutputTokens.toLocaleString()} tokens</strong></div>
+        {#if actionContextManifest}
+          <section class="context-preflight embedded" aria-label="Action Writing Context">
+            <header><div><strong>Writing Context</strong><small>Target plus explicitly included read-only context</small></div><span>{actionRunnerLocked ? 'Locked while running' : 'Check before sending'}</span></header>
+            <div class="context-required"><b>Always included</b>{#each actionContextManifest.items.filter((item) => item.inclusion === 'required' && item.sourceType !== 'action') as item}<div class="required-context-row"><span>🔒 {item.title}</span><small>v{item.sourceRevision}</small></div>{/each}</div>
+            <div class="context-options"><b>Include applicable context</b><label><input type="checkbox" bind:checked={actionRunnerContext.includeMaterial} disabled={actionRunnerLocked} />Material</label><label><input type="checkbox" bind:checked={actionRunnerContext.includeRelationships} disabled={actionRunnerLocked} />Relationships</label><label><input type="checkbox" bind:checked={actionRunnerContext.includeTodos} disabled={actionRunnerLocked} />Open Todos</label></div>
+            <button class="add-context" type="button" disabled={actionRunnerLocked} aria-expanded={actionContextPickerOpen} onclick={() => actionContextPickerOpen = !actionContextPickerOpen}>+ Add context…</button>
+            {#if actionContextPickerOpen}<div class="context-picker">{#each workspace.aiContextMaterials.filter((item) => item.id !== workspace.branchId) as item}<label><input type="checkbox" checked={actionRunnerContext.addedSourceIds.includes(item.id)} onchange={() => toggleActionContext(item.id)} /><span>{workspace.navigatorNodeLabel(item)}</span><small>{workspace.navigatorNodeType(item)}</small></label>{:else}<p>No other Material exists in this project.</p>{/each}</div>{/if}
+            <div class="context-manifest-summary"><span>{actionContextManifest.items.filter((item) => item.sent).length} included</span><span>{actionContextManifest.items.filter((item) => !item.sent).length} omitted</span></div>
+          </section>
+        {:else}<p class="reset-warning">The selected target is empty or no longer matches the editor.</p>{/if}
+        <footer><p>Only the target can receive a proposed change. Included Material, relationships and Todos are read-only.</p><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>Cancel</button><button type="button" class="primary" disabled={actionRunnerLocked || !actionContextManifest} onclick={() => void runConfiguredAction()}>{actionRunnerLocked ? 'Running…' : `Run ${selectedAction.name}`}</button></footer>
+      </div>
+    </div>
+  {/if}
+
+  {#if actionManagerOpen}
+    <div class="modal-backdrop" role="presentation" onclick={() => actionManagerOpen = false}>
+      <AIActionManager
+        actions={workspace.actions}
+        providers={providerSettings.sources.filter((source) => source.number >= 3).map((source) => ({ id: source.id, label: providerSettings.sourceAvailability[source.id]?.name ?? source.label, model: providerSettings.sourceAvailability[source.id]?.model, available: providerSettings.sourceAvailability[source.id]?.available === true }))}
+        onSave={saveAction}
+        onDelete={deleteAction}
+        onClose={() => actionManagerOpen = false}
+      />
+    </div>
+  {/if}
 
   {#if providerSettings.providerDialogOpen}
     <div class="modal-backdrop" role="presentation">
@@ -1812,6 +1934,16 @@
   .settings footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
   .settings footer .primary { background: var(--accent); border-color: var(--accent); color: white; }
   .settings footer button:disabled { opacity: .45; cursor: default; }
+  .action-runner { width: min(760px, 100%); }
+  .action-runner .provider-intro { white-space: pre-wrap; }
+  .action-targets { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; border: 1px solid var(--line); }
+  .action-targets label { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; }
+  .action-targets input { width: auto; }
+  .action-contract { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 9px; align-items: baseline; margin: 8px 0 12px; padding: 8px 10px; border-radius: 3px; background: var(--canvas); font: 9px/1.3 var(--font-ui); }
+  .action-contract span { color: var(--muted); text-transform: uppercase; }
+  .context-preflight.embedded { margin: 0; }
+  .required-context-row { display: flex; justify-content: space-between; gap: 8px; border: 1px solid var(--line); border-radius: 3px; padding: 6px 7px; color: var(--ink-soft); font: 9px/1.2 var(--font-ui); }
+  .required-context-row small { color: var(--muted); }
   .provider-settings { width: min(560px, 100%); }
   .provider-intro { margin: -6px 0 18px; color: var(--muted); font: 11px/1.6 var(--font-ui); }
   .provider-error { margin: 8px 0 0; color: var(--reject); font: 600 10px/1.4 var(--font-ui); }

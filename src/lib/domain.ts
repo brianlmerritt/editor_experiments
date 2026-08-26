@@ -1,5 +1,6 @@
 import { textTarget, type TargetSet } from '$lib/workspace/attachments';
 import type { AIContextManifest, AIInteractionIntent, AIInteractionRequest } from '$lib/ai/contracts';
+import type { AIResponseContract } from '$lib/ai/actions';
 
 export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
 export type Category = (typeof categories)[number];
@@ -217,6 +218,12 @@ export interface GenerationRequest {
   prompt: TaskPrompt;
   sourceStates: Record<string, SourceState>;
   mode: WritingMode;
+  responseContract?: AIResponseContract;
+  optionCount?: number;
+  includeExplanation?: boolean;
+  inputCategory?: Category;
+  maxOutputTokens?: number;
+  temperature?: number;
   context?: Array<{
     title: string;
     role?: string;

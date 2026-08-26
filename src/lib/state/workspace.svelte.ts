@@ -1,6 +1,7 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIContextSelection, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
 import { FacadeAIInteractionService } from '$lib/ai/service';
+import { cloneDefaultAIActions, normalizedAIActions, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot, ProjectImportPreview } from '$lib/workspace/project-transfer';
@@ -8,7 +9,7 @@ import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
-import { documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
+import { completeDocumentRange, documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
 import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
 import {
@@ -42,6 +43,14 @@ const defaultAIContextSelection: AIContextSelection = {
   includeTodos: true,
   addedSourceIds: []
 };
+
+function proposalKindForAction(action: AIActionSnapshot): string {
+  if (action.responseContract === 'commentary') return 'commentary_input';
+  if (action.responseContract === 'annotated_findings') return 'annotated_input';
+  if (action.responseContract === 'revision_options') return 'revision_options';
+  if (action.responseContract === 'alternative_draft') return 'alternative_draft';
+  return 'craft_input';
+}
 
 function isInputProposalPayload(value: unknown): value is InputProposal {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -102,6 +111,7 @@ export class WorkspaceState {
   ledger = $state<Required<LedgerEvent>[]>([]);
   brief = $state<WritingBrief>(defaultBrief);
   prompts = $state<TaskPrompt[]>([defaultPrompt]);
+  actions = $state<AIActionDefinition[]>(cloneDefaultAIActions());
   branches = $state<Branch[]>([{ id: 'main', name: 'Main draft', createdAt: new Date().toISOString(), wordCount: 0, lastEdited: new Date().toISOString() }]);
   projects = $state<WorkspaceProject[]>([]);
   documents = $state<WorkspaceDocument[]>([]);
@@ -219,6 +229,14 @@ export class WorkspaceState {
     };
   }
 
+  actionContextSelection(action: AIActionDefinition): AIContextSelection {
+    const stored = this.currentProject?.extensions.ai_context_preferences;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored) || !(action.id in stored)) {
+      return { ...action.context, addedSourceIds: [...action.context.addedSourceIds] };
+    }
+    return this.contextSelection(action.id);
+  }
+
   async saveContextSelection(actionId: string, selection: AIContextSelection): Promise<void> {
     const project = this.currentProject;
     if (!project) return;
@@ -234,6 +252,33 @@ export class WorkspaceState {
       }
     });
     this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
+  }
+
+  private async persistProjectActions(): Promise<void> {
+    const project = this.currentProject;
+    if (!project) return;
+    const saved = await this.facade.saveProject(project.id, project.title, {
+      ...project.extensions,
+      ai_actions: JSON.parse(JSON.stringify(this.actions))
+    });
+    this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
+  }
+
+  async saveAIAction(input: AIActionDefinition): Promise<AIActionDefinition> {
+    const current = this.actions.find((action) => action.id === input.id);
+    const [normalized] = normalizedAIActions([{ ...input, version: (current?.version ?? 0) + 1 }]);
+    if (!normalized || normalized.id !== input.id) throw new Error('Action name, instructions, response contract, and at least one target are required.');
+    this.actions = current
+      ? this.actions.map((action) => action.id === normalized.id ? normalized : action)
+      : [...this.actions, normalized];
+    await this.persistProjectActions();
+    return normalized;
+  }
+
+  async deleteAIAction(id: string): Promise<void> {
+    if (this.actions.length <= 1) throw new Error('A project must retain at least one AI action.');
+    this.actions = this.actions.filter((action) => action.id !== id);
+    await this.persistProjectActions();
   }
 
   get spineNode(): WorkspaceDocument | null {
@@ -389,8 +434,10 @@ export class WorkspaceState {
       this.projectId = loaded.activeProjectId;
       this.branchId = loaded.activeDocumentId;
       this.navigator = readNavigatorState(this.currentProject);
+      this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
       this.loadNavigatorMemory();
       await this.ensureProjectStructure();
+      if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
       this.branches = loaded.branches;
       this.ledger = loaded.events;
       this.settingsState.load(loaded.sourceAvailability);
@@ -717,8 +764,8 @@ export class WorkspaceState {
     this.categoryVisibility[category] = !this.categoryVisibility[category];
   }
 
-  private beginAIActivity(prompt: TaskPrompt, scope: 'document' | 'selection'): AIActivityRecord {
-    const intent: AIInteractionIntent = prompt.id === 'sentinel' ? 'review' : 'revise';
+  private beginAIActivity(prompt: TaskPrompt, scope: 'document' | 'selection', explicitIntent?: AIInteractionIntent): AIActivityRecord {
+    const intent: AIInteractionIntent = explicitIntent ?? (prompt.id === 'sentinel' ? 'review' : 'revise');
     const activity: AIActivityRecord = {
       id: makeId('activity'),
       documentId: this.branchId,
@@ -819,6 +866,23 @@ export class WorkspaceState {
       version: prompt.version,
       intent,
       instruction: prompt.instruction
+    };
+  }
+
+  private definitionSnapshot(action: AIActionDefinition, scope: AIActionTargetScope): AIActionSnapshot {
+    return {
+      id: action.id,
+      name: action.name,
+      version: action.version,
+      intent: action.intent,
+      instruction: action.instruction,
+      responseContract: action.responseContract,
+      targetScope: scope,
+      optionCount: action.optionCount,
+      includeExplanation: action.includeExplanation,
+      inputCategory: action.inputCategory,
+      maxOutputTokens: action.maxOutputTokens,
+      temperature: action.temperature
     };
   }
 
@@ -1009,6 +1073,66 @@ export class WorkspaceState {
     );
   }
 
+  actionContextPreview(action: AIActionDefinition, scope: AIActionTargetScope, range: DocumentRange | null, selection: AIContextSelection): AIContextManifest | null {
+    const document = this.currentDocument;
+    if (!document) return null;
+    const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentRange(this.documentSnapshot) : null;
+    if (!targetRange?.text.trim()) return null;
+    return this.contextManifest(this.definitionSnapshot(action, scope), {
+      documentId: document.id,
+      sourceRevision: this.workspaceRevision,
+      target: textTarget(document.id, targetRange.from, targetRange.to, targetRange.text),
+      exactText: targetRange.text
+    }, selection);
+  }
+
+  async runAIAction(
+    action: AIActionDefinition,
+    scope: AIActionTargetScope,
+    range: DocumentRange | null,
+    contextSelection: AIContextSelection = this.actionContextSelection(action)
+  ): Promise<Suggestion[]> {
+    const document = this.currentDocument;
+    if (!document || !action.allowedTargets.includes(scope)) return [];
+    const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentRange(this.documentSnapshot) : null;
+    if (!targetRange?.text.trim() || (action.requiresSelection && scope !== 'selection')) {
+      this.notice = action.requiresSelection ? 'This action requires a text selection.' : 'The selected target is empty.';
+      return [];
+    }
+    const canonicalText = this.documentSnapshot ? documentTextBetween(this.documentSnapshot, targetRange.from, targetRange.to) : null;
+    if (canonicalText !== targetRange.text) {
+      this.notice = 'The target changed before the action began. Select it again.';
+      return [];
+    }
+    const availableAI = this.settingsState.sources.filter((source) => source.number >= 3
+      && this.sourceStates[source.id] !== 'off'
+      && this.settingsState.sourceAvailable(source.id));
+    const selected = action.preferredSourceId
+      ? availableAI.filter((source) => source.id === action.preferredSourceId)
+      : availableAI;
+    if (!selected.length) {
+      this.notice = action.preferredSourceId
+        ? 'The provider assigned to this action is unavailable or not enabled.'
+        : 'Enable at least one configured AI provider before running this action.';
+      return [];
+    }
+    const sourceIds = new Set(selected.map((source) => source.id));
+    const sourceStates = Object.fromEntries(this.settingsState.sources.map((source) => [
+      source.id,
+      sourceIds.has(source.id) ? 'visible' : 'off'
+    ])) as Record<string, SourceState>;
+    const prompt: TaskPrompt = { id: action.id, name: action.name, version: action.version, instruction: action.instruction };
+    const activity = this.beginAIActivity(prompt, scope, action.intent);
+    return this.requestInputRun(
+      { ...targetRange, prompt },
+      `${this.branchId}:action:${action.id}:${targetRange.from}:${targetRange.to}`,
+      activity,
+      sourceStates,
+      contextSelection,
+      { action: this.definitionSnapshot(action, scope) }
+    );
+  }
+
   async retryRun(runId: string): Promise<Suggestion[]> {
     const previous = this.runs.find((run) => run.id === runId);
     if (!previous || (previous.state !== 'failed' && previous.state !== 'partial')) return [];
@@ -1047,7 +1171,9 @@ export class WorkspaceState {
       { from: target.start, to: target.end, text: previous.originalText, prompt },
       `${this.branchId}:retry:${previous.id}`,
       activity,
-      retrySourceStates
+      retrySourceStates,
+      defaultAIContextSelection,
+      { action: capturedAction }
     );
     const retry = this.runs.find((run) => run.activityId === activity.id);
     if (retry && (retry.state === 'completed' || retry.state === 'partial')) {
@@ -1068,7 +1194,8 @@ export class WorkspaceState {
     rangeKey: string,
     activity: AIActivityRecord,
     requestedSourceStates: Record<string, SourceState> = this.sourceStates,
-    contextSelection: AIContextSelection = defaultAIContextSelection
+    contextSelection: AIContextSelection = defaultAIContextSelection,
+    configuration: { action?: AIActionSnapshot } = {}
   ): Promise<Suggestion[]> {
     if (this.paused) return [];
     this.dispatches.get(rangeKey)?.abort();
@@ -1082,7 +1209,8 @@ export class WorkspaceState {
     }
     const controller = new AbortController();
     const intent = activity.intent;
-    const action = this.actionSnapshot(input.prompt, intent);
+    const action = configuration.action ?? this.actionSnapshot(input.prompt, intent);
+    const permittedProposalKinds = [proposalKindForAction(action)];
     const capturedTarget = {
       documentId: this.branchId,
       sourceRevision: this.workspaceRevision,
@@ -1104,7 +1232,7 @@ export class WorkspaceState {
       intent,
       requestedContextManifest: context,
       contextManifest: context,
-      permittedProposalKinds: ['craft_input'],
+      permittedProposalKinds,
       sourceStates: { ...requestedSourceStates },
       state: 'running',
       proposalIds: [],
@@ -1130,7 +1258,7 @@ export class WorkspaceState {
         action,
         target: capturedTarget,
         context,
-        permittedProposalKinds: ['craft_input'],
+        permittedProposalKinds,
         sources: this.settingsState.sources.map((source) => ({
           sourceId: source.id,
           participation: requestedSourceStates[source.id] ?? 'off',
@@ -1161,9 +1289,9 @@ export class WorkspaceState {
           message: 'AI service returned hidden, altered, or incomplete Writing Context.'
         });
       }
-      const proposals: InputProposal[] = [];
+      const proposals: Array<{ kind: string; payload: InputProposal }> = [];
       for (const proposal of response.proposals) {
-        if (!request.permittedProposalKinds.includes(proposal.kind) || proposal.kind !== 'craft_input' || !isInputProposalPayload(proposal.payload)) {
+        if (!request.permittedProposalKinds.includes(proposal.kind) || !isInputProposalPayload(proposal.payload)) {
           contractDiagnostics.push({
             source: 'interaction_service',
             kind: 'contract' as const,
@@ -1173,7 +1301,7 @@ export class WorkspaceState {
           });
           continue;
         }
-        proposals.push(proposal.payload);
+        proposals.push({ kind: proposal.kind, payload: proposal.payload });
       }
       const diagnostics = [...response.diagnostics, ...contractDiagnostics];
       const outputDiagnostics = diagnostics.filter((item) => item.kind === 'provider_output');
@@ -1203,7 +1331,7 @@ export class WorkspaceState {
         return [];
       }
       const adopted = (contractDiagnostics.some((diagnostic) => diagnostic.message.includes('Writing Context')) ? [] : proposals).flatMap((proposal) => {
-        const inputRecord = this.adoptProposal(proposal, currentRun, target.start);
+        const inputRecord = this.adoptProposal(proposal.payload, currentRun, target.start, proposal.kind);
         return inputRecord ? [inputRecord] : [];
       });
       this.runs = this.runs.map((item) => item.id === run.id ? {
@@ -1248,7 +1376,7 @@ export class WorkspaceState {
     }
   }
 
-  private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number): Suggestion | null {
+  private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number, kind = 'craft_input'): Suggestion | null {
     const insertion = proposal.type === 'insertion' && proposal.from === proposal.to && proposal.sourceText === '';
     if (!insertion && !isExactTextSpan(run.originalText, proposal.from, proposal.to, proposal.sourceText)) return null;
     if (insertion && (proposal.from < 0 || proposal.from > run.originalText.length)) return null;
@@ -1261,7 +1389,7 @@ export class WorkspaceState {
     const type = proposal.type === 'replacement' && !variants.length ? 'annotation' : proposal.type;
     return {
       id,
-      kind: 'craft_suggestion',
+      kind,
       source: proposal.source,
       sourceNumber: proposal.sourceNumber,
       sourceKind: proposal.sourceKind,
@@ -1430,8 +1558,10 @@ export class WorkspaceState {
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
+    this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
     this.loadNavigatorMemory();
     await this.ensureProjectStructure();
+    if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
     const document = this.projectNodes.find((item) => item.role === 'manuscript') ?? this.spineNode ?? this.todosNode;
     if (!document) throw new Error('Project has no document');
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', id);
@@ -1460,11 +1590,13 @@ export class WorkspaceState {
     const persistent = await this.facade.persistentWorkspace();
     this.contextBuckets = persistent.contextBuckets;
     this.projectId = project.id;
+    this.actions = cloneDefaultAIActions();
     this.navigator = emptyNavigatorState();
     this.navigatorMemory = emptyNavigatorMemory();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.saveNavigatorMemory();
+    await this.persistProjectActions();
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
     this.refreshBranches();
     await this.openNavigatorNode(document.id);
@@ -1502,8 +1634,10 @@ export class WorkspaceState {
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
+    this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
     this.loadNavigatorMemory();
     await this.ensureProjectStructure();
+    if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
     const document = this.projectNodes.find((item) => item.role === 'manuscript') ?? this.spineNode ?? this.todosNode;
     if (!document) throw new Error('Project has no document');
     this.refreshBranches();
@@ -1539,10 +1673,12 @@ export class WorkspaceState {
     this.documents = persistent.documents;
     this.contextBuckets = persistent.contextBuckets;
     this.navigator = emptyNavigatorState();
+    this.actions = cloneDefaultAIActions();
     this.navigatorMemory = emptyNavigatorMemory();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.saveNavigatorMemory();
+    await this.persistProjectActions();
     this.refreshBranches();
     const spine = this.spineNode;
     if (!spine) throw new Error('Reset project has no Spine');

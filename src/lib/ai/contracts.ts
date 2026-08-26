@@ -1,5 +1,6 @@
 import type { TargetSet } from '$lib/workspace/attachments';
 import type { ProviderUsage } from '$lib/domain';
+import type { AIActionTargetScope, AIResponseContract } from './actions';
 
 export const aiInteractionIntents = ['review', 'revise', 'discuss', 'generate', 'propose_project_change'] as const;
 export type AIInteractionIntent = (typeof aiInteractionIntents)[number];
@@ -52,6 +53,13 @@ export interface AIActionSnapshot {
   version: number;
   intent: AIInteractionIntent;
   instruction: string;
+  responseContract?: AIResponseContract;
+  targetScope?: AIActionTargetScope;
+  optionCount?: number;
+  includeExplanation?: boolean;
+  inputCategory?: string;
+  maxOutputTokens?: number;
+  temperature?: number;
 }
 
 export interface AISourceSelection {

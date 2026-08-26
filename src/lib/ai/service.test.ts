@@ -70,4 +70,23 @@ describe('Facade AI interaction service', () => {
     expect(requestInputs).not.toHaveBeenCalled();
     expect(result.diagnostics[0]).toMatchObject({ kind: 'contract' });
   });
+
+  it('carries a configured response contract and generation limits across the facade', async () => {
+    const requestInputs = vi.fn(async () => ({ proposals: [{ proposalId: 'one' }], errors: [] }));
+    const facade = { requestInputs } as unknown as WorkspaceFacade;
+    const domainRequest = request();
+    domainRequest.action = {
+      ...domainRequest.action,
+      responseContract: 'commentary', targetScope: 'selection', optionCount: 1,
+      includeExplanation: true, inputCategory: 'canon', maxOutputTokens: 15000
+    };
+    domainRequest.permittedProposalKinds = ['commentary_input'];
+
+    const result = await new FacadeAIInteractionService(facade).execute(domainRequest);
+
+    expect(requestInputs).toHaveBeenCalledWith(expect.objectContaining({
+      responseContract: 'commentary', maxOutputTokens: 15000, inputCategory: 'canon'
+    }), undefined);
+    expect(result.proposals[0].kind).toBe('commentary_input');
+  });
 });

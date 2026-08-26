@@ -13,6 +13,11 @@ export function documentTextBetween(snapshot: EditorDocumentSnapshot, from: numb
   return document.textBetween(from, to, '\n');
 }
 
+export function completeDocumentRange(snapshot: EditorDocumentSnapshot): DocumentRange {
+  const document = schema.nodeFromJSON(snapshot.doc);
+  return { from: 0, to: document.content.size, text: document.textBetween(0, document.content.size, '\n') };
+}
+
 export function documentParagraphs(snapshot: EditorDocumentSnapshot): DocumentRange[] {
   const document = schema.nodeFromJSON(snapshot.doc);
   const paragraphs: DocumentRange[] = [];

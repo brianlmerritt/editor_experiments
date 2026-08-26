@@ -31,10 +31,10 @@ Svelte workspace state and facade. See [NAVIGATION.md](./NAVIGATION.md) for the 
 boundary and deferred multi-pane and fork work.
 
 The current screen is retained as evidence for the change-aware editor slice. Its
-fixed AI actions and remaining developer tools are not the final Navigator UX. The
-former Margin/Tray split has been consolidated into one Inputs panel, and that panel
-now owns document review, run status, Input filters, source participation, provider
-status, spend, and Input history.
+remaining developer tools are not the final Navigator UX. The former Margin/Tray
+split has been consolidated into one Inputs panel, and that panel now owns
+project-defined AI actions, document review, run status, Input filters, source
+participation, provider status, spend, and Input history.
 
 ## Run it
 
@@ -56,29 +56,34 @@ and deterministic replay sentinel are enabled by default.
 
 For a quick tour:
 
-1. Click **Perform review** in the Inputs panel, edit the **Review Instructions**, and
-   start the review. Inputs appear progressively as each passage/provider check completes.
-2. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, and `X`
+1. Click **Run action** in the Inputs panel to discuss or review the exact document,
+   or select text and use **Actions…** to target only that selection. Confirm the
+   response contract and read-only Writing Context in the preflight before running.
+   Use **Manage actions** to edit the four project-owned defaults or add another.
+2. Click **Perform review** in the Inputs panel for the existing passage-by-passage
+   review workflow. Edit the **Review Instructions** and start the review. Inputs
+   appear progressively as each passage/provider check completes.
+3. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, and `X`
    for keyboard review. Drag an Input's grip to reorder it, or focus the grip and use
    Arrow Up/Down.
-3. Open **Ledger** to verify the instrumentation.
-4. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
-5. Open **Context** to exercise the historical POC context path. It is not the target
+4. Open **Ledger** to verify the instrumentation.
+5. Visit **Compare** to evaluate current unresolved alternatives against the original wording. This records blind research judgments; it does not edit the draft.
+6. Open **Context** to exercise the historical POC context path. It is not the target
    Spine/Collection interface.
-6. Click **History** at the bottom of the Inputs panel to search, filter, reopen, or
+7. Click **History** at the bottom of the Inputs panel to search, filter, reopen, or
    dismiss current and historical human/AI/system material.
-7. Select text or use **Strike work** to exercise attachment-backed formatting, then
+8. Select text or use **Strike work** to exercise attachment-backed formatting, then
    use **Undo/Redo** to restore prose, input state, targets, and formatting together.
-8. Use the editor pane's `−`, percentage, and `+` controls to change the local reading
+9. Use the editor pane's `−`, percentage, and `+` controls to change the local reading
    size without changing manuscript formatting.
-9. Use the writing toolbar for paragraph and heading styles, bold, italic, underline,
+10. Use the writing toolbar for paragraph and heading styles, bold, italic, underline,
    strikethrough, bullet and numbered lists, block quotes, links, and clearing inline
    formatting. These commands enter the same Svelte-owned transaction and Undo/Redo
    path as typing and rich paste.
-10. Pasted sequences beginning with recognised bullets or sequential numbers are
+11. Pasted sequences beginning with recognised bullets or sequential numbers are
     normalised into semantic lists. Select existing malformed material and use
     **Fix list** when an earlier paste needs the same repair.
-11. Open the project menu beside the Navigator's project selector and choose **Export
+12. Open the project menu beside the Navigator's project selector and choose **Export
     project** to download a compact `.mnote.zip` archive. This includes current
     structure, Inputs/runs/provenance/usage, context, forks, and assets once, but never
     API keys or provider profiles. **Export forensic archive** separately includes all
@@ -117,6 +122,13 @@ The implemented architecture slice provides:
 - typed Svelte-owned AI activities and runs that capture an immutable target, action,
   permitted proposal kinds, selected sources, and inspectable Writing Context before
   a narrow interaction service reaches the existing craft transport;
+- project-owned, editable action definitions with explicit selection/document scope,
+  provider preference, read-only context choices, response contract, option count,
+  token ceiling, and optional temperature; compact export/import preserves them;
+- four initial response contracts: readable commentary, precisely anchored findings,
+  multiple complete revision options, and one complete alternative. Commentary and
+  alternatives avoid unnecessary JSON, while structured output uses local repair and
+  bounded corrective retries;
 - rejection of hidden or rewritten returned context and unpermitted proposal kinds
   before provider output can become an Input;
 - diagnosis-only margin notes can select their current live target and immediately

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorDocumentSnapshot } from './transactions';
-import { documentCraftParagraphs, documentParagraphs, documentTextBetween } from './document';
+import { completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween } from './document';
 
 const snapshot: EditorDocumentSnapshot = {
   doc: {
@@ -24,6 +24,14 @@ describe('canonical document ranges', () => {
 
   it('reads selected text from the canonical snapshot', () => {
     expect(documentTextBetween(snapshot, 19, 25)).toBe('Second');
+  });
+
+  it('captures one exact rich-document range for a whole-document action', () => {
+    expect(completeDocumentRange(snapshot)).toEqual({
+      from: 0,
+      to: 37,
+      text: 'First paragraph.\nSecond paragraph.'
+    });
   });
 
   it('does not dispatch standalone craft requests for headings or scene dividers', () => {

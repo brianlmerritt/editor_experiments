@@ -394,7 +394,17 @@ function assemblePrompt(request: GenerationRequest): string {
   const context = (request.context ?? [])
     .map((bucket) => `### ${bucket.title} (${bucket.scope}, v${bucket.revision}${bucket.role ? `, ${bucket.role}` : ''})\n${bucket.content}`)
     .join('\n\n');
-  return `You are a precise writing suggester. Return JSON only: {"suggestions":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, or sentence that the comment directly discusses. Never begin or end source_text inside a word and never include leading or trailing whitespace. For a passage-wide annotation, use from 0, to the full passage length, and copy the full passage into source_text. Return at most one annotation for the same substantive issue at the same location. For a replacement, provide two or three distinct alternatives in variants; none may equal source_text. If there is no useful change, return no suggestion instead of guessing an anchor.\n\nWRITING CONTEXT\n${context || canon || 'No additional context supplied.'}\n\nREVIEW INSTRUCTIONS\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
+  const contract = request.responseContract;
+  const protocol = contract === 'commentary'
+    ? 'Return a focused editorial response as readable Markdown. Do not return JSON and do not rewrite the passage unless the instructions explicitly request discussion of possible wording.'
+    : contract === 'alternative_draft'
+      ? 'Return only one complete alternative version of PASSAGE as plain text. Do not add a preface, explanation, Markdown fence, or JSON. Preserve all applicable facts and constraints.'
+      : contract === 'revision_options'
+        ? `Return JSON only: {"options":[{"text":"complete replacement for PASSAGE","rationale":"brief meaningful trade-off"}]}. Return ${Math.max(1, Math.min(5, request.optionCount ?? 3))} distinct complete alternatives. Each text must replace the entire PASSAGE and must not equal it.`
+        : contract === 'annotated_findings'
+          ? `Return JSON only: {"findings":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","comment":"specific editorial finding","correction":"optional replacement","confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, sentence, or paragraph directly discussed. Never begin or end inside a word or include surrounding whitespace. Return no finding rather than inventing one.`
+          : 'Return JSON only: {"suggestions":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, or sentence that the comment directly discusses. Never begin or end source_text inside a word and never include leading or trailing whitespace. For a passage-wide annotation, use from 0, to the full passage length, and copy the full passage into source_text. Return at most one annotation for the same substantive issue at the same location. For a replacement, provide two or three distinct alternatives in variants; none may equal source_text. If there is no useful change, return no suggestion instead of guessing an anchor.';
+  return `You are a precise writing collaborator. ${protocol}\n\nWRITING CONTEXT\n${context || canon || 'No additional context supplied.'}\n\nACTION INSTRUCTIONS\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
 }
 
 function balancedJsonCandidates(content: string): string[] {
@@ -517,6 +527,86 @@ function parseProviderSuggestionsDetailed(content: string): {
   return { suggestions: valid, normalization: parsedResult.normalization };
 }
 
+function unfencedText(content: string): string {
+  const trimmed = content.trim();
+  const fenced = /^```(?:markdown|md|text)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
+  return (fenced?.[1] ?? trimmed).trim();
+}
+
+function parseActionOutputDetailed(content: string, request: GenerationRequest): {
+  suggestions: Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }>;
+  normalization: ProviderJsonNormalization;
+} {
+  if (!request.responseContract) return parseProviderSuggestionsDetailed(content);
+  const category = request.inputCategory ?? 'canon';
+  if (request.responseContract === 'commentary') {
+    const comment = unfencedText(content);
+    if (!comment) throw new ProviderOutputError('Provider returned empty commentary.');
+    return {
+      suggestions: [{ from: 0, to: request.text.length, sourceText: request.text, type: 'annotation', category, comment, confidence: 0.75 }],
+      normalization: 'none'
+    };
+  }
+  if (request.responseContract === 'alternative_draft') {
+    const replacement = unfencedText(content);
+    if (!replacement || replacement === request.text.trim()) throw new ProviderOutputError('Provider did not return a material alternative draft.');
+    return {
+      suggestions: [{
+        from: 0, to: request.text.length, sourceText: request.text, type: 'replacement', category,
+        comment: 'Complete alternative draft for comparison.', replacement, variants: [replacement], confidence: 0.75
+      }],
+      normalization: replacement === content.trim() ? 'none' : 'extracted'
+    };
+  }
+
+  const parsedResult = parseProviderJson(content);
+  const parsed = parsedResult.value;
+  if (!record(parsed)) throw new ProviderOutputError('Provider output must be one JSON object.');
+  if (request.responseContract === 'revision_options') {
+    const rawOptions = Array.isArray(parsed.options) ? parsed.options : [];
+    const options = rawOptions.flatMap((value) => {
+      if (typeof value === 'string') return value.trim() ? [{ text: value.trim(), rationale: '' }] : [];
+      if (!record(value) || typeof value.text !== 'string' || !value.text.trim()) return [];
+      return [{ text: value.text.trim(), rationale: typeof value.rationale === 'string' ? value.rationale.trim() : '' }];
+    }).filter((option) => option.text !== request.text.trim()).slice(0, Math.max(1, Math.min(5, request.optionCount ?? 3)));
+    if (!options.length) throw new ProviderOutputError('Provider JSON contained no usable revision options.');
+    return {
+      suggestions: [{
+        from: 0, to: request.text.length, sourceText: request.text, type: 'replacement', category,
+        comment: request.includeExplanation === false
+          ? 'Complete revision options.'
+          : options.map((option, index) => `${index + 1}. ${option.rationale || 'Alternative treatment.'}`).join('\n'),
+        replacement: options[0].text,
+        variants: options.map((option) => option.text),
+        confidence: 0.75
+      }],
+      normalization: parsedResult.normalization
+    };
+  }
+
+  const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
+  const findings = rawFindings.flatMap((value) => {
+    if (!record(value) || !Number.isInteger(value.from) || !Number.isInteger(value.to)
+      || typeof value.source_text !== 'string' || typeof value.comment !== 'string' || !value.comment.trim()) return [];
+    const correction = typeof value.correction === 'string' ? value.correction : undefined;
+    const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
+      ? Math.max(0, Math.min(1, value.confidence))
+      : 0.7;
+    return [{
+      from: Number(value.from), to: Number(value.to), sourceText: value.source_text,
+      type: correction !== undefined ? 'replacement' as const : 'annotation' as const,
+      category, comment: value.comment.trim(), replacement: correction,
+      variants: correction !== undefined ? [correction] : undefined, confidence
+    }];
+  });
+  if (rawFindings.length && !findings.length) throw new ProviderOutputError('Provider JSON contained findings, but none matched the required finding schema.');
+  return { suggestions: findings, normalization: parsedResult.normalization };
+}
+
+export function parseProviderActionOutput(content: string, request: GenerationRequest) {
+  return parseActionOutputDetailed(content, request).suggestions;
+}
+
 export function parseProviderSuggestions(content: string): Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }> {
   return parseProviderSuggestionsDetailed(content).suggestions;
 }
@@ -555,18 +645,20 @@ function statusRecovery(status: number): { classification: RecoveryClassificatio
 async function providerCompletion(
   provider: ConfiguredProvider,
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
-  maxTokens: number
+  maxTokens: number,
+  temperature?: number
 ): Promise<{ content: string; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteTokens?: number; costUsd?: number; truncated: boolean }> {
   const endpoint = provider.protocol === 'anthropic' ? '/messages' : '/chat/completions';
   const headers = provider.protocol === 'anthropic'
     ? { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...(provider.key ? { 'x-api-key': provider.key } : {}) }
     : { 'content-type': 'application/json', ...(provider.key ? { authorization: `Bearer ${provider.key}` } : {}) };
   const directOpenAI = provider.protocol === 'openai_compatible' && /^https:\/\/api\.openai\.com(?:\/|$)/.test(provider.baseUrl);
+  const sampling = temperature === undefined ? {} : { temperature };
   const body = provider.protocol === 'anthropic'
-    ? { model: provider.model, max_tokens: maxTokens, temperature: 0.3, messages }
+    ? { model: provider.model, max_tokens: maxTokens, ...sampling, messages }
     : directOpenAI
       ? { model: provider.model, max_completion_tokens: maxTokens, messages }
-      : { model: provider.model, max_tokens: maxTokens, temperature: 0.3, messages };
+      : { model: provider.model, max_tokens: maxTokens, ...sampling, messages };
   let response: Response;
   try {
     response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}${endpoint}`, {
@@ -658,7 +750,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
   let reportedCostUsd: number | undefined;
   const diagnostics: Array<Omit<InputError, 'source'>> = [];
   const maxAttempts = 3;
-  let maxTokens = 6000;
+  let maxTokens = Math.max(1000, Math.min(50000, request.maxOutputTokens ?? 6000));
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const messages = attempt === 1 || !previousFailure
       ? [{ role: 'user' as const, content: originalPrompt }]
@@ -672,7 +764,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         ];
     let completion;
     try {
-      completion = await providerCompletion(provider, messages, maxTokens);
+      completion = await providerCompletion(provider, messages, maxTokens, request.temperature);
     } catch (error) {
       if (!(error instanceof ProviderRequestError)) throw error;
       const diagnostic = error.diagnostics[0] ?? { kind: 'provider_request' as const, classification: 'provider_unavailable' as const, recoveryAction: 'human' as const, message: error.message };
@@ -715,13 +807,13 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         rawOutput: previousOutput.slice(0, 6000)
       });
       if (!retryable) throw new ProviderOutputError('Provider output remained truncated after bounded recovery.', diagnostics);
-      maxTokens = Math.min(24000, Math.max(12000, maxTokens * 2));
+      maxTokens = Math.min(50000, Math.max(12000, maxTokens * 2));
       previousFailure = '';
       previousOutput = '';
       continue;
     }
     try {
-      const parsedResult = parseProviderSuggestionsDetailed(previousOutput);
+      const parsedResult = parseActionOutputDetailed(previousOutput, request);
       const parsed = parsedResult.suggestions;
       const drafts = parsed.flatMap((item) => {
         const range = resolveProviderRange(item, request.text);

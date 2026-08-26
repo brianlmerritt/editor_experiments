@@ -25,10 +25,16 @@ export class FacadeAIInteractionService implements AIInteractionService {
   constructor(private readonly facade: WorkspaceFacade) {}
 
   async execute(request: AIInteractionRequest, signal?: AbortSignal): Promise<AIInteractionResult<InputProposal>> {
-    if (!request.permittedProposalKinds.includes('craft_input')) {
+    const responseContract = request.action.responseContract;
+    const proposalKind = responseContract === 'commentary' ? 'commentary_input'
+      : responseContract === 'annotated_findings' ? 'annotated_input'
+        : responseContract === 'revision_options' ? 'revision_options'
+          : responseContract === 'alternative_draft' ? 'alternative_draft'
+            : 'craft_input';
+    if (!request.permittedProposalKinds.includes(proposalKind)) {
       return {
         proposals: [],
-        diagnostics: [{ source: 'interaction_service', kind: 'contract', message: 'The craft transport was called without permission to return craft Inputs.' }],
+        diagnostics: [{ source: 'interaction_service', kind: 'contract', message: `The interaction transport was called without permission to return ${proposalKind}.` }],
         context: request.context,
         usage: []
       };
@@ -77,11 +83,17 @@ export class FacadeAIInteractionService implements AIInteractionService {
           scope: item.sourceType === 'manuscript' ? 'document' : 'project',
           content: item.content,
           revision: item.sourceRevision
-        }))
+        })),
+      responseContract,
+      optionCount: request.action.optionCount,
+      includeExplanation: request.action.includeExplanation,
+      inputCategory: request.action.inputCategory as GenerationRequest['inputCategory'],
+      maxOutputTokens: request.action.maxOutputTokens,
+      temperature: request.action.temperature
     };
     const result = await this.facade.requestInputs(legacyRequest, signal);
     return {
-      proposals: result.proposals.map((proposal) => ({ kind: 'craft_input', payload: proposal })),
+      proposals: result.proposals.map((proposal) => ({ kind: proposalKind, payload: proposal })),
       diagnostics: result.errors,
       context: request.context,
       usage: result.usage ?? []

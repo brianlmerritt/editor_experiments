@@ -507,9 +507,31 @@ The first boundary slice is now represented in code:
 - startup reconciliation converts orphaned queued/running work into an explicit
   interrupted failure while preserving completed Inputs and offering retry or
   complete-without-this-passage actions.
+- every project now owns an editable, versioned action collection. The initial
+  actions are **Discuss passage**, **Review passage**, **Suggest revisions**, and
+  **Alternative draft**; legacy projects acquire those defaults on activation and
+  compact project transfer preserves subsequent edits;
+- an action can target either the writer's exact selection or one exact canonical
+  document range. The target is the only mutable subject of the request. The Spine,
+  selected Material, confirmed relationships, Todos, and additional chosen Material
+  are frozen as read-only context evidence;
+- the Inputs panel can run an action through a preflight that shows the target,
+  response contract, token ceiling, provider choice, and Writing Context before any
+  provider call. Selection-only actions cannot silently fall back to a document;
+- the first response contracts are deliberately distinct: readable commentary,
+  anchored findings, several bounded revision options, and one complete alternative
+  passage. Only the two structured contracts require JSON; ordinary commentary and
+  complete alternatives do not;
+- structured responses use local extraction and repair followed by the existing
+  bounded corrective retry path. All malformed output and recovery evidence remains
+  in run diagnostics, and the 15,000-token default is project-action configuration
+  rather than a hidden per-call limit;
+- provider-returned alternatives still become Inputs. They do not directly edit the
+  manuscript, Material, relationships, Todos, or Spine.
 
-This is the basement, not the complete AI system. General project-change proposals,
-model role routing, resumable workflow graphs,
+This is the basement, not the complete AI system. Whole-document alternative drafts
+still need a fork/compare workflow before they should become a default action target.
+General project-change proposals, model role routing, resumable workflow graphs,
 existing-work assimilation, and their UX remain to be implemented deliberately on
 this boundary.
 
@@ -517,9 +539,10 @@ this boundary.
 
 This boundary does not yet decide:
 
-- how the initial document-review preflight evolves for selection, discussion,
-  generation, project-change, long-work budgeting, and split-pane workflows;
-- how actions are created, shared, pinned, grouped, or invoked;
+- how the shared action preflight evolves for generation, project-change,
+  long-work budgeting, and split-pane workflows;
+- how project actions are shared, pinned, grouped, or promoted to application-level
+  reusable templates;
 - whether discussions appear as threaded Input cards or a dedicated right-panel view;
 - the default context inheritance rules for future split panes;
 - category vocabulary and project-defined category extensions;

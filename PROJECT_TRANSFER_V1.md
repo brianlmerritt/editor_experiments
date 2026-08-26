@@ -85,11 +85,12 @@ updated.
   provider usage/cost;
 - project and document context buckets; forensic mode additionally includes their
   immutable revisions;
-- project-owned AI context preferences and future project-owned action definitions;
+- project-owned AI context preferences and editable, versioned AI action definitions;
 - binary assets referenced by project content.
 
-Captured action snapshots already travel with their runs. Global action/provider
-configuration is not copied merely because a run used it.
+Captured action snapshots already travel with their runs. Project-owned action
+definitions travel in `structure.json`; global provider configuration is not copied
+merely because a run used it.
 
 ## Deliberately excluded
 

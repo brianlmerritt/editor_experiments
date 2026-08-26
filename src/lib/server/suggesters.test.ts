@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationRequest, TaskPrompt } from '$lib/domain';
-import { configureProviderProfile, configureSuggestionProvider, generateSuggestions, parseProviderSuggestions, resolveProviderRange, suggestionSourceAvailability } from './suggesters';
+import { configureProviderProfile, configureSuggestionProvider, generateSuggestions, parseProviderActionOutput, parseProviderSuggestions, resolveProviderRange, suggestionSourceAvailability } from './suggesters';
 
 const providerRuntime = globalThis as typeof globalThis & { __marginNoteProviderSettings?: unknown };
 
@@ -399,5 +399,38 @@ No substantive issues detected.` } }]
     const passage = 'The porter stood beneath the awning.';
     expect(resolveProviderRange({ from: 1, to: 14, sourceText: 'he porter sto', type: 'annotation' }, passage)).toBeNull();
     expect(resolveProviderRange({ from: 0, to: 14, sourceText: 'The porter sto', type: 'annotation' }, passage)).toBeNull();
+  });
+
+  it('accepts readable commentary without forcing it through JSON', () => {
+    const actionRequest = { ...request('Mara watched the clock.', { id: 'discuss', name: 'Discuss', version: 1, instruction: 'Discuss it.' }), responseContract: 'commentary' as const };
+    const [result] = parseProviderActionOutput('The clock externalises Mara’s need for control.', actionRequest);
+    expect(result).toMatchObject({ from: 0, to: 23, type: 'annotation', comment: 'The clock externalises Mara’s need for control.' });
+  });
+
+  it('repairs and validates revision option JSON as one multi-variant replacement', () => {
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'revise', name: 'Revise', version: 1, instruction: 'Revise it.' }),
+      responseContract: 'revision_options' as const,
+      optionCount: 2
+    };
+    const [result] = parseProviderActionOutput('```json\n{"options":[{"text":"Mara kept her eyes on the clock.","rationale":"Closer"},{"text":"The clock held Mara still.","rationale":"More figurative"},],}\n```', actionRequest);
+    expect(result.variants).toEqual(['Mara kept her eyes on the clock.', 'The clock held Mara still.']);
+    expect(result.comment).toContain('Closer');
+  });
+
+  it('validates exact finding anchors and optional corrections', () => {
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'review', name: 'Review', version: 1, instruction: 'Review it.' }),
+      responseContract: 'annotated_findings' as const,
+      inputCategory: 'distance' as const
+    };
+    const [result] = parseProviderActionOutput('{"findings":[{"from":0,"to":12,"source_text":"Mara watched","comment":"Filtering verb.","correction":"Mara tracked","confidence":0.8}]}', actionRequest);
+    expect(result).toMatchObject({ from: 0, to: 12, sourceText: 'Mara watched', type: 'replacement', category: 'distance', variants: ['Mara tracked'] });
+  });
+
+  it('treats an alternative draft as one complete replacement', () => {
+    const actionRequest = { ...request('Mara watched the clock.', { id: 'draft', name: 'Draft', version: 1, instruction: 'Rewrite it.' }), responseContract: 'alternative_draft' as const };
+    const [result] = parseProviderActionOutput('```text\nMara counted each mechanical tick.\n```', actionRequest);
+    expect(result).toMatchObject({ from: 0, to: 23, type: 'replacement', variants: ['Mara counted each mechanical tick.'] });
   });
 });
