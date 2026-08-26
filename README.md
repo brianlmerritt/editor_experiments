@@ -45,6 +45,12 @@ npm install
 npm run dev
 ```
 
+`npm install` runs SvelteKit's setup step automatically and generates the local
+`.svelte-kit/tsconfig.json` required by the root TypeScript configuration. The
+generated `.svelte-kit` directory is deliberately not committed. If dependencies
+were installed with lifecycle scripts disabled, run `npx svelte-kit sync` once before
+`npm run dev`.
+
 Open the local URL printed by Vite. No API keys are required: the local craft checks
 and deterministic replay sentinel are enabled by default.
 
