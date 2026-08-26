@@ -497,6 +497,12 @@ export class WorkspaceRepository {
     return { asset: assetFromRow(row), content: row.content };
   }
 
+  projectAssets(projectId: string): WorkspaceAsset[] {
+    return (this.database.prepare(`
+      SELECT * FROM workspace_assets WHERE project_id = ? ORDER BY created_at, id
+    `).all(projectId) as AssetRow[]).map(assetFromRow);
+  }
+
   createBucket(input: CreateContextBucketInput): ContextBucket {
     if (!input.projectId) throw new Error('Context project is required');
     if (!input.title?.trim()) throw new Error('Context title is required');

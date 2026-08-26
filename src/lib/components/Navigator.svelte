@@ -13,12 +13,13 @@
   import todosInstructions from '$lib/content/navigator/todos-instructions.html?raw';
   import archivedInstructions from '$lib/content/navigator/archived-unowned-instructions.html?raw';
 
-  let { onOpenNode, onSwitchProject, onCreateProject, onRenameProject, onResetProject }: {
+  let { onOpenNode, onSwitchProject, onCreateProject, onRenameProject, onResetProject, onExportProject }: {
     onOpenNode: (id: string, navigation?: 'push' | 'back' | 'forward') => Promise<void>;
     onSwitchProject: (id: string) => Promise<void>;
     onCreateProject: () => void;
     onRenameProject: () => void;
     onResetProject: () => void;
+    onExportProject: () => void;
   } = $props();
 
   let collectionManagerOpen = $state(false);
@@ -555,6 +556,7 @@
         <div>
           <button type="button" onclick={(event) => runProjectAction(event, onCreateProject)}>Create project</button>
           <button type="button" onclick={(event) => runProjectAction(event, onRenameProject)}>Rename project</button>
+          <button type="button" onclick={(event) => runProjectAction(event, onExportProject)}>Export project</button>
           <button type="button" class="danger" onclick={(event) => runProjectAction(event, onResetProject)}>Start over</button>
         </div>
       </details>

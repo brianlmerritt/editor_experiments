@@ -98,7 +98,7 @@ describe('selection suggestions', () => {
           confidence: 0.84
         }]
       }) } }],
-      usage: { prompt_tokens: 20, completion_tokens: 30 }
+      usage: { prompt_tokens: 20, completion_tokens: 30, cost: 0.42 }
     }), { status: 200, headers: { 'content-type': 'application/json' } })));
     const providerRequest = request('Mara crossed the empty platform alone.', {
       id: 'cadence', name: 'Vary cadence', version: 1, instruction: 'Vary it.'
@@ -112,6 +112,7 @@ describe('selection suggestions', () => {
     expect(result.proposals[0].source).toBe('openrouter');
     expect(result.proposals[0].variants).toHaveLength(2);
     expect(result.proposals[0].comment).not.toContain('no safe replay alternative');
+    expect(result.usage).toEqual([expect.objectContaining({ source: 'openrouter', costUsd: 0.42, costBasis: 'provider_reported' })]);
   });
 
   it('retries once with a corrective request after unrecoverable provider output', async () => {
@@ -119,7 +120,7 @@ describe('selection suggestions', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         choices: [{ message: { content: 'No structured result was returned.' } }],
-        usage: { prompt_tokens: 10, completion_tokens: 5 }
+        usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.01 }
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
@@ -134,7 +135,7 @@ describe('selection suggestions', () => {
             confidence: 0.8
           }]
         }) } }],
-        usage: { prompt_tokens: 18, completion_tokens: 12 }
+        usage: { prompt_tokens: 18, completion_tokens: 12, cost: 0.02 }
       }), { status: 200, headers: { 'content-type': 'application/json' } }));
     vi.stubGlobal('fetch', fetchMock);
     const providerRequest = request('noticed', {
@@ -160,6 +161,7 @@ describe('selection suggestions', () => {
       inputTokens: 28,
       outputTokens: 17
     });
+    expect(result.usage).toEqual([expect.objectContaining({ attempts: 2, inputTokens: 28, outputTokens: 17, costUsd: 0.03 })]);
     const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body as string) as { messages: { role: string; content: string }[] };
     expect(retryBody.messages.at(-1)?.content).toContain('previous response was rejected');
   });
@@ -292,7 +294,7 @@ No substantive issues detected.` } }]
   it('uses the Anthropic Messages protocol for an Anthropic profile', async () => {
     configureProviderProfile({
       id: 'anthropic-test', name: 'Anthropic test', protocol: 'anthropic',
-      baseUrl: 'https://api.anthropic.test/v1', key: 'test-key', model: 'claude-test'
+      baseUrl: 'https://api.anthropic.test/v1', key: 'test-key', model: 'claude-haiku-4-5-20251001'
     }, { persist: false });
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       content: [{ type: 'text', text: JSON.stringify({ suggestions: [{
@@ -310,7 +312,8 @@ No substantive issues detected.` } }]
     const result = await generateSuggestions(providerRequest);
 
     expect(result.proposals[0]).toMatchObject({ source: 'anthropic-test', variants: ['observed'] });
-    expect(result.proposals[0].provenance).toMatchObject({ model: 'claude-test', inputTokens: 21, outputTokens: 13 });
+    expect(result.proposals[0].provenance).toMatchObject({ model: 'claude-haiku-4-5-20251001', inputTokens: 21, outputTokens: 13 });
+    expect(result.usage).toEqual([expect.objectContaining({ costUsd: 0.000086, costBasis: 'estimated' })]);
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.anthropic.test/v1/messages');
     expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ 'x-api-key': 'test-key', 'anthropic-version': '2023-06-01' });
   });

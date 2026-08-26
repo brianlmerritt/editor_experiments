@@ -8,6 +8,8 @@ the event ledger. None of those adapters independently owns live manuscript stat
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
+Native complete-project `.mnote` ZIP export and the validated inverse-import contract
+are specified in [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
 The Phase 1 AI request, Writing Context, provider, proposal, and adoption contract is
 documented in [AI_BOUNDARY.md](./AI_BOUNDARY.md). It also defines existing-work
 assimilation: using a manuscript, supplied reviews, and the current project vocabulary
@@ -67,6 +69,11 @@ For a quick tour:
 10. Pasted sequences beginning with recognised bullets or sequential numbers are
     normalised into semantic lists. Select existing malformed material and use
     **Fix list** when an earlier paste needs the same repair.
+11. Open the project menu beside the Navigator's project selector and choose **Export
+    project** to download a complete `.mnote` archive. This includes structure,
+    revisions, Inputs/runs/provenance/usage, context, forks, and assets, but never API
+    keys or provider profiles. Document-menu **Export Markdown** remains a separate
+    publishing export.
 
 ## Change-aware workspace proof of concept
 
@@ -120,6 +127,10 @@ The implemented architecture slice provides:
 - enabled providers run as independent passage/provider checks within one review
   activity, so successful Inputs become visible immediately and one slow or failed
   provider does not hold back another provider's result;
+- provider spend is recorded once per completed provider call rather than once per
+  resulting Input. OpenRouter-reported charges are retained directly; known direct
+  Anthropic/OpenAI models use token-based estimates, including bounded corrective
+  retries and successful calls whose output could not be adopted;
 - startup reconciliation turns orphaned queued/running work into explicit interrupted
   run evidence with retry and complete-without-this-passage actions;
 - atomic acceptance and undo/redo of prose plus input lifecycle state;
@@ -207,6 +218,10 @@ called only from SvelteKit server routes.
   the browser mirror does not replace live Svelte state.
 - Immediate undo/redo is intentionally session-local in this POC; durable document
   versions remain the recovery history across reloads.
+- Displayed provider spend is approximate when a direct provider reports tokens but
+  not a dollar charge. Older successful calls are reconstructed from their run-level
+  token evidence without multiplying calls that returned several Inputs; historical
+  failed calls recorded before usage accounting cannot be reconstructed.
 - Change the ledger location with `LEDGER_PATH`.
 - Markdown export is available from the document toolbar.
 

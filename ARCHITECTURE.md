@@ -10,6 +10,8 @@ The next graph-backed workspace and UX slice is specified in
 The AI request, context, provider, proposal, and adoption contract is specified in
 [AI_BOUNDARY.md](./AI_BOUNDARY.md). It refines this architecture without changing the
 Svelte authority rule.
+The native project archive and safe inverse-import boundary are specified in
+[PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
 
 Margin Note remains an experiment. The architecture should keep the next experiment
 cheap while protecting the things a writer must be able to trust: the current work,
@@ -58,6 +60,10 @@ its formatting, its inputs, and undo/redo.
 16. AI interaction crosses the boundary as a Svelte-created request with a captured
     target and inspectable context manifest. Providers return untrusted proposals;
     only an explicit Svelte workspace transaction may adopt one.
+17. Native project export captures the live Svelte aggregate through the facade;
+    persistence may supply history and asset bytes but may not replace current records
+    with an older durable copy. Import first builds and validates a candidate, then
+    adopts it as one new-project workspace operation.
 
 ## Authority and boundaries
 

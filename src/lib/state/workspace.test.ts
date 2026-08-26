@@ -313,6 +313,26 @@ describe('semantic workspace history', () => {
     expect(workspace.workspaceRevision).toBe(1);
   });
 
+  it('captures current Svelte document state for project export before a background save', () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+    workspace.recordEditorTransaction({
+      before: beforeDocument,
+      after: afterDocument,
+      changes: [{ nodeId: 'main', from: 1, to: 8, insertedLength: 3, deletedText: 'noticed', insertedText: 'saw' }],
+      origin: { kind: 'human' }
+    });
+
+    const snapshot = workspace.projectExportSnapshot();
+
+    expect(snapshot.documents[0].content).toBe('saw');
+    expect(snapshot.documents[0].extensions.margin_note).toMatchObject({ revision: 1, document: workspace.richDocument });
+  });
+
   it('pauses AI dispatch while continuing to accept human editor transactions', async () => {
     const requestInputs = vi.fn(async () => ({ proposals: [], errors: [] }));
     const workspace = new WorkspaceState(fakeFacade(requestInputs));

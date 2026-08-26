@@ -1,6 +1,7 @@
 import { env } from '$env/dynamic/private';
-import type { Category, GenerationRequest, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
+import type { Category, GenerationRequest, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, ProviderUsage, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
 import { isExactTextSpan, makeId } from '$lib/domain';
+import { providerUsage } from '$lib/server/provider-usage';
 import { deleteStoredProviderProfile, maskCredential, readStoredProviderProfiles, upsertStoredProviderProfile, type StoredProviderProfile } from '$lib/server/provider-settings';
 import { jsonrepair } from 'jsonrepair';
 
@@ -39,7 +40,7 @@ interface LegacyRuntimeProviderSettings {
 export class ProviderOutputError extends Error {
   override readonly name = 'ProviderOutputError';
 
-  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = []) {
+  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = [], readonly usage?: ProviderUsage) {
     super(message);
   }
 }
@@ -47,7 +48,7 @@ export class ProviderOutputError extends Error {
 export class ProviderRequestError extends Error {
   override readonly name = 'ProviderRequestError';
 
-  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = []) {
+  constructor(message: string, readonly diagnostics: Array<Omit<InputError, 'source'>> = [], readonly usage?: ProviderUsage) {
     super(message);
   }
 }
@@ -555,7 +556,7 @@ async function providerCompletion(
   provider: ConfiguredProvider,
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
   maxTokens: number
-): Promise<{ content: string; inputTokens?: number; outputTokens?: number; truncated: boolean }> {
+): Promise<{ content: string; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteTokens?: number; costUsd?: number; truncated: boolean }> {
   const endpoint = provider.protocol === 'anthropic' ? '/messages' : '/chat/completions';
   const headers = provider.protocol === 'anthropic'
     ? { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...(provider.key ? { 'x-api-key': provider.key } : {}) }
@@ -617,10 +618,15 @@ async function providerCompletion(
       ? data.content.flatMap((item) => record(item) && item.type === 'text' && typeof item.text === 'string' ? [item.text] : []).join('\n')
       : '';
     const usage = record(data.usage) ? data.usage : {};
+    const uncachedInputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+    const cachedInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0;
+    const cacheWriteTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0;
     return {
       content,
-      inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined,
+      inputTokens: uncachedInputTokens + cachedInputTokens + cacheWriteTokens || undefined,
       outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined,
+      cachedInputTokens: cachedInputTokens || undefined,
+      cacheWriteTokens: cacheWriteTokens || undefined,
       truncated: data.stop_reason === 'max_tokens'
     };
   }
@@ -628,21 +634,28 @@ async function providerCompletion(
   const first = record(choices[0]) ? choices[0] : {};
   const message = record(first.message) ? first.message : {};
   const usage = record(data.usage) ? data.usage : {};
+  const promptDetails = record(usage.prompt_tokens_details) ? usage.prompt_tokens_details : {};
   return {
     content: typeof message.content === 'string' ? message.content : '',
     inputTokens: typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined,
     outputTokens: typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined,
+    cachedInputTokens: typeof promptDetails.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined,
+    cacheWriteTokens: typeof promptDetails.cache_write_tokens === 'number' ? promptDetails.cache_write_tokens : undefined,
+    costUsd: typeof usage.cost === 'number' ? usage.cost : undefined,
     truncated: first.finish_reason === 'length'
   };
 }
 
-async function requestConfiguredProvider(provider: ConfiguredProvider, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; inputTokens?: number; outputTokens?: number; providerAttempts: number; diagnostics: Array<Omit<InputError, 'source'>> }> {
+async function requestConfiguredProvider(provider: ConfiguredProvider, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; usage: ProviderUsage; diagnostics: Array<Omit<InputError, 'source'>> }> {
   const started = performance.now();
   const originalPrompt = assemblePrompt(request);
   let previousOutput = '';
   let previousFailure = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let cacheWriteTokens = 0;
+  let reportedCostUsd: number | undefined;
   const diagnostics: Array<Omit<InputError, 'source'>> = [];
   const maxAttempts = 3;
   let maxTokens = 6000;
@@ -672,7 +685,10 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         protocol: provider.protocol,
         outcome: retryable ? 'retry_requested' : 'rejected'
       });
-      if (!retryable) throw new ProviderRequestError(error.message, diagnostics);
+      if (!retryable) throw new ProviderRequestError(error.message, diagnostics, providerUsage({
+        source: provider.id, model: provider.model, protocol: provider.protocol, attempts: attempt,
+        inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reportedCostUsd
+      }));
       previousFailure = '';
       previousOutput = '';
       continue;
@@ -680,6 +696,9 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
     previousOutput = completion.content;
     inputTokens += completion.inputTokens ?? 0;
     outputTokens += completion.outputTokens ?? 0;
+    cachedInputTokens += completion.cachedInputTokens ?? 0;
+    cacheWriteTokens += completion.cacheWriteTokens ?? 0;
+    if (completion.costUsd !== undefined) reportedCostUsd = (reportedCostUsd ?? 0) + completion.costUsd;
     if (completion.truncated) {
       const retryable = attempt < maxAttempts;
       diagnostics.push({
@@ -733,9 +752,10 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
       return {
         drafts,
         latencyMs: performance.now() - started,
-        inputTokens: inputTokens || undefined,
-        outputTokens: outputTokens || undefined,
-        providerAttempts: attempt,
+        usage: providerUsage({
+          source: provider.id, model: provider.model, protocol: provider.protocol, attempts: attempt,
+          inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reportedCostUsd
+        }),
         diagnostics
       };
     } catch (error) {
@@ -754,15 +774,19 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         message: error.message,
         rawOutput: previousOutput.slice(0, 6000)
       });
-      if (attempt === maxAttempts) throw new ProviderOutputError(`${error.message} Automatic corrective retries also failed.`, diagnostics);
+      if (attempt === maxAttempts) throw new ProviderOutputError(`${error.message} Automatic corrective retries also failed.`, diagnostics, providerUsage({
+        source: provider.id, model: provider.model, protocol: provider.protocol, attempts: attempt,
+        inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reportedCostUsd
+      }));
     }
   }
   throw new ProviderOutputError('Provider output recovery exhausted.');
 }
 
-export async function generateSuggestions(request: GenerationRequest): Promise<{ proposals: InputProposal[]; errors: InputError[] }> {
+export async function generateSuggestions(request: GenerationRequest): Promise<{ proposals: InputProposal[]; errors: InputError[]; usage: ProviderUsage[] }> {
   const proposals: InputProposal[] = [];
   const errors: InputError[] = [];
+  const usage: ProviderUsage[] = [];
   const providers = configuredProviders();
   const activeProviders = providers.filter((provider) => request.sourceStates[provider.id] && request.sourceStates[provider.id] !== 'off');
   const selectionRequest = request.prompt.id !== 'sentinel';
@@ -782,18 +806,20 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
     if (!request.sourceStates[provider.id] || request.sourceStates[provider.id] === 'off') continue;
     try {
       const result = await requestConfiguredProvider(provider, request);
+      usage.push(result.usage);
       errors.push(...result.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
       proposals.push(...result.drafts.map((draft) => {
         const proposal = proposalFromDraft(draft, request, provider.id, provider.number, 'ai', result.latencyMs);
-        proposal.provenance.inputTokens = result.inputTokens;
-        proposal.provenance.outputTokens = result.outputTokens;
-        proposal.provenance.providerAttempts = result.providerAttempts;
+        proposal.provenance.inputTokens = result.usage.inputTokens;
+        proposal.provenance.outputTokens = result.usage.outputTokens;
+        proposal.provenance.providerAttempts = result.usage.attempts;
         proposal.provenance.model = provider.model;
         return proposal;
       }));
     } catch (error) {
       if ((error instanceof ProviderOutputError || error instanceof ProviderRequestError) && error.diagnostics.length) {
         errors.push(...error.diagnostics.map((diagnostic) => ({ ...diagnostic, source: provider.id })));
+        if (error.usage) usage.push(error.usage);
       } else {
         errors.push({
           source: provider.id,
@@ -809,5 +835,5 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
       errors.push({ source, kind: 'configuration', classification: 'configuration', recoveryAction: 'reconfigure', message: availability[source]?.reason ?? 'Source is not configured.' });
     }
   }
-  return { proposals, errors };
+  return { proposals, errors, usage };
 }

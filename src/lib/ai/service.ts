@@ -29,7 +29,8 @@ export class FacadeAIInteractionService implements AIInteractionService {
       return {
         proposals: [],
         diagnostics: [{ source: 'interaction_service', kind: 'contract', message: 'The craft transport was called without permission to return craft Inputs.' }],
-        context: request.context
+        context: request.context,
+        usage: []
       };
     }
     const target = firstTextTarget(request.target.target);
@@ -37,7 +38,8 @@ export class FacadeAIInteractionService implements AIInteractionService {
       return {
         proposals: [],
         diagnostics: [{ source: 'interaction_service', kind: 'contract', message: 'The craft transport requires one captured text target in the active document.' }],
-        context: request.context
+        context: request.context,
+        usage: []
       };
     }
     const generation = craftGeneration(request.generation);
@@ -81,7 +83,8 @@ export class FacadeAIInteractionService implements AIInteractionService {
     return {
       proposals: result.proposals.map((proposal) => ({ kind: 'craft_input', payload: proposal })),
       diagnostics: result.errors,
-      context: request.context
+      context: request.context,
+      usage: result.usage ?? []
     };
   }
 }

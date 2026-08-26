@@ -3,6 +3,7 @@ import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, typ
 import { FacadeAIInteractionService } from '$lib/ai/service';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
+import type { ProjectArchiveExport, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
@@ -1141,6 +1142,14 @@ export class WorkspaceState {
       };
       this.runs = this.runs.map((item) => item.id === run.id ? { ...item, request } : item);
       const response = await this.aiService.execute(request, controller.signal);
+      const providerUsage = response.usage ?? [];
+      if (providerUsage.length) {
+        this.runs = this.runs.map((item) => item.id === run.id ? { ...item, usage: [...(item.usage ?? []), ...providerUsage] } : item);
+      }
+      for (const usage of providerUsage) {
+        await this.log('provider_usage_recorded', { runId: run.id, activityId: activity.id, usage });
+      }
+      if (providerUsage.length) await this.refreshLedger();
       const contractDiagnostics: AIServiceDiagnostic[] = [];
       if (!validReturnedContext(request.context, response.context)) {
         contractDiagnostics.push({
@@ -1359,6 +1368,24 @@ export class WorkspaceState {
     const result = await this.facade.exportMarkdown({ markdown, title, sessionId: this.sessionId, branchId: this.branchId });
     await this.refreshLedger();
     return result;
+  }
+
+  projectExportSnapshot(): ProjectExportSnapshot {
+    const project = this.currentProject;
+    if (!project) throw new Error('No project is open');
+    const documents = this.projectNodes.map((document) => document.id === this.branchId
+      ? { ...document, extensions: this.domainExtensions() }
+      : document);
+    return {
+      project,
+      documents,
+      contextBuckets: this.contextBuckets.filter((bucket) => bucket.projectId === project.id),
+      capturedAt: new Date().toISOString()
+    };
+  }
+
+  exportProject(): Promise<ProjectArchiveExport> {
+    return this.facade.exportProject(this.projectExportSnapshot());
   }
 
   uploadAsset(file: File): Promise<UploadedAsset> {

@@ -209,4 +209,21 @@ describe('WorkspaceFacade', () => {
     expect(result.filename).toBe('moon-dark.md');
     expect(await result.blob.text()).toBe('Story');
   });
+
+  it('exports a Svelte-owned project snapshot through the facade', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      expect(String(input)).toBe('/api/project-export');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ project: { id: 'project' }, documents: [{ id: 'main' }] });
+      return new Response('archive', { headers: { 'content-disposition': 'attachment; filename="moon-dark.mnote"' } });
+    });
+    const result = await new WorkspaceFacade(fetcher).exportProject({
+      project: persistent.projects[0],
+      documents: persistent.documents,
+      contextBuckets: [],
+      capturedAt: '2026-08-26T12:00:00.000Z'
+    });
+
+    expect(result.filename).toBe('moon-dark.mnote');
+    expect(await result.blob.text()).toBe('archive');
+  });
 });

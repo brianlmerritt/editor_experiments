@@ -66,6 +66,19 @@ export interface InputProposal {
   provenance: Provenance;
 }
 
+export interface ProviderUsage {
+  source: string;
+  model: string;
+  protocol: ProviderProtocol;
+  attempts: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
+  costBasis: 'provider_reported' | 'estimated' | 'unavailable';
+}
+
 export type InputErrorKind = 'provider_output' | 'provider_request' | 'configuration' | 'contract';
 export type RecoveryClassification = 'output_nonconforming' | 'output_invalid' | 'truncated' | 'transient' | 'rate_limited' | 'authentication' | 'configuration' | 'provider_unavailable' | 'contract' | 'interrupted';
 export type RecoveryAction = 'none' | 'extract_local' | 'repair_local' | 'correct_output' | 'retry_transient' | 'increase_budget' | 'reconfigure' | 'human';
@@ -155,7 +168,7 @@ export const eventTypes = [
   'stale_after_edit', 'expired_on_brief_change', 'human_edit_session', 'mode_switch', 'paused', 'resumed',
   'source_state_changed', 'arrived_after_off', 'brief_updated', 'prompt_updated',
   'branch_forked', 'branch_switched', 'reverted', 'source_tooltip_hovered',
-  'judgment_recorded', 'suggestions_requested', 'duplicate_suppressed', 'markdown_exported'
+  'judgment_recorded', 'suggestions_requested', 'provider_usage_recorded', 'duplicate_suppressed', 'markdown_exported'
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 
@@ -235,6 +248,7 @@ export interface CraftRun {
   state: RunState;
   proposalIds: string[];
   errors: InputError[];
+  usage?: ProviderUsage[];
   createdAt: string;
   completedAt?: string;
 }

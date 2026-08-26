@@ -3,6 +3,7 @@ import type {
   GenerationRequest,
   InputError,
   InputProposal,
+  ProviderUsage,
   JudgmentPair,
   LedgerEvent,
   SourceAvailability,
@@ -21,6 +22,7 @@ import type {
   WorkspaceAsset,
   WorkspaceProject
 } from '$lib/workspace/model';
+import type { ProjectArchiveExport, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
 import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from '$lib/workspace/document-driver';
 
 export interface LedgerStats {
@@ -44,6 +46,7 @@ export interface WorkspaceBootstrap {
 export interface InputProposalBatch {
   proposals: InputProposal[];
   errors: InputError[];
+  usage?: ProviderUsage[];
 }
 
 export interface MarkdownExport {
@@ -320,6 +323,12 @@ export class WorkspaceFacade {
 
   async exportMarkdown(input: { markdown: string; title?: string; sessionId: string; branchId: string }): Promise<MarkdownExport> {
     const response = await this.fetcher('/api/export', jsonRequest(input));
+    if (!response.ok) throw await responseError(response);
+    return { blob: await response.blob(), filename: exportFilename(response) };
+  }
+
+  async exportProject(snapshot: ProjectExportSnapshot): Promise<ProjectArchiveExport> {
+    const response = await this.fetcher('/api/project-export', jsonRequest(snapshot));
     if (!response.ok) throw await responseError(response);
     return { blob: await response.blob(), filename: exportFilename(response) };
   }

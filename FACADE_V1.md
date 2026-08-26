@@ -9,6 +9,8 @@ The forthcoming graph-backed Navigator and fork-view requirements are recorded i
 this authority boundary.
 The narrower AI request and proposal boundary is defined in
 [AI_BOUNDARY.md](./AI_BOUNDARY.md).
+Native complete-project transfer is defined in
+[PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
 
 ## Purpose
 
@@ -106,6 +108,16 @@ is absent.
 Projects current workspace state into Markdown, DOCX, EPUB, or another requested
 format. Unsupported inputs and formatting must be reported or intentionally omitted;
 an export must never silently become the source of truth.
+
+Native project export is different from a publishing projection. Svelte passes a
+frozen, live project snapshot through the facade so an in-flight background save
+cannot make the archive stale. The durable adapter supplies immutable revisions and
+asset bytes only. The result is a versioned `.mnote` archive; provider credentials,
+global settings, and device UI state never cross this boundary.
+
+The inverse importer will first return an inspected, validated candidate. Only an
+explicit Svelte command may adopt it, and v1 adoption always creates a new project.
+An import adapter must not write piecemeal records while validation is still running.
 
 ## Services that produce inputs
 

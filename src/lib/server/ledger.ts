@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Branch, LedgerEvent, WritingBrief, TaskPrompt, JudgmentPair } from '$lib/domain';
 import { buildReviewQueue } from '$lib/review-queue';
+import { trackedProviderSpend, type SpendEvent } from '$lib/server/provider-usage';
 
 const databasePath = process.env.LEDGER_PATH ?? resolve('data/writing-ledger.sqlite');
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -156,9 +157,10 @@ export function reviewPairs(sessionId?: string, branchId?: string): JudgmentPair
 
 export function ledgerStats() {
   const events = (database.prepare('SELECT COUNT(*) total FROM events').get() as { total: number }).total;
-  const cost = database.prepare(`
-    SELECT COALESCE(SUM(CAST(json_extract(payload, '$.suggestion.provenance.costUsd') AS REAL)), 0) cost
-    FROM events WHERE type IN ('suggestion_generated', 'generated_hidden')
-  `).get() as { cost: number };
-  return { events, costUsd: cost.cost };
+  const rows = database.prepare(`
+    SELECT type, payload FROM events
+    WHERE type IN ('provider_usage_recorded', 'suggestion_generated', 'generated_hidden')
+  `).all() as Array<{ type: SpendEvent['type']; payload: string }>;
+  const costUsd = trackedProviderSpend(rows.map((row) => ({ type: row.type, payload: JSON.parse(row.payload) as Record<string, unknown> })));
+  return { events, costUsd };
 }

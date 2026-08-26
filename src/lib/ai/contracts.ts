@@ -1,4 +1,5 @@
 import type { TargetSet } from '$lib/workspace/attachments';
+import type { ProviderUsage } from '$lib/domain';
 
 export const aiInteractionIntents = ['review', 'revise', 'discuss', 'generate', 'propose_project_change'] as const;
 export type AIInteractionIntent = (typeof aiInteractionIntents)[number];
@@ -101,6 +102,7 @@ export interface AIInteractionResult<T = unknown> {
   proposals: AIServiceProposal<T>[];
   diagnostics: AIServiceDiagnostic[];
   context: AIContextManifest;
+  usage?: ProviderUsage[];
 }
 
 export interface AIInteractionService {

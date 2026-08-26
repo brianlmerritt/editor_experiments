@@ -76,6 +76,7 @@ describe('WorkspaceRepository', () => {
 
     expect(asset).toMatchObject({ projectId, fileName: 'hospital.png', mimeType: 'image/png', byteSize: 4 });
     expect(loaded.content).toEqual(content);
+    expect(repository.projectAssets(projectId)).toEqual([asset]);
     expect(() => repository.createAsset(projectId, 'notes.txt', 'text/plain', Buffer.from('no'))).toThrow('Only image assets are supported');
   });
 

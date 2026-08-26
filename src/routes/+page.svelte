@@ -840,6 +840,21 @@
     anchor.click();
     URL.revokeObjectURL(href);
   }
+
+  async function exportProject(): Promise<void> {
+    try {
+      const result = await workspace.exportProject();
+      const href = URL.createObjectURL(result.blob);
+      const anchor = document.createElement('a');
+      anchor.href = href;
+      anchor.download = result.filename;
+      anchor.click();
+      URL.revokeObjectURL(href);
+      showNotice(`Project exported as ${result.filename}.`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Project export failed.');
+    }
+  }
 </script>
 
 <svelte:head><title>Margin Note — writing support</title><meta name="description" content="A meta-first creative writing support workbench." /></svelte:head>
@@ -859,7 +874,7 @@
 
   <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px`}>
     {#if navigatorVisible}
-      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} /></div>
+      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onExportProject={exportProject} /></div>
       <button
         type="button"
         class="navigator-resizer"
@@ -1158,7 +1173,7 @@
           {#if liveSuggestions.length}<p class="key-help">Card keys: <kbd>Tab</kbd> next · <kbd>1–3</kbd> variant · <kbd>Enter</kbd> accept · <kbd>X</kbd> reject</p>{/if}
           <footer class="inputs-panel-footer">
             <div>
-              <strong>${workspace.costUsd.toFixed(4)}</strong><span>session provider spend</span>
+              <strong>≈${workspace.costUsd.toFixed(4)}</strong><span>tracked provider spend</span>
               <small>{providerSettings.sources.filter((source) => source.number >= 3).length} configured provider {providerSettings.sources.filter((source) => source.number >= 3).length === 1 ? 'profile' : 'profiles'}</small>
             </div>
             <button type="button" onclick={() => providerSettings.openProviders()}>Providers</button>
