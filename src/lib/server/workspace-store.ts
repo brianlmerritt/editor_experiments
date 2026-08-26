@@ -9,11 +9,13 @@ import type {
   ContextScope,
   DocumentRevision,
   ExtensionData,
+  JsonValue,
   PersistentWorkspace,
   WorkspaceAsset,
   WorkspaceDocument,
   WorkspaceProject
 } from '$lib/workspace/model';
+import type { DocumentStorageAnalysis, ProjectStorageAnalysis, StorageAnalysis } from '$lib/workspace/retention';
 
 const defaultProjectId = 'project_default';
 
@@ -83,6 +85,42 @@ interface AssetRow {
   byte_size: number;
   content: Buffer;
   created_at: string;
+}
+
+const operationalMarginNoteKeys = new Set([
+  'revision',
+  'inputs',
+  'runs',
+  'activities',
+  'sourceStates',
+  'inputSourceVisibility'
+]);
+
+function record(value: unknown): Record<string, JsonValue> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : null;
+}
+
+/** Current documents retain complete domain state; immutable writing history omits
+ * operational AI/Input state that otherwise grows on every lifecycle update. */
+export function manuscriptRevisionExtensions(value: ExtensionData): ExtensionData {
+  const result = JSON.parse(JSON.stringify(value)) as ExtensionData;
+  const marginNote = record(result.margin_note);
+  if (!marginNote) return result;
+  for (const key of operationalMarginNoteKeys) delete marginNote[key];
+  if (!Object.keys(marginNote).length) delete result.margin_note;
+  return result;
+}
+
+function restoredDocumentExtensions(current: ExtensionData, revision: ExtensionData): ExtensionData {
+  const restored = JSON.parse(JSON.stringify(revision)) as ExtensionData;
+  const currentMarginNote = record(current.margin_note);
+  if (!currentMarginNote) return restored;
+  const restoredMarginNote = record(restored.margin_note) ?? {};
+  for (const key of operationalMarginNoteKeys) {
+    if (key in currentMarginNote) restoredMarginNote[key] = JSON.parse(JSON.stringify(currentMarginNote[key])) as JsonValue;
+  }
+  if (Object.keys(restoredMarginNote).length) restored.margin_note = restoredMarginNote;
+  return restored;
 }
 
 export interface CreateDocumentInput {
@@ -428,6 +466,8 @@ export class WorkspaceRepository {
     const order = input.order ?? current.order;
     if (title === current.title && content === current.content && parentId === current.parentId && order === current.order
       && JSON.stringify(nextExtensions) === JSON.stringify(current.extensions)) return current;
+    const writingStateChanged = title !== current.title || content !== current.content || parentId !== current.parentId || order !== current.order
+      || JSON.stringify(manuscriptRevisionExtensions(nextExtensions)) !== JSON.stringify(manuscriptRevisionExtensions(current.extensions));
     const number = current.revision + 1;
     const save = this.database.transaction(() => {
       this.database.prepare(`
@@ -435,7 +475,9 @@ export class WorkspaceRepository {
         SET title = ?, content = ?, parent_id = ?, sort_order = ?, extensions = ?, revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
       `).run(title, content, parentId, order, JSON.stringify(nextExtensions), number, input.id);
-      this.insertDocumentRevision(input.id, number, title, content, nextExtensions, input.createdBy, input.reason ?? 'Saved document');
+      if (writingStateChanged) {
+        this.insertDocumentRevision(input.id, number, title, content, nextExtensions, input.createdBy, input.reason ?? 'Saved document');
+      }
     });
     save();
     return this.document(input.id);
@@ -458,6 +500,7 @@ export class WorkspaceRepository {
   }
 
   restoreDocument(documentId: string, revisionId: string, createdBy?: string): WorkspaceDocument {
+    const current = this.document(documentId);
     const prior = this.database.prepare(`
       SELECT * FROM workspace_document_revisions WHERE id = ? AND document_id = ?
     `).get(revisionId, documentId) as DocumentRevisionRow | undefined;
@@ -466,7 +509,7 @@ export class WorkspaceRepository {
       id: documentId,
       title: prior.title,
       content: prior.content,
-      extensions: extensions(prior.extensions),
+      extensions: restoredDocumentExtensions(current.extensions, extensions(prior.extensions)),
       createdBy,
       reason: `Restored revision ${prior.number}`
     });
@@ -476,6 +519,17 @@ export class WorkspaceRepository {
     return (this.database.prepare(`
       SELECT * FROM workspace_document_revisions WHERE document_id = ? ORDER BY number DESC
     `).all(documentId) as DocumentRevisionRow[]).map(revisionFromRow);
+  }
+
+  documentRevisionCount(documentId: string): number {
+    return (this.database.prepare('SELECT COUNT(*) count FROM workspace_document_revisions WHERE document_id = ?').get(documentId) as { count: number }).count;
+  }
+
+  forEachDocumentRevision(documentId: string, visit: (revision: DocumentRevision) => void): void {
+    const rows = this.database.prepare(`
+      SELECT * FROM workspace_document_revisions WHERE document_id = ? ORDER BY number
+    `).iterate(documentId) as IterableIterator<DocumentRevisionRow>;
+    for (const row of rows) visit(revisionFromRow(row));
   }
 
   createAsset(projectId: string, fileName: string, mimeType: string, content: Buffer): WorkspaceAsset {
@@ -501,6 +555,110 @@ export class WorkspaceRepository {
     return (this.database.prepare(`
       SELECT * FROM workspace_assets WHERE project_id = ? ORDER BY created_at, id
     `).all(projectId) as AssetRow[]).map(assetFromRow);
+  }
+
+  storageAnalysis(projectId?: string): StorageAnalysis {
+    const projects = (this.database.prepare(`
+      SELECT id, title FROM workspace_projects
+      WHERE (? IS NULL OR id = ?)
+      ORDER BY title, id
+    `).all(projectId ?? null, projectId ?? null) as { id: string; title: string }[]);
+    if (projectId && !projects.length) throw new Error('Project not found');
+    const projectMap = new Map<string, ProjectStorageAnalysis>(projects.map((project) => [project.id, {
+      projectId: project.id,
+      title: project.title,
+      currentBytes: 0,
+      revisionCount: 0,
+      revisionBytes: 0,
+      sameProseRevisionCount: 0,
+      sameProseRevisionBytes: 0,
+      assetCount: 0,
+      assetBytes: 0,
+      documents: []
+    }]));
+    const documents = this.database.prepare(`
+      SELECT id, project_id, title,
+        length(title) + length(content) + length(extensions) current_bytes
+      FROM workspace_documents
+      WHERE (? IS NULL OR project_id = ?)
+      ORDER BY project_id, sort_order, id
+    `).all(projectId ?? null, projectId ?? null) as {
+      id: string; project_id: string; title: string; current_bytes: number;
+    }[];
+    const documentMap = new Map<string, DocumentStorageAnalysis>();
+    for (const row of documents) {
+      const document: DocumentStorageAnalysis = {
+        documentId: row.id,
+        title: row.title,
+        currentBytes: row.current_bytes,
+        revisionCount: 0,
+        revisionBytes: 0,
+        sameProseRevisionCount: 0,
+        sameProseRevisionBytes: 0
+      };
+      documentMap.set(row.id, document);
+      const project = projectMap.get(row.project_id);
+      if (project) {
+        project.documents.push(document);
+        project.currentBytes += row.current_bytes;
+      }
+    }
+    const previousContent = new Map<string, string>();
+    const revisionRows = this.database.prepare(`
+      SELECT d.project_id, r.document_id, r.number, r.content,
+        length(r.title) + length(r.content) + length(r.extensions) revision_bytes
+      FROM workspace_document_revisions r
+      JOIN workspace_documents d ON d.id = r.document_id
+      WHERE (? IS NULL OR d.project_id = ?)
+      ORDER BY r.document_id, r.number
+    `).iterate(projectId ?? null, projectId ?? null) as IterableIterator<{
+      project_id: string; document_id: string; number: number; content: string; revision_bytes: number;
+    }>;
+    for (const row of revisionRows) {
+      const document = documentMap.get(row.document_id);
+      const project = projectMap.get(row.project_id);
+      if (!document || !project) continue;
+      document.revisionCount += 1;
+      document.revisionBytes += row.revision_bytes;
+      project.revisionCount += 1;
+      project.revisionBytes += row.revision_bytes;
+      if (previousContent.get(row.document_id) === row.content) {
+        document.sameProseRevisionCount += 1;
+        document.sameProseRevisionBytes += row.revision_bytes;
+        project.sameProseRevisionCount += 1;
+        project.sameProseRevisionBytes += row.revision_bytes;
+      }
+      previousContent.set(row.document_id, row.content);
+    }
+    const assets = this.database.prepare(`
+      SELECT project_id, count(*) asset_count, coalesce(sum(byte_size), 0) asset_bytes
+      FROM workspace_assets
+      WHERE (? IS NULL OR project_id = ?)
+      GROUP BY project_id
+    `).all(projectId ?? null, projectId ?? null) as { project_id: string; asset_count: number; asset_bytes: number }[];
+    for (const row of assets) {
+      const project = projectMap.get(row.project_id);
+      if (project) {
+        project.assetCount = row.asset_count;
+        project.assetBytes = row.asset_bytes;
+      }
+    }
+    const pageSize = Number(this.database.pragma('page_size', { simple: true }));
+    const pageCount = Number(this.database.pragma('page_count', { simple: true }));
+    const freePages = Number(this.database.pragma('freelist_count', { simple: true }));
+    const resultProjects = [...projectMap.values()];
+    return {
+      generatedAt: new Date().toISOString(),
+      readOnly: true,
+      databaseBytes: pageSize * pageCount,
+      freePageBytes: pageSize * freePages,
+      currentBytes: resultProjects.reduce((total, project) => total + project.currentBytes + project.assetBytes, 0),
+      revisionCount: resultProjects.reduce((total, project) => total + project.revisionCount, 0),
+      revisionBytes: resultProjects.reduce((total, project) => total + project.revisionBytes, 0),
+      normalizationCandidateBytes: resultProjects.reduce((total, project) => total + project.sameProseRevisionBytes, 0),
+      safeReclaimableBytes: 0,
+      projects: resultProjects
+    };
   }
 
   createBucket(input: CreateContextBucketInput): ContextBucket {
@@ -565,6 +723,17 @@ export class WorkspaceRepository {
     `).all(bucketId) as BucketRevisionRow[]).map(bucketRevisionFromRow);
   }
 
+  bucketRevisionCount(bucketId: string): number {
+    return (this.database.prepare('SELECT COUNT(*) count FROM workspace_context_bucket_revisions WHERE bucket_id = ?').get(bucketId) as { count: number }).count;
+  }
+
+  forEachBucketRevision(bucketId: string, visit: (revision: ContextBucketRevision) => void): void {
+    const rows = this.database.prepare(`
+      SELECT * FROM workspace_context_bucket_revisions WHERE bucket_id = ? ORDER BY number
+    `).iterate(bucketId) as IterableIterator<BucketRevisionRow>;
+    for (const row of rows) visit(bucketRevisionFromRow(row));
+  }
+
   private document(documentId: string): WorkspaceDocument {
     const row = this.database.prepare('SELECT * FROM workspace_documents WHERE id = ?').get(documentId) as DocumentRow | undefined;
     if (!row) throw new Error('Document not found');
@@ -582,7 +751,7 @@ export class WorkspaceRepository {
       INSERT INTO workspace_document_revisions
         (id, document_id, number, title, content, extensions, created_by, reason)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id('document_revision'), documentId, number, title, content, JSON.stringify(extensionData), createdBy ?? null, reason ?? null);
+    `).run(id('document_revision'), documentId, number, title, content, JSON.stringify(manuscriptRevisionExtensions(extensionData)), createdBy ?? null, reason ?? null);
   }
 
   private insertBucketRevision(bucketId: string, number: number, title: string, role: string | undefined, content: string, createdBy?: string, reason?: string): void {

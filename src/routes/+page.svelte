@@ -13,6 +13,8 @@
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
   import type { AIContextSelection } from '$lib/ai/contracts';
+  import type { ProjectExportMode } from '$lib/workspace/project-transfer';
+  import type { StorageAnalysis } from '$lib/workspace/retention';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
@@ -53,6 +55,10 @@
   let projectDialogKind = $state<'create' | 'rename' | 'reset' | null>(null);
   let projectDialogValue = $state('');
   let projectDialogPending = $state(false);
+  let projectExporting = $state(false);
+  let storageAnalysisOpen = $state(false);
+  let storageAnalysisLoading = $state(false);
+  let storageAnalysis = $state<StorageAnalysis | null>(null);
   let navigatorVisible = $state(true);
   let reviewPanelVisible = $state(true);
   let navigatorWidth = $state(DEFAULT_NAVIGATOR_WIDTH);
@@ -841,20 +847,58 @@
     URL.revokeObjectURL(href);
   }
 
-  async function exportProject(): Promise<void> {
+  async function exportProject(mode: ProjectExportMode = 'compact'): Promise<void> {
+    if (projectExporting) return;
+    if (mode === 'forensic' && !window.confirm('A forensic archive includes every autosave and audit revision. It may be hundreds of megabytes or fail in the browser. Continue?')) return;
+    projectExporting = true;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = null;
+    workspace.notice = mode === 'compact' ? 'Preparing compact project archive…' : 'Preparing forensic project archive…';
     try {
-      const result = await workspace.exportProject();
+      const result = await workspace.exportProject(mode);
       const href = URL.createObjectURL(result.blob);
       const anchor = document.createElement('a');
       anchor.href = href;
       anchor.download = result.filename;
+      document.body.append(anchor);
       anchor.click();
+      anchor.remove();
       URL.revokeObjectURL(href);
       showNotice(`Project exported as ${result.filename}.`);
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : 'Project export failed.');
+      workspace.notice = null;
+      workspace.lastError = error instanceof Error ? `Project export failed: ${error.message}` : 'Project export failed.';
+    } finally {
+      projectExporting = false;
     }
   }
+
+  function readableBytes(value: number): string {
+    if (value < 1024) return `${value} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let size = value / 1024;
+    let unit = units[0];
+    for (let index = 1; size >= 1024 && index < units.length; index += 1) {
+      size /= 1024;
+      unit = units[index];
+    }
+    return `${size.toFixed(size >= 100 ? 0 : size >= 10 ? 1 : 2)} ${unit}`;
+  }
+
+  async function openStorageAnalysis(): Promise<void> {
+    storageAnalysisOpen = true;
+    storageAnalysisLoading = true;
+    storageAnalysis = null;
+    workspace.lastError = null;
+    try {
+      storageAnalysis = await workspace.storageAnalysis();
+    } catch (error) {
+      workspace.lastError = error instanceof Error ? `Storage report failed: ${error.message}` : 'Storage report failed.';
+    } finally {
+      storageAnalysisLoading = false;
+    }
+  }
+
 </script>
 
 <svelte:head><title>Margin Note — writing support</title><meta name="description" content="A meta-first creative writing support workbench." /></svelte:head>
@@ -874,7 +918,7 @@
 
   <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px`}>
     {#if navigatorVisible}
-      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onExportProject={exportProject} /></div>
+      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onExportProject={exportProject} onStorageAnalysis={openStorageAnalysis} {projectExporting} /></div>
       <button
         type="button"
         class="navigator-resizer"
@@ -1290,6 +1334,47 @@
     </div>
   {/if}
 
+  {#if storageAnalysisOpen}
+    <div class="modal-backdrop" role="presentation" onclick={() => storageAnalysisOpen = false}>
+      <div class="settings storage-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="storage-analysis-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>Read-only diagnostics</small><h2 id="storage-analysis-title">Project storage</h2></div><button type="button" onclick={() => storageAnalysisOpen = false}>×</button></header>
+        {#if storageAnalysisLoading}
+          <p class="storage-loading">Reading revision sizes from SQLite…</p>
+        {:else if storageAnalysis}
+          {@const project = storageAnalysis.projects[0]}
+          <p class="provider-intro">This report changes nothing. “Same prose” includes potentially meaningful formatting changes, so it is a normalization candidate—not currently safe garbage.</p>
+          <div class="storage-summary">
+            <div><small>SQLite file</small><strong>{readableBytes(storageAnalysis.databaseBytes)}</strong></div>
+            <div><small>Current project state</small><strong>{readableBytes(storageAnalysis.currentBytes)}</strong></div>
+            <div><small>Revision history</small><strong>{readableBytes(storageAnalysis.revisionBytes)}</strong></div>
+            <div><small>Normalization candidates</small><strong>{readableBytes(storageAnalysis.normalizationCandidateBytes)}</strong></div>
+          </div>
+          {#if project}
+            <div class="storage-table-wrap">
+              <table class="storage-table">
+                <thead><tr><th>Document</th><th>Current</th><th>Revisions</th><th>History</th><th>Same prose</th></tr></thead>
+                <tbody>
+                  {#each [...project.documents].sort((left, right) => right.revisionBytes - left.revisionBytes) as document}
+                    <tr>
+                      <td title={document.documentId}>{document.title}</td>
+                      <td>{readableBytes(document.currentBytes)}</td>
+                      <td>{document.revisionCount}</td>
+                      <td>{readableBytes(document.revisionBytes)}</td>
+                      <td>{document.sameProseRevisionCount} · {readableBytes(document.sameProseRevisionBytes)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            <footer><p>{project.revisionCount} revisions · {readableBytes(project.sameProseRevisionBytes)} require normalization before collection. Safe reclaimable now: {readableBytes(storageAnalysis.safeReclaimableBytes)}.</p><button type="button" class="primary" onclick={() => storageAnalysisOpen = false}>Close</button></footer>
+          {/if}
+        {:else}
+          <p class="storage-loading">The storage report could not be loaded.</p>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if inputsOpen}
     <div class="modal-backdrop" role="presentation" onclick={() => inputsOpen = false}>
       <div class="input-manager" role="dialog" tabindex="-1" aria-modal="true" aria-label="Manage inputs" onclick={stopPropagation} onkeydown={stopPropagation}>
@@ -1576,6 +1661,19 @@
   .project-settings form > header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 20px; }
   .project-settings .reset-warning { margin: 0; padding: 12px; border-left: 3px solid #9a4439; background: #9a44390d; color: var(--ink-soft); font: 11px/1.55 var(--font-ui); }
   .project-settings footer button.danger { border-color: #8d3329; background: #8d3329; }
+  .storage-settings { width: min(980px, 100%); }
+  .storage-loading { min-height: 160px; display: grid; place-items: center; color: var(--muted); font: 11px/1.5 var(--font-ui); }
+  .storage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 18px 0; }
+  .storage-summary > div { display: grid; gap: 7px; border: 1px solid var(--line); border-radius: 4px; background: #fffefa; padding: 12px; }
+  .storage-summary small { color: var(--muted); font: 8px/1.2 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
+  .storage-summary strong { color: var(--ink); font: 600 17px/1 var(--font-reading); }
+  .storage-table-wrap { max-height: min(46vh, 520px); overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+  .storage-table { width: 100%; border-collapse: collapse; color: var(--ink-soft); font: 9px/1.35 var(--font-ui); }
+  .storage-table th { position: sticky; top: 0; background: var(--paper); color: var(--muted); text-align: left; text-transform: uppercase; letter-spacing: .04em; }
+  .storage-table th, .storage-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .storage-table th:not(:first-child), .storage-table td:not(:first-child) { text-align: right; white-space: nowrap; }
+  .storage-table td:first-child { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 760px) { .storage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .input-manager { width: min(820px, 100%); max-height: calc(100vh - 44px); overflow: hidden; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 5px; background: var(--paper); box-shadow: 0 30px 80px rgb(26 22 17 / .22); padding: 24px; }
   .input-manager > header, .input-list article > header, .input-list article > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .input-manager h2 { margin: 3px 0 0; font: 500 24px/1.2 var(--font-reading); }

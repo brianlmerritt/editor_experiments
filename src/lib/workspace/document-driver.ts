@@ -4,10 +4,17 @@ import type { ExtensionData } from './model';
 
 export interface DocumentMirrorSnapshot {
   documentId: string;
+  mirrorIdentity?: DocumentMirrorIdentity;
   content: string;
   extensions: ExtensionData;
   workspaceRevision: number;
   durableRevision: number;
+}
+
+export interface DocumentMirrorIdentity {
+  projectId: string;
+  projectTitle: string;
+  documentTitle: string;
 }
 
 export interface WorkspaceCommit extends DocumentMirrorSnapshot {
@@ -41,12 +48,12 @@ export class YjsDocumentDriver implements DocumentDriver {
   constructor(private readonly persist = typeof indexedDB !== 'undefined') {}
 
   async hydrate(snapshot: DocumentMirrorSnapshot): Promise<void> {
-    const handle = await this.open(snapshot.documentId);
+    const handle = await this.open(snapshot.documentId, snapshot.mirrorIdentity);
     this.write(handle.doc, snapshot, 'hydrate');
   }
 
   async commit(transaction: WorkspaceCommit): Promise<void> {
-    const handle = await this.open(transaction.documentId);
+    const handle = await this.open(transaction.documentId, transaction.mirrorIdentity);
     this.write(handle.doc, transaction, transaction.transactionId);
   }
 
@@ -64,13 +71,13 @@ export class YjsDocumentDriver implements DocumentDriver {
     };
   }
 
-  private open(documentId: string): Promise<YjsHandle> {
+  private open(documentId: string, identity?: DocumentMirrorIdentity): Promise<YjsHandle> {
     const existing = this.handles.get(documentId);
     if (existing) return existing;
     const opened = (async () => {
       const doc = new Y.Doc();
       if (!this.persist) return { doc };
-      const persistence = new IndexeddbPersistence(`margin-note:document:${documentId}`, doc);
+      const persistence = new IndexeddbPersistence(documentMirrorDatabaseName(documentId, identity), doc);
       await persistence.whenSynced;
       return { doc, persistence };
     })();
@@ -88,6 +95,34 @@ export class YjsDocumentDriver implements DocumentDriver {
       state.set('lastOrigin', origin);
     }, { kind: 'workspace-facade', origin });
   }
+}
+
+function readableStoragePart(value: string, fallback: string): string {
+  const readable = value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '');
+  return readable || fallback;
+}
+
+function stableStorageSuffix(value: string): string {
+  const suffix = value.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(-12);
+  return suffix || 'unknown';
+}
+
+/**
+ * Human-readable IndexedDB identity for the device-local recovery mirror.
+ * Stable ID suffixes prevent projects or documents with identical titles colliding.
+ */
+export function documentMirrorDatabaseName(documentId: string, identity?: DocumentMirrorIdentity): string {
+  if (!identity) return `margin-note:document:${documentId}`;
+  const project = readableStoragePart(identity.projectTitle, 'untitled-project');
+  const document = readableStoragePart(identity.documentTitle, 'untitled-document');
+  return `margin-note:document:${project}-${stableStorageSuffix(identity.projectId)}:${document}-${stableStorageSuffix(documentId)}`;
 }
 
 export function defaultDocumentDriver(): DocumentDriver {

@@ -38,6 +38,10 @@ describe('WorkspaceRepository', () => {
     expect(restored.revision).toBe(3);
     expect(restored.content).toBe(original.content);
     expect(repository.documentRevisions(documentId).map((revision) => revision.number)).toEqual([3, 2, 1]);
+    expect(repository.documentRevisionCount(documentId)).toBe(3);
+    const streamed: number[] = [];
+    repository.forEachDocumentRevision(documentId, (revision) => streamed.push(revision.number));
+    expect(streamed).toEqual([1, 2, 3]);
   });
 
   it('persists project-level Navigator state without changing the project identity', () => {
@@ -64,8 +68,72 @@ describe('WorkspaceRepository', () => {
     const restored = repository.restoreDocument(documentId, initial.id, 'writer');
 
     expect(edited.extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
-    expect(repository.documentRevisions(documentId)[1].extensions.margin_note).toEqual({ revision: 2, formats: [{ id: 'format-1' }] });
-    expect(restored.extensions).toEqual({});
+    expect(repository.documentRevisions(documentId)[1].extensions.margin_note).toEqual({ formats: [{ id: 'format-1' }] });
+    expect(restored.extensions).toEqual({ margin_note: { revision: 2 } });
+  });
+
+  it('persists operational AI state without creating or inflating manuscript history', () => {
+    const documentId = repository.workspace().documents[0].id;
+    const operational = repository.saveDocument({
+      id: documentId,
+      extensions: {
+        margin_note: {
+          revision: 2,
+          inputs: [{ id: 'input-1', state: 'pending' }],
+          runs: [{ id: 'run-1', state: 'running' }]
+        }
+      },
+      reason: 'Record running craft pass'
+    });
+
+    expect(operational.revision).toBe(2);
+    expect(operational.extensions.margin_note).toMatchObject({
+      inputs: [{ id: 'input-1', state: 'pending' }],
+      runs: [{ id: 'run-1', state: 'running' }]
+    });
+    expect(repository.documentRevisionCount(documentId)).toBe(1);
+
+    repository.saveDocument({
+      id: documentId,
+      content: 'A meaningful prose change.',
+      extensions: {
+        margin_note: {
+          revision: 3,
+          document: { type: 'doc', content: [] },
+          formats: [],
+          inputs: [{ id: 'input-1', state: 'accepted' }],
+          runs: [{ id: 'run-1', state: 'completed' }]
+        }
+      },
+      reason: 'Accept revision'
+    });
+
+    const revisions = repository.documentRevisions(documentId);
+    expect(revisions.map((revision) => revision.number)).toEqual([3, 1]);
+    expect(revisions[0].extensions.margin_note).toEqual({ document: { type: 'doc', content: [] }, formats: [] });
+  });
+
+  it('reports storage and same-prose normalization candidates without mutating data', () => {
+    const workspace = repository.workspace();
+    const documentId = workspace.documents[0].id;
+    repository.saveDocument({
+      id: documentId,
+      extensions: { margin_note: { formats: [{ id: 'format-1' }] } },
+      reason: 'Format text'
+    });
+
+    const before = repository.documentRevisionCount(documentId);
+    const report = repository.storageAnalysis(workspace.projects[0].id);
+
+    expect(report).toMatchObject({ readOnly: true, safeReclaimableBytes: 0 });
+    expect(report.projects).toHaveLength(1);
+    expect(report.projects[0]).toMatchObject({ revisionCount: 3, sameProseRevisionCount: 1 });
+    expect(report.projects[0].documents.find((document) => document.documentId === documentId)).toMatchObject({
+      revisionCount: 2,
+      sameProseRevisionCount: 1
+    });
+    expect(report.normalizationCandidateBytes).toBeGreaterThan(0);
+    expect(repository.documentRevisionCount(documentId)).toBe(before);
   });
 
   it('stores pasted image bytes outside the document and returns durable asset metadata', () => {
@@ -143,6 +211,10 @@ describe('WorkspaceRepository', () => {
 
     expect(edited.revision).toBe(2);
     expect(repository.bucketRevisions(bucket.id).map((revision) => revision.number)).toEqual([2, 1]);
+    expect(repository.bucketRevisionCount(bucket.id)).toBe(2);
+    const streamed: number[] = [];
+    repository.forEachBucketRevision(bucket.id, (revision) => streamed.push(revision.number));
+    expect(streamed).toEqual([1, 2]);
     repository.deleteBucket(bucket.id);
     expect(repository.workspace().contextBuckets.some((item) => item.id === bucket.id)).toBe(false);
     expect(repository.bucketRevisions(bucket.id)).toHaveLength(2);

@@ -22,7 +22,8 @@ import type {
   WorkspaceAsset,
   WorkspaceProject
 } from '$lib/workspace/model';
-import type { ProjectArchiveExport, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
+import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
+import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from '$lib/workspace/document-driver';
 
 export interface LedgerStats {
@@ -159,6 +160,11 @@ export class WorkspaceFacade {
       && typeof extension.revision === 'number' ? extension.revision : activeDocument.revision;
     await this.documentDriver.hydrate({
       documentId: activeDocument.id,
+      mirrorIdentity: {
+        projectId: activeProject.id,
+        projectTitle: activeProject.title,
+        documentTitle: activeDocument.title
+      },
       content: activeDocument.content,
       extensions: activeDocument.extensions,
       workspaceRevision,
@@ -186,6 +192,10 @@ export class WorkspaceFacade {
 
   persistentWorkspace(): Promise<PersistentWorkspace> {
     return this.get('/api/workspace');
+  }
+
+  storageAnalysis(projectId?: string): Promise<StorageAnalysis> {
+    return this.get(`/api/storage-report${projectId ? `?project=${encodeURIComponent(projectId)}` : ''}`);
   }
 
   async createProject(title: string): Promise<WorkspaceProject> {
@@ -327,8 +337,8 @@ export class WorkspaceFacade {
     return { blob: await response.blob(), filename: exportFilename(response) };
   }
 
-  async exportProject(snapshot: ProjectExportSnapshot): Promise<ProjectArchiveExport> {
-    const response = await this.fetcher('/api/project-export', jsonRequest(snapshot));
+  async exportProject(snapshot: ProjectExportSnapshot, mode: ProjectExportMode = 'compact'): Promise<ProjectArchiveExport> {
+    const response = await this.fetcher(`/api/project-export?mode=${mode}`, jsonRequest(snapshot));
     if (!response.ok) throw await responseError(response);
     return { blob: await response.blob(), filename: exportFilename(response) };
   }

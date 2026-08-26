@@ -8,7 +8,7 @@ the event ledger. None of those adapters independently owns live manuscript stat
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
-Native complete-project `.mnote` ZIP export and the validated inverse-import contract
+Native complete-project `.mnote.zip` export and the validated inverse-import contract
 are specified in [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
 The Phase 1 AI request, Writing Context, provider, proposal, and adoption contract is
 documented in [AI_BOUNDARY.md](./AI_BOUNDARY.md). It also defines existing-work
@@ -70,10 +70,10 @@ For a quick tour:
     normalised into semantic lists. Select existing malformed material and use
     **Fix list** when an earlier paste needs the same repair.
 11. Open the project menu beside the Navigator's project selector and choose **Export
-    project** to download a complete `.mnote` archive. This includes structure,
-    revisions, Inputs/runs/provenance/usage, context, forks, and assets, but never API
-    keys or provider profiles. Document-menu **Export Markdown** remains a separate
-    publishing export.
+    project** to download a compact `.mnote.zip` archive. This includes current
+    structure, Inputs/runs/provenance/usage, context, forks, and assets once, but never
+    API keys or provider profiles. **Export forensic archive** separately includes all
+    immutable revisions. Document-menu **Export Markdown** remains a publishing export.
 
 ## Change-aware workspace proof of concept
 

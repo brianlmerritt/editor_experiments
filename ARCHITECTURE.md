@@ -604,6 +604,12 @@ ProseMirror nor supplies live application state. Provider transports likewise re
 untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal anchors,
 creates input IDs and targets, and decides whether a delayed result remains applicable.
 
+This implemented payload is now known to be unsuitable as the durable retention
+model: each save repeats growing AI run and Input arrays in manuscript revisions and
+in the opaque Yjs mirror value. Native import is paused while current manuscript
+state, meaningful versions, AI evidence, session recovery, and rebuildable projections
+are separated. See [RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
+
 The Navigator POC intentionally starts fresh. A new visible workspace contains the
 protected empty Spine, protected empty Todos document and view, and state needed to create Collections
 and Nodes—no static/generated manuscript, Collections, Nodes, Inputs, cards, or other

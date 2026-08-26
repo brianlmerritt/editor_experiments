@@ -71,6 +71,11 @@ describe('WorkspaceFacade', () => {
 
     expect(driver.hydrate).toHaveBeenCalledWith({
       documentId: 'main',
+      mirrorIdentity: {
+        projectId: 'project',
+        projectTitle: 'Moon Dark',
+        documentTitle: 'Main draft'
+      },
       content: persistent.documents[0].content,
       extensions: {},
       workspaceRevision: 1,
@@ -212,9 +217,9 @@ describe('WorkspaceFacade', () => {
 
   it('exports a Svelte-owned project snapshot through the facade', async () => {
     const fetcher = vi.fn<FetchLike>(async (input, init) => {
-      expect(String(input)).toBe('/api/project-export');
+      expect(String(input)).toBe('/api/project-export?mode=compact');
       expect(JSON.parse(String(init?.body))).toMatchObject({ project: { id: 'project' }, documents: [{ id: 'main' }] });
-      return new Response('archive', { headers: { 'content-disposition': 'attachment; filename="moon-dark.mnote"' } });
+      return new Response('archive', { headers: { 'content-disposition': 'attachment; filename="moon-dark.mnote.zip"' } });
     });
     const result = await new WorkspaceFacade(fetcher).exportProject({
       project: persistent.projects[0],
@@ -223,7 +228,45 @@ describe('WorkspaceFacade', () => {
       capturedAt: '2026-08-26T12:00:00.000Z'
     });
 
-    expect(result.filename).toBe('moon-dark.mnote');
+    expect(result.filename).toBe('moon-dark.mnote.zip');
     expect(await result.blob.text()).toBe('archive');
   });
+
+  it('requests exhaustive project history only in explicit forensic mode', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input) => {
+      expect(String(input)).toBe('/api/project-export?mode=forensic');
+      return new Response('archive', { headers: { 'content-disposition': 'attachment; filename="moon-dark-forensic.mnote.zip"' } });
+    });
+    const result = await new WorkspaceFacade(fetcher).exportProject({
+      project: persistent.projects[0],
+      documents: persistent.documents,
+      contextBuckets: [],
+      capturedAt: '2026-08-26T12:00:00.000Z'
+    }, 'forensic');
+
+    expect(result.filename).toBe('moon-dark-forensic.mnote.zip');
+  });
+
+  it('requests a read-only storage analysis for one project', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input) => {
+      expect(String(input)).toBe('/api/storage-report?project=project');
+      return json({
+        generatedAt: '2026-08-26T12:00:00.000Z',
+        readOnly: true,
+        databaseBytes: 100,
+        freePageBytes: 0,
+        currentBytes: 10,
+        revisionCount: 2,
+        revisionBytes: 90,
+        normalizationCandidateBytes: 80,
+        safeReclaimableBytes: 0,
+        projects: []
+      });
+    });
+
+    const report = await new WorkspaceFacade(fetcher).storageAnalysis('project');
+    expect(report.readOnly).toBe(true);
+    expect(report.revisionBytes).toBe(90);
+  });
+
 });

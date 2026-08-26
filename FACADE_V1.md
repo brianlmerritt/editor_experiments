@@ -111,8 +111,9 @@ an export must never silently become the source of truth.
 
 Native project export is different from a publishing projection. Svelte passes a
 frozen, live project snapshot through the facade so an in-flight background save
-cannot make the archive stale. The durable adapter supplies immutable revisions and
-asset bytes only. The result is a versioned `.mnote` archive; provider credentials,
+cannot make the archive stale. The durable adapter supplies asset bytes and, for an
+explicit forensic export, immutable revisions. The result is a versioned `.mnote.zip`
+archive; provider credentials,
 global settings, and device UI state never cross this boundary.
 
 The inverse importer will first return an inspected, validated candidate. Only an
@@ -164,6 +165,19 @@ document without waiting for SQLite, the browser mirror, or history retrieval. S
 for the same document remain ordered; different documents may save independently.
 The workspace exposes pending, saving, saved, and failed state to the UI. Potentially
 large facade serialisation is yielded until after navigation can render.
+
+The durable adapter distinguishes current-state revision from manuscript history.
+Operational AI/Input lifecycle updates remain part of the complete current document
+snapshot but do not create immutable writing revisions. The project-menu storage
+report crosses the facade as read-only diagnostics; it cannot collect rows or compact
+SQLite.
+
+The facade also supplies the document driver with project and document display
+identity. The Yjs adapter uses it only to name its device-local IndexedDB recovery
+mirror; the name is not a domain ID and does not become authoritative state. Names
+include stable project and document ID suffixes so two works or documents with the
+same title cannot share a mirror. Legacy opaque mirrors remain a storage-migration
+concern and are never silently deleted during hydration.
 
 ## Transactions, undo, and the façade
 
@@ -243,12 +257,17 @@ The remaining differences from this complete contract are:
 
 - it loads several collections rather than one normalised aggregate snapshot;
 - active history uses full in-memory snapshots and is not durable across reloads;
+- durable document versions repeat the complete AI run/Input extension arrays rather
+  than referencing normalised evidence;
+- the Yjs mirror replaces one opaque extension value and has no facade-level
+  checkpoint/compaction lifecycle;
 - generation and persistence methods share one class;
 - idempotent transaction commits, an outbox, subscriptions, conflicts, and remote
   transaction reconciliation are not implemented.
 
 These are migration facts, not reasons to expose the current implementation as the
-long-term interface.
+long-term interface. The measured retention defect and lossless-first migration plan
+are recorded in [RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
 
 ## Explicit non-goals for v1
 

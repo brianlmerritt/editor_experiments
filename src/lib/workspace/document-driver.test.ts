@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { YjsDocumentDriver, type WorkspaceCommit } from './document-driver';
+import { documentMirrorDatabaseName, YjsDocumentDriver, type WorkspaceCommit } from './document-driver';
 
 describe('Yjs document driver', () => {
   it('mirrors canonical Svelte commits without becoming the active editor state', async () => {
@@ -24,5 +24,19 @@ describe('Yjs document driver', () => {
       workspaceRevision: 7,
       durableRevision: 3
     });
+  });
+});
+
+describe('document mirror database names', () => {
+  it('identifies the project and document while retaining collision-safe IDs', () => {
+    expect(documentMirrorDatabaseName('document_9f2c5a7b6652', {
+      projectId: 'project_4db8912cc781',
+      projectTitle: 'AGI: The Book Test',
+      documentTitle: 'Chapter 1 — Entrance Fee'
+    })).toBe('margin-note:document:agi-the-book-test-4db8912cc781:chapter-1-entrance-fee-9f2c5a7b6652');
+  });
+
+  it('keeps the legacy identity when project metadata is unavailable', () => {
+    expect(documentMirrorDatabaseName('main')).toBe('margin-note:document:main');
   });
 });

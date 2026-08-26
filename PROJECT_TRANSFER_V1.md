@@ -1,18 +1,30 @@
 # Native project transfer v1
 
-Margin Note's native project file is a complete, portable project archive with the
-extension `.mnote`. It is a ZIP container with a versioned JSON manifest, neutral
-rich-document records, immutable history, project context, and binary assets.
+Margin Note's native project file is a portable project archive with the extension
+`.mnote.zip`. It is a ZIP container with a versioned JSON manifest, neutral rich-document
+records, project context, and binary assets.
 Markdown remains a publishing/interchange export; it is not a project backup.
+
+The first lossless exporter exposed a serious retention defect: document revisions
+repeat growing AI run and Input arrays, producing archives hundreds of megabytes in
+size and more than a gigabyte when expanded. Inverse import is paused until history is
+normalised and compacted. The measurements, required roots, and migration order are in
+[RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
+
+The normal **compact** export is read-only and includes each current record once. It
+does not stream the repeated autosave revision tables. The manifest reports the exact
+number of omitted document and context revisions. An explicit **forensic** export
+retains the original exhaustive behaviour and is expected to be very large until
+durable history is normalised.
 
 ## Authority boundary
 
 Svelte 5 Rune workspace state creates the point-in-time export snapshot. The snapshot
 therefore includes the current prose, formatting, Inputs, targets, runs, and project
 structure even when the background durable save has not finished. It crosses the
-workspace facade as domain data. The server adds immutable document/context revision
-history and asset bytes, but must not replace the posted current records with an older
-database copy.
+workspace facade as domain data. The server adds asset bytes and, only in forensic
+mode, immutable document/context revision history. It must not replace the posted
+current records with an older database copy.
 
 Export is read-only. It does not pause editing, change the active project, or make the
 archive another source of truth.
@@ -20,32 +32,37 @@ archive another source of truth.
 ## Archive layout
 
 ```text
-project-name.mnote
+project-name.mnote.zip
 ├── manifest.json
 ├── project.json
 ├── structure.json
 ├── documents/
 │   ├── index.json
 │   └── <document-id>.json
-├── revisions/documents/
-│   └── <document-id>.json
+├── revisions/documents/             # forensic mode only
+│   └── <document-id>.jsonl
 ├── context/
 │   ├── index.json
 │   └── <context-id>.json
+├── revisions/context/               # forensic mode only
+│   └── <context-id>.jsonl
 └── assets/
     ├── index.json
     └── files/<asset-id>
 ```
 
-`manifest.json` declares `margin-note-project`, format version `1`, producer version,
-project identity, counts, active-run count, safety flags, and every archive path.
+`manifest.json` declares `margin-note-project`, format version `1`, export mode,
+project identity, included and omitted revision counts, active-run count, safety
+flags, and every archive path.
 `project.json` preserves project-owned extensions other than Navigator structure.
 `structure.json` is the single transfer location for that Navigator structure.
 Document records retain plain text, neutral rich-document data, formats, Inputs,
 behaviours, AI activities and runs, captured actions and Writing Context, provenance,
-usage, and unknown extension data. Revision files preserve complete immutable history
-for the active project records. Context files contain the current record and its
-versions. Asset metadata and bytes remain separate.
+usage, and unknown extension data. Forensic revision files preserve complete immutable
+history for the active project records. They use newline-delimited JSON so very long
+histories can be compressed one revision at a time. Compact context files contain the
+current records without their repeated histories.
+Asset metadata and bytes remain separate.
 
 The current model represents forks as stable documents with parent lineage. Export
 preserves those IDs and links exactly. Import v1 will remap IDs as one coherent graph
@@ -56,12 +73,14 @@ before anything is persisted.
 - project identity and project-owned extension data;
 - Spine, canonical Todos, Material definitions and nodes, containment, relationships,
   archive state, and ordering;
-- every current project document and its immutable revisions;
+- every current project document; forensic mode additionally includes every immutable
+  revision;
 - forks/variants and their present lineage links;
 - neutral rich content, formatting attachments, Inputs, target evidence, run history,
   diagnostics, captured action versions, context manifests, provenance, and recorded
   provider usage/cost;
-- project and document context buckets plus their immutable revisions;
+- project and document context buckets; forensic mode additionally includes their
+  immutable revisions;
 - project-owned AI context preferences and future project-owned action definitions;
 - binary assets referenced by project content.
 
@@ -84,9 +103,10 @@ An export may capture a queued or running AI request. The manifest reports how m
 Import will retain its evidence but convert it to interrupted work requiring an
 explicit retry; it will never resume a network request automatically.
 
-## Planned inverse import
+## Paused inverse import
 
-Import is intentionally a separate implementation slice. Version 1 will:
+Import will resume only after the retention acceptance criteria are met. Version 1
+will then:
 
 1. open and inspect the ZIP without mutating the workspace;
 2. validate the manifest, supported version, required files, path safety, record
@@ -106,5 +126,8 @@ selective import, and legacy-folder inference are out of scope for v1.
 ## Current use
 
 Open the project menu (`•••`) beside the project selector and choose **Export
-project**. The browser downloads `<project-name>.mnote`. **Export Markdown** remains
-in the current document menu and exports only that writing document.
+project** for the compact archive. The browser downloads `<project-name>.mnote.zip`.
+Choose **Export forensic archive** only when every autosave/audit revision is required;
+the browser warns before attempting `<project-name>-forensic.mnote.zip`. **Export
+Markdown** remains in the current document menu and exports only that writing
+document.
