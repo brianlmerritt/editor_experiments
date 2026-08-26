@@ -1,8 +1,9 @@
 # Retention and compaction
 
-This document records the storage defect found before native project import was
-implemented. Import is paused until the durable model and `.mnote.zip` archive stop
-amplifying repeated document state.
+This document records the storage defect found while native project transfer was
+being implemented. Compact current-state export/import no longer carries the repeated
+revision tables. Full historical round trips and general durable garbage collection
+remain deferred until the durable model stops amplifying repeated document state.
 
 ## Measured baseline
 
@@ -202,14 +203,18 @@ atomic replacement. It must never run as an unannounced side effect of editing.
    checkpoint, fork, Input, run, cost, and relationship by count and hash.
 6. Offer lossless logical compaction with a before/after report.
 7. Physically compact SQLite only after a separate backup and verification step.
-8. Update `.mnote.zip` export to the normalised layout, then resume inverse import.
+8. Extend `.mnote.zip` import to normalised historical evidence after migration.
 
 The default `.mnote.zip` exporter now produces a read-only compact projection containing
 current project state once and reports omitted autosave revision counts. The explicit
 forensic mode retains the old repeated-history diagnostic backup. Compact export does
 not compact SQLite; durable normalisation and garbage collection remain required.
+Compact import validates the archive, creates a new project, and does not import the
+omitted history. Explicit project deletion reclaims that project’s logical rows and
+browser mirrors, but it is not a general collector and does not physically shrink the
+SQLite file.
 
-## Acceptance criteria before import resumes
+## Acceptance criteria for historical import and general collection
 
 - Repeated AI run or Input updates do not duplicate manuscript or prior audit bytes.
 - Ten no-prose run lifecycle updates create no manuscript versions.

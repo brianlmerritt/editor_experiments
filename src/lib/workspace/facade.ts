@@ -22,7 +22,7 @@ import type {
   WorkspaceAsset,
   WorkspaceProject
 } from '$lib/workspace/model';
-import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
+import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot, ProjectImportPreview, ProjectImportResult } from '$lib/workspace/project-transfer';
 import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from '$lib/workspace/document-driver';
 
@@ -213,6 +213,27 @@ export class WorkspaceFacade {
     return result.workspace;
   }
 
+  async deleteProject(project: WorkspaceProject, documents: WorkspaceDocument[]): Promise<{ workspace: PersistentWorkspace; mirrorCleanupWarning?: string }> {
+    const result = await this.post<{ workspace: PersistentWorkspace }>('/api/workspace', { action: 'delete_project', id: project.id });
+    try {
+      await this.documentDriver.remove?.(documents.map((document) => ({
+        documentId: document.id,
+        mirrorIdentity: {
+          projectId: project.id,
+          projectTitle: project.title,
+          documentTitle: document.title
+        }
+      })));
+      return { workspace: result.workspace };
+    } catch (error) {
+      console.error('Project deleted, but browser recovery mirror cleanup failed.', error);
+      return {
+        workspace: result.workspace,
+        mirrorCleanupWarning: 'The project was deleted from the server, but this browser could not remove every recovery mirror. Close other Margin Note tabs and clear site data if the old mirrors remain.'
+      };
+    }
+  }
+
   async createDocument(input: {
     id?: string;
     projectId: string;
@@ -341,6 +362,21 @@ export class WorkspaceFacade {
     const response = await this.fetcher(`/api/project-export?mode=${mode}`, jsonRequest(snapshot));
     if (!response.ok) throw await responseError(response);
     return { blob: await response.blob(), filename: exportFilename(response) };
+  }
+
+  async inspectProjectImport(file: File): Promise<ProjectImportPreview> {
+    const body = new FormData();
+    body.set('action', 'inspect');
+    body.set('file', file, file.name);
+    const result = await jsonResponse<{ preview: ProjectImportPreview }>(await this.fetcher('/api/project-import', { method: 'POST', body }));
+    return result.preview;
+  }
+
+  async importProject(file: File): Promise<ProjectImportResult> {
+    const body = new FormData();
+    body.set('action', 'import');
+    body.set('file', file, file.name);
+    return jsonResponse<ProjectImportResult>(await this.fetcher('/api/project-import', { method: 'POST', body }));
   }
 
   async reviewPairs(scope?: { sessionId?: string; branchId?: string }): Promise<JudgmentPair[]> {

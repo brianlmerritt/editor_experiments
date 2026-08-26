@@ -1,4 +1,4 @@
-import type { ContextBucket, WorkspaceDocument, WorkspaceProject } from './model';
+import type { ContextBucket, PersistentWorkspace, WorkspaceDocument, WorkspaceProject } from './model';
 
 export const projectTransferFormat = 'margin-note-project' as const;
 export const projectTransferVersion = 1 as const;
@@ -41,4 +41,24 @@ export interface ProjectTransferManifest {
 export interface ProjectArchiveExport {
   blob: Blob;
   filename: string;
+}
+
+export interface ProjectImportPreview {
+  title: string;
+  formatVersion: number;
+  exportMode: ProjectExportMode;
+  documents: number;
+  contextBuckets: number;
+  assets: number;
+  activeRuns: number;
+  archiveBytes: number;
+  expandedBytes: number;
+  warnings: string[];
+}
+
+export interface ProjectImportResult {
+  workspace: PersistentWorkspace;
+  projectId: string;
+  documentIds: string[];
+  preview: ProjectImportPreview;
 }

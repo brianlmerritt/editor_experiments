@@ -247,6 +247,53 @@ describe('WorkspaceFacade', () => {
     expect(result.filename).toBe('moon-dark-forensic.mnote.zip');
   });
 
+  it('inspects and imports a native project archive through multipart facade calls', async () => {
+    const preview = {
+      title: 'Moon Dark', formatVersion: 1, exportMode: 'compact' as const,
+      documents: 1, contextBuckets: 0, assets: 0, activeRuns: 0,
+      archiveBytes: 7, expandedBytes: 20, warnings: []
+    };
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      expect(String(input)).toBe('/api/project-import');
+      expect(init?.method).toBe('POST');
+      const body = init?.body as FormData;
+      const action = body.get('action');
+      expect(body.get('file')).toBeInstanceOf(File);
+      return action === 'inspect'
+        ? json({ preview })
+        : json({ workspace: persistent, projectId: 'project', documentIds: ['main'], preview }, 201);
+    });
+    const facade = new WorkspaceFacade(fetcher);
+    const file = new File(['archive'], 'moon-dark.mnote.zip', { type: 'application/zip' });
+
+    expect(await facade.inspectProjectImport(file)).toEqual(preview);
+    expect(await facade.importProject(file)).toEqual({ workspace: persistent, projectId: 'project', documentIds: ['main'], preview });
+  });
+
+  it('deletes the durable project before removing its browser recovery mirrors', async () => {
+    const order: string[] = [];
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      order.push('server');
+      expect(String(input)).toBe('/api/workspace');
+      expect(JSON.parse(String(init?.body))).toEqual({ action: 'delete_project', id: 'project' });
+      return json({ workspace: persistent });
+    });
+    const driver: DocumentDriver = {
+      hydrate: vi.fn(async () => {}),
+      commit: vi.fn(async () => {}),
+      remove: vi.fn(async () => { order.push('mirror'); })
+    };
+
+    const result = await new WorkspaceFacade(fetcher, driver).deleteProject(persistent.projects[0], persistent.documents);
+
+    expect(order).toEqual(['server', 'mirror']);
+    expect(result.workspace).toEqual(persistent);
+    expect(driver.remove).toHaveBeenCalledWith([{
+      documentId: 'main',
+      mirrorIdentity: { projectId: 'project', projectTitle: 'Moon Dark', documentTitle: 'Main draft' }
+    }]);
+  });
+
   it('requests a read-only storage analysis for one project', async () => {
     const fetcher = vi.fn<FetchLike>(async (input) => {
       expect(String(input)).toBe('/api/storage-report?project=project');

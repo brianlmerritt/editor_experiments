@@ -3,7 +3,7 @@ import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, typ
 import { FacadeAIInteractionService } from '$lib/ai/service';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
-import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot } from '$lib/workspace/project-transfer';
+import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot, ProjectImportPreview } from '$lib/workspace/project-transfer';
 import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
@@ -1468,6 +1468,47 @@ export class WorkspaceState {
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', project.id);
     this.refreshBranches();
     await this.openNavigatorNode(document.id);
+  }
+
+  inspectProjectImport(file: File): Promise<ProjectImportPreview> {
+    return this.facade.inspectProjectImport(file);
+  }
+
+  async importProject(file: File): Promise<ProjectImportPreview> {
+    const result = await this.facade.importProject(file);
+    this.projects = result.workspace.projects;
+    this.documents = result.workspace.documents;
+    this.contextBuckets = result.workspace.contextBuckets;
+    await this.activatePersistedProject(result.projectId);
+    return result.preview;
+  }
+
+  async deleteCurrentProject(): Promise<void> {
+    const project = this.currentProject;
+    if (!project) return;
+    const documents = this.projectNodes;
+    const result = await this.facade.deleteProject(project, documents);
+    this.projects = result.workspace.projects;
+    this.documents = result.workspace.documents;
+    this.contextBuckets = result.workspace.contextBuckets;
+    const nextProject = this.projects[0];
+    if (!nextProject) throw new Error('Project deletion left no workspace project');
+    await this.activatePersistedProject(nextProject.id);
+    if (result.mirrorCleanupWarning) this.notice = result.mirrorCleanupWarning;
+  }
+
+  private async activatePersistedProject(projectId: string): Promise<void> {
+    this.projectId = projectId;
+    this.navigatorUndoStack = [];
+    this.navigatorRedoStack = [];
+    this.navigator = readNavigatorState(this.currentProject);
+    this.loadNavigatorMemory();
+    await this.ensureProjectStructure();
+    const document = this.projectNodes.find((item) => item.role === 'manuscript') ?? this.spineNode ?? this.todosNode;
+    if (!document) throw new Error('Project has no document');
+    this.refreshBranches();
+    await this.switchBranch(document.id);
+    if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', projectId);
   }
 
   async createDocument(title: string): Promise<WorkspaceDocument> {

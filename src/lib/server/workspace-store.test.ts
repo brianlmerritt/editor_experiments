@@ -179,6 +179,63 @@ describe('WorkspaceRepository', () => {
     ]));
   });
 
+  it('imports a project atomically with remapped document, context, Navigator, and asset identities', () => {
+    const sourceProjectId = 'project_source';
+    const imported = repository.importProject({
+      project: {
+        id: sourceProjectId,
+        title: 'Imported work',
+        revision: 4,
+        updatedAt: '2026-08-26T12:00:00.000Z',
+        extensions: {
+          navigator: {
+            version: 1,
+            collections: [{ id: 'collection_source' }],
+            relationships: [{ id: 'relationship_1', sourceNodeId: 'scene_source', targetNodeId: 'spine_source' }],
+            todos: []
+          }
+        }
+      },
+      documents: [
+        { id: 'spine_source', projectId: sourceProjectId, parentId: null, title: 'Spine', order: 0, revision: 7, role: 'spine', extensions: {}, kind: 'document', content: 'Story direction', updatedAt: '2026-08-26T12:00:00.000Z' },
+        { id: 'todos_source', projectId: sourceProjectId, parentId: null, title: 'Todos', order: 1, revision: 2, role: 'todos', extensions: {}, kind: 'document', content: '', updatedAt: '2026-08-26T12:00:00.000Z' },
+        { id: 'collection_source', projectId: sourceProjectId, parentId: null, title: 'Scenes', order: 2, revision: 1, role: 'navigator_collection', extensions: { navigator: { collectionId: 'collection_source' } }, kind: 'document', content: '', updatedAt: '2026-08-26T12:00:00.000Z' },
+        { id: 'scene_source', projectId: sourceProjectId, parentId: 'collection_source', title: 'Scene 1', order: 0, revision: 3, role: 'navigator_node', extensions: { margin_note: { image: '/api/assets/asset_source' } }, kind: 'document', content: 'Opening scene', updatedAt: '2026-08-26T12:00:00.000Z' }
+      ],
+      contextBuckets: [{ id: 'context_source', projectId: sourceProjectId, documentId: 'scene_source', scope: 'document', title: 'Scene brief', content: 'Keep it close.', revision: 2, extensions: {}, updatedAt: '2026-08-26T12:00:00.000Z' }],
+      assets: [{ asset: { id: 'asset_source', projectId: sourceProjectId, fileName: 'moon.png', mimeType: 'image/png', byteSize: 3, createdAt: '2026-08-26T12:00:00.000Z' }, content: Buffer.from([1, 2, 3]) }]
+    });
+
+    expect(imported.project.id).not.toBe(sourceProjectId);
+    expect(imported.documents).toHaveLength(4);
+    const spine = imported.documents.find((document) => document.role === 'spine')!;
+    const collection = imported.documents.find((document) => document.role === 'navigator_collection')!;
+    const scene = imported.documents.find((document) => document.role === 'navigator_node')!;
+    expect(scene.parentId).toBe(collection.id);
+    expect(JSON.stringify(imported.project.extensions)).toContain(spine.id);
+    expect(JSON.stringify(imported.project.extensions)).not.toContain('spine_source');
+    expect(imported.contextBuckets[0].documentId).toBe(scene.id);
+    expect(scene.extensions.margin_note).toEqual({ image: expect.stringMatching(/^\/api\/assets\/asset_/) });
+    expect(repository.projectAssets(imported.project.id)).toEqual([expect.objectContaining({ fileName: 'moon.png', byteSize: 3 })]);
+    expect(repository.documentRevisionCount(scene.id)).toBe(1);
+  });
+
+  it('deletes a complete project without recreating the default and protects the final project', () => {
+    const initial = repository.workspace();
+    const disposableProject = initial.projects[0];
+    repository.createAsset(disposableProject.id, 'old.png', 'image/png', Buffer.from([1]));
+    const survivor = repository.createProject('Survivor');
+    repository.createDocument({ projectId: survivor.id, title: 'Spine', role: 'spine' });
+    repository.createDocument({ projectId: survivor.id, title: 'Todos', role: 'todos' });
+
+    const remaining = repository.deleteProject(disposableProject.id);
+
+    expect(remaining.projects.map((project) => project.id)).toEqual([survivor.id]);
+    expect(remaining.documents.every((document) => document.projectId === survivor.id)).toBe(true);
+    expect(remaining.projects.some((project) => project.id === 'project_default')).toBe(false);
+    expect(() => repository.deleteProject(survivor.id)).toThrow('final project cannot be deleted');
+  });
+
   it('deletes ordinary documents but protects Spine and Todos', () => {
     const initial = repository.workspace();
     const collection = repository.createDocument({ projectId: initial.projects[0].id, title: 'Scenes', role: 'navigator_collection' });

@@ -13,7 +13,7 @@
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
   import type { AIContextSelection } from '$lib/ai/contracts';
-  import type { ProjectExportMode } from '$lib/workspace/project-transfer';
+  import type { ProjectExportMode, ProjectImportPreview } from '$lib/workspace/project-transfer';
   import type { StorageAnalysis } from '$lib/workspace/retention';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
@@ -52,10 +52,15 @@
   let revisionSuggestionId = $state<string | null>(null);
   let customRequestOpen = $state(false);
   let customRequest = $state('');
-  let projectDialogKind = $state<'create' | 'rename' | 'reset' | null>(null);
+  let projectDialogKind = $state<'create' | 'rename' | 'reset' | 'delete' | null>(null);
   let projectDialogValue = $state('');
   let projectDialogPending = $state(false);
   let projectExporting = $state(false);
+  let projectImportInput = $state<HTMLInputElement>();
+  let projectImportFile = $state<File | null>(null);
+  let projectImportPreview = $state<ProjectImportPreview | null>(null);
+  let projectImportOpen = $state(false);
+  let projectImportPending = $state(false);
   let storageAnalysisOpen = $state(false);
   let storageAnalysisLoading = $state(false);
   let storageAnalysis = $state<StorageAnalysis | null>(null);
@@ -739,6 +744,65 @@
     projectDialogValue = '';
   }
 
+  function deleteProject(): void {
+    const current = workspace.currentProject;
+    if (!current || workspace.projects.length <= 1) return;
+    projectDialogKind = 'delete';
+    projectDialogValue = '';
+  }
+
+  function chooseProjectImport(): void {
+    projectImportInput?.click();
+  }
+
+  async function inspectProjectImport(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0] ?? null;
+    input.value = '';
+    if (!file) return;
+    projectImportFile = file;
+    projectImportPreview = null;
+    projectImportOpen = true;
+    projectImportPending = true;
+    workspace.lastError = null;
+    try {
+      projectImportPreview = await workspace.inspectProjectImport(file);
+    } catch (error) {
+      projectImportOpen = false;
+      projectImportFile = null;
+      workspace.lastError = error instanceof Error ? `Project import failed: ${error.message}` : 'Project import failed.';
+    } finally {
+      projectImportPending = false;
+    }
+  }
+
+  function closeProjectImport(): void {
+    if (projectImportPending) return;
+    projectImportOpen = false;
+    projectImportFile = null;
+    projectImportPreview = null;
+  }
+
+  async function confirmProjectImport(): Promise<void> {
+    if (!projectImportFile || !projectImportPreview || projectImportPending) return;
+    projectImportPending = true;
+    workspace.lastError = null;
+    try {
+      enqueueScheduledDocumentSave('Background save before importing project');
+      editorReady = false;
+      selection = { from: 1, to: 1, text: '' };
+      const preview = await workspace.importProject(projectImportFile);
+      projectImportPending = false;
+      closeProjectImport();
+      refreshLiveSuggestions();
+      showNotice(`${preview.title} imported as a new project.`);
+    } catch (error) {
+      workspace.lastError = error instanceof Error ? `Project import failed: ${error.message}` : 'Project import failed.';
+    } finally {
+      projectImportPending = false;
+    }
+  }
+
   async function submitProjectDialog(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     const kind = projectDialogKind;
@@ -771,10 +835,11 @@
       documentSaveTimer = null;
       editorReady = false;
       selection = { from: 1, to: 1, text: '' };
-      await workspace.resetCurrentProject();
+      if (kind === 'delete') await workspace.deleteCurrentProject();
+      else await workspace.resetCurrentProject();
       projectDialogKind = null;
       refreshLiveSuggestions();
-      showNotice(`${current.title} started over. Its new Spine is open.`);
+      showNotice(kind === 'delete' ? `${current.title} was permanently deleted.` : `${current.title} started over. Its new Spine is open.`);
     } catch (error) {
       workspace.lastError = error instanceof Error ? error.message : `Could not ${kind === 'reset' ? 'start over' : `${kind} project`}`;
     } finally {
@@ -903,6 +968,8 @@
 
 <svelte:head><title>Margin Note — writing support</title><meta name="description" content="A meta-first creative writing support workbench." /></svelte:head>
 
+<input class="visually-hidden" bind:this={projectImportInput} type="file" accept=".mnote.zip,application/zip" aria-label="Import Margin Note project" onchange={inspectProjectImport} />
+
 <div class="app-shell">
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
@@ -918,7 +985,7 @@
 
   <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px`}>
     {#if navigatorVisible}
-      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onExportProject={exportProject} onStorageAnalysis={openStorageAnalysis} {projectExporting} /></div>
+      <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onDeleteProject={deleteProject} onImportProject={chooseProjectImport} onExportProject={exportProject} onStorageAnalysis={openStorageAnalysis} {projectExporting} /></div>
       <button
         type="button"
         class="navigator-resizer"
@@ -1321,15 +1388,41 @@
     <div class="modal-backdrop" role="presentation" onclick={() => { if (!projectDialogPending) projectDialogKind = null; }}>
       <div class="settings project-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="project-dialog-title" onclick={stopPropagation} onkeydown={stopPropagation}>
         <form onsubmit={submitProjectDialog}>
-          <header><div><small>Project</small><h2 id="project-dialog-title">{projectDialogKind === 'create' ? 'Create project' : projectDialogKind === 'rename' ? 'Rename project' : 'Start over'}</h2></div><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>×</button></header>
-          {#if projectDialogKind === 'reset'}
-            <p class="reset-warning">This permanently removes the current project's documents, Collections, Todo records and content, Inputs, formats, and context. The project will restart with empty Spine and Todos documents.</p>
+          <header><div><small>Project</small><h2 id="project-dialog-title">{projectDialogKind === 'create' ? 'Create project' : projectDialogKind === 'rename' ? 'Rename project' : projectDialogKind === 'delete' ? 'Delete project' : 'Start over'}</h2></div><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>×</button></header>
+          {#if projectDialogKind === 'reset' || projectDialogKind === 'delete'}
+            <p class="reset-warning">{projectDialogKind === 'delete' ? 'This permanently removes the complete project, including documents, revisions, Collections, Todos, Inputs, context, assets, ledger records, and this browser’s recovery mirrors. Export it first if it may be needed again.' : 'This permanently removes the current project’s documents, Collections, Todo records and content, Inputs, formats, and context. The project will restart with empty Spine and Todos documents.'}</p>
             <label>Type <strong>{workspace.currentProject?.title}</strong> to confirm<input aria-label="Project name confirmation" autocomplete="off" bind:value={projectDialogValue} /></label>
           {:else}
             <label>Project name<input aria-label="Project name" autocomplete="off" bind:value={projectDialogValue} /></label>
           {/if}
-          <footer><p>{projectDialogPending ? 'Updating the project…' : projectDialogKind === 'reset' ? 'This cannot be undone.' : 'The project name is separate from its fixed Spine and Todos.'}</p><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>Cancel</button><button class:danger={projectDialogKind === 'reset'} class="primary" disabled={projectDialogPending || !projectDialogValue.trim() || (projectDialogKind === 'reset' && projectDialogValue.trim() !== workspace.currentProject?.title)}>{projectDialogPending ? projectDialogKind === 'reset' ? 'Starting over…' : projectDialogKind === 'rename' ? 'Renaming…' : 'Creating…' : projectDialogKind === 'reset' ? 'Start over' : projectDialogKind === 'rename' ? 'Rename' : 'Create'}</button></footer>
+          <footer><p>{projectDialogPending ? 'Updating the project…' : projectDialogKind === 'reset' || projectDialogKind === 'delete' ? 'This cannot be undone.' : 'The project name is separate from its fixed Spine and Todos.'}</p><button type="button" disabled={projectDialogPending} onclick={() => projectDialogKind = null}>Cancel</button><button class:danger={projectDialogKind === 'reset' || projectDialogKind === 'delete'} class="primary" disabled={projectDialogPending || !projectDialogValue.trim() || ((projectDialogKind === 'reset' || projectDialogKind === 'delete') && projectDialogValue.trim() !== workspace.currentProject?.title)}>{projectDialogPending ? projectDialogKind === 'reset' ? 'Starting over…' : projectDialogKind === 'delete' ? 'Deleting…' : projectDialogKind === 'rename' ? 'Renaming…' : 'Creating…' : projectDialogKind === 'reset' ? 'Start over' : projectDialogKind === 'delete' ? 'Delete project' : projectDialogKind === 'rename' ? 'Rename' : 'Create'}</button></footer>
         </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if projectImportOpen}
+    <div class="modal-backdrop" role="presentation" onclick={closeProjectImport}>
+      <div class="settings project-import-settings" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="project-import-title" onclick={stopPropagation} onkeydown={stopPropagation}>
+        <header><div><small>Native project archive</small><h2 id="project-import-title">Import project</h2></div><button type="button" disabled={projectImportPending} onclick={closeProjectImport}>×</button></header>
+        {#if projectImportPending && !projectImportPreview}
+          <p class="storage-loading">Validating the archive without changing the workspace…</p>
+        {:else if projectImportPreview}
+          <p class="provider-intro"><strong>{projectImportPreview.title}</strong> will be created as a new project. Existing projects will not be replaced or merged.</p>
+          <div class="storage-summary">
+            <div><small>Documents</small><strong>{projectImportPreview.documents}</strong></div>
+            <div><small>Context items</small><strong>{projectImportPreview.contextBuckets}</strong></div>
+            <div><small>Assets</small><strong>{projectImportPreview.assets}</strong></div>
+            <div><small>Archive</small><strong>{readableBytes(projectImportPreview.archiveBytes)}</strong></div>
+          </div>
+          {#if projectImportPreview.warnings.length}
+            <div class="import-warnings" role="note">
+              {#each projectImportPreview.warnings as warning}<p>{warning}</p>{/each}
+            </div>
+          {/if}
+          <p class="provider-intro">Provider keys and global provider settings are not imported. Paid providers remain disabled until you choose otherwise.</p>
+        {/if}
+        <footer><p>{projectImportPending ? 'Importing and remapping the project…' : 'The archive is validated again when imported.'}</p><button type="button" disabled={projectImportPending} onclick={closeProjectImport}>Cancel</button><button type="button" class="primary" disabled={projectImportPending || !projectImportPreview} onclick={confirmProjectImport}>{projectImportPending ? 'Importing…' : 'Import as new project'}</button></footer>
       </div>
     </div>
   {/if}
@@ -1661,6 +1754,9 @@
   .project-settings form > header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 20px; }
   .project-settings .reset-warning { margin: 0; padding: 12px; border-left: 3px solid #9a4439; background: #9a44390d; color: var(--ink-soft); font: 11px/1.55 var(--font-ui); }
   .project-settings footer button.danger { border-color: #8d3329; background: #8d3329; }
+  .project-import-settings { width: min(760px, 100%); }
+  .import-warnings { display: grid; gap: 5px; margin: 0 0 18px; border-left: 3px solid #b58234; background: #b582340d; padding: 10px 12px; }
+  .import-warnings p { margin: 0; color: var(--ink-soft); font: 10px/1.45 var(--font-ui); }
   .storage-settings { width: min(980px, 100%); }
   .storage-loading { min-height: 160px; display: grid; place-items: center; color: var(--muted); font: 11px/1.5 var(--font-ui); }
   .storage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 18px 0; }

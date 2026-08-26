@@ -12,6 +12,9 @@ The AI request, context, provider, proposal, and adoption contract is specified 
 Svelte authority rule.
 The native project archive and safe inverse-import boundary are specified in
 [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
+The distinction between replaceable persistence backends and replaceable authoring
+systems—including a possible Windows/macOS Word adapter—is recorded in
+[DOCUMENT_SYSTEM_ADAPTERS.md](./DOCUMENT_SYSTEM_ADAPTERS.md).
 
 Margin Note remains an experiment. The architecture should keep the next experiment
 cheap while protecting the things a writer must be able to trust: the current work,
@@ -87,7 +90,10 @@ Remote or restored data
 
 `EditorShell` adapts the active rich-text editor. It reports commands, selections, and
 editor transactions in domain terms and renders the state it receives. ProseMirror and
-Yjs types stay inside their implementations.
+Yjs types stay inside their implementations. A future external document host such as
+Word would require a separate document-system adapter and an explicit authority
+decision; it must not be slipped into the persistence facade as an implementation
+detail.
 
 After initial hydration, pages and editor plugins must not independently mutate a
 second copy of manuscript, format, or input state. UI-only state such as hover,
@@ -604,11 +610,13 @@ ProseMirror nor supplies live application state. Provider transports likewise re
 untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal anchors,
 creates input IDs and targets, and decides whether a delayed result remains applicable.
 
-This implemented payload is now known to be unsuitable as the durable retention
-model: each save repeats growing AI run and Input arrays in manuscript revisions and
-in the opaque Yjs mirror value. Native import is paused while current manuscript
-state, meaningful versions, AI evidence, session recovery, and rebuildable projections
-are separated. See [RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
+The original durable payload repeated growing AI run and Input arrays in manuscript
+revisions and in the opaque Yjs mirror value. New operational-only saves no longer
+create manuscript revisions, and compact project export/import transfers current
+state without the repeated revision tables. Historical import and general garbage
+collection remain deferred while current manuscript state, meaningful versions, AI
+evidence, session recovery, and rebuildable projections are separated. See
+[RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
 
 The Navigator POC intentionally starts fresh. A new visible workspace contains the
 protected empty Spine, protected empty Todos document and view, and state needed to create Collections

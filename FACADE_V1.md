@@ -11,6 +11,8 @@ The narrower AI request and proposal boundary is defined in
 [AI_BOUNDARY.md](./AI_BOUNDARY.md).
 Native complete-project transfer is defined in
 [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
+Replaceable authoring systems are a neighbouring boundary, specified separately in
+[DOCUMENT_SYSTEM_ADAPTERS.md](./DOCUMENT_SYSTEM_ADAPTERS.md).
 
 ## Purpose
 
@@ -23,6 +25,11 @@ The façade exists so Svelte pages and domain state do not depend on:
 - filesystem or cloud APIs;
 - provider-specific generation requests;
 - export-library details.
+
+This is the workspace-persistence facade. It is deliberately distinct from the
+document-system adapter that translates selections, formatting, edits and external
+document events between Margin Note and ProseMirror or a future Word host. Both are
+ports around the same domain, but solve different replacement problems.
 
 The façade is not a repository-shaped source of domain truth. It hydrates the Svelte
 state and durably records transactions and snapshots produced by that state.
@@ -257,8 +264,9 @@ The remaining differences from this complete contract are:
 
 - it loads several collections rather than one normalised aggregate snapshot;
 - active history uses full in-memory snapshots and is not durable across reloads;
-- durable document versions repeat the complete AI run/Input extension arrays rather
-  than referencing normalised evidence;
+- legacy durable document versions repeat the complete AI run/Input extension arrays;
+  new operational-only saves no longer create writing revisions, but evidence is not
+  yet normalised into independent records;
 - the Yjs mirror replaces one opaque extension value and has no facade-level
   checkpoint/compaction lifecycle;
 - generation and persistence methods share one class;

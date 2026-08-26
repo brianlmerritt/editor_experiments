@@ -14,12 +14,14 @@
   import todosInstructions from '$lib/content/navigator/todos-instructions.html?raw';
   import archivedInstructions from '$lib/content/navigator/archived-unowned-instructions.html?raw';
 
-  let { onOpenNode, onSwitchProject, onCreateProject, onRenameProject, onResetProject, onExportProject, onStorageAnalysis, projectExporting }: {
+  let { onOpenNode, onSwitchProject, onCreateProject, onRenameProject, onResetProject, onDeleteProject, onImportProject, onExportProject, onStorageAnalysis, projectExporting }: {
     onOpenNode: (id: string, navigation?: 'push' | 'back' | 'forward') => Promise<void>;
     onSwitchProject: (id: string) => Promise<void>;
     onCreateProject: () => void;
     onRenameProject: () => void;
     onResetProject: () => void;
+    onDeleteProject: () => void;
+    onImportProject: () => void;
     onExportProject: (mode?: ProjectExportMode) => void;
     onStorageAnalysis: () => void;
     projectExporting: boolean;
@@ -558,11 +560,13 @@
         <summary aria-label="Project actions" title="Project actions">•••</summary>
         <div>
           <button type="button" onclick={(event) => runProjectAction(event, onCreateProject)}>Create project</button>
+          <button type="button" onclick={(event) => runProjectAction(event, onImportProject)}>Import project…</button>
           <button type="button" onclick={(event) => runProjectAction(event, onRenameProject)}>Rename project</button>
           <button type="button" disabled={projectExporting} aria-busy={projectExporting} onclick={(event) => runProjectAction(event, () => onExportProject('compact'))}>{projectExporting ? 'Preparing export…' : 'Export project'}</button>
           <button type="button" disabled={projectExporting} title="Includes every autosave and audit revision; may be extremely large" onclick={(event) => runProjectAction(event, () => onExportProject('forensic'))}>Export forensic archive</button>
           <button type="button" onclick={(event) => runProjectAction(event, onStorageAnalysis)}>Storage report</button>
           <button type="button" class="danger" onclick={(event) => runProjectAction(event, onResetProject)}>Start over</button>
+          <button type="button" class="danger" disabled={workspace.projects.length <= 1} title={workspace.projects.length <= 1 ? 'Create or import another project before deleting this one' : 'Permanently delete this complete project'} onclick={(event) => runProjectAction(event, onDeleteProject)}>Delete project</button>
         </div>
       </details>
     </div>

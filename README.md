@@ -8,6 +8,9 @@ the event ledger. None of those adapters independently owns live manuscript stat
 
 The domain direction is described in [ARCHITECTURE.md](./ARCHITECTURE.md), and the
 deliberately small persistence boundary in [FACADE_V1.md](./FACADE_V1.md).
+The future adapter boundary between the project domain and document systems such as
+ProseMirror or desktop Word is recorded in
+[DOCUMENT_SYSTEM_ADAPTERS.md](./DOCUMENT_SYSTEM_ADAPTERS.md).
 Native complete-project `.mnote.zip` export and the validated inverse-import contract
 are specified in [PROJECT_TRANSFER_V1.md](./PROJECT_TRANSFER_V1.md).
 The Phase 1 AI request, Writing Context, provider, proposal, and adoption contract is
@@ -73,7 +76,11 @@ For a quick tour:
     project** to download a compact `.mnote.zip` archive. This includes current
     structure, Inputs/runs/provenance/usage, context, forks, and assets once, but never
     API keys or provider profiles. **Export forensic archive** separately includes all
-    immutable revisions. Document-menu **Export Markdown** remains a publishing export.
+    immutable revisions. Use **Import project…** to validate a compact archive and
+    create it as a separate project. **Delete project** removes an unwanted complete
+    project and this browser’s known recovery mirrors after typed confirmation; the
+    final project is protected. Document-menu **Export Markdown** remains a publishing
+    export.
 
 ## Change-aware workspace proof of concept
 

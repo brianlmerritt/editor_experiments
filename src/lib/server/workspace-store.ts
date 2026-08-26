@@ -165,6 +165,19 @@ export interface SaveContextBucketInput {
   reason?: string;
 }
 
+export interface ImportProjectInput {
+  project: WorkspaceProject;
+  documents: WorkspaceDocument[];
+  contextBuckets: ContextBucket[];
+  assets: Array<{ asset: WorkspaceAsset; content: Buffer }>;
+}
+
+export interface ImportedProjectRecords {
+  project: WorkspaceProject;
+  documents: WorkspaceDocument[];
+  contextBuckets: ContextBucket[];
+}
+
 function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 }
@@ -346,9 +359,15 @@ export class WorkspaceRepository {
 
   ensureDefaults(_legacyBranches: Branch[] = []): void {
     const ensure = this.database.transaction(() => {
-      this.database.prepare(`
-        INSERT OR IGNORE INTO workspace_projects (id, title) VALUES (?, ?)
-      `).run(defaultProjectId, 'My writing project');
+      const projectCount = (this.database.prepare('SELECT COUNT(*) count FROM workspace_projects').get() as { count: number }).count;
+      if (!projectCount) {
+        this.database.prepare(`
+          INSERT INTO workspace_projects (id, title) VALUES (?, ?)
+        `).run(defaultProjectId, 'My writing project');
+      }
+
+      const hasDefault = this.database.prepare('SELECT 1 FROM workspace_projects WHERE id = ?').get(defaultProjectId);
+      if (!hasDefault) return;
 
       const hasSpine = this.database.prepare("SELECT 1 FROM workspace_documents WHERE project_id = ? AND role = 'spine' LIMIT 1").get(defaultProjectId);
       if (!hasSpine) {
@@ -385,6 +404,142 @@ export class WorkspaceRepository {
     const projectId = id('project');
     this.database.prepare('INSERT INTO workspace_projects (id, title) VALUES (?, ?)').run(projectId, title.trim());
     return projectFromRow(this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow);
+  }
+
+  importProject(input: ImportProjectInput): ImportedProjectRecords {
+    if (!input.project.title.trim()) throw new Error('Imported project title is required');
+    const sourceIdentities = [
+      input.project.id,
+      ...input.documents.map((document) => document.id),
+      ...input.contextBuckets.map((bucket) => bucket.id),
+      ...input.assets.map(({ asset }) => asset.id)
+    ];
+    if (new Set(sourceIdentities).size !== sourceIdentities.length) throw new Error('Imported project identities must be unique');
+    const projectId = id('project');
+    const documentIds = new Map(input.documents.map((document) => [document.id, id('document')]));
+    const contextIds = new Map(input.contextBuckets.map((bucket) => [bucket.id, id('context')]));
+    const assetIds = new Map(input.assets.map(({ asset }) => [asset.id, id('asset')]));
+    if (input.documents.some((document) => document.projectId !== input.project.id || document.parentId && !documentIds.has(document.parentId))) {
+      throw new Error('Imported document graph contains an unknown project or parent');
+    }
+    if (input.contextBuckets.some((bucket) => bucket.projectId !== input.project.id || bucket.documentId && !documentIds.has(bucket.documentId))) {
+      throw new Error('Imported context contains an unknown project or document');
+    }
+    if (input.assets.some(({ asset }) => asset.projectId !== input.project.id)) throw new Error('Imported asset belongs to another project');
+    const identityMap = new Map<string, string>([
+      [input.project.id, projectId],
+      ...documentIds,
+      ...contextIds,
+      ...assetIds
+    ]);
+    const remapString = (value: string): string => {
+      const exact = identityMap.get(value);
+      if (exact) return exact;
+      let next = value;
+      for (const [source, target] of [...identityMap].sort((left, right) => right[0].length - left[0].length)) {
+        if (next.includes(source)) next = next.replaceAll(source, target);
+        const encoded = encodeURIComponent(source);
+        if (encoded !== source && next.includes(encoded)) next = next.replaceAll(encoded, encodeURIComponent(target));
+      }
+      return next;
+    };
+    const remapJson = (value: JsonValue): JsonValue => {
+      if (typeof value === 'string') return remapString(value);
+      if (Array.isArray(value)) return value.map(remapJson);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, remapJson(child)]));
+    };
+    const importedAt = new Date().toISOString();
+    const insert = this.database.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO workspace_projects (id, title, extensions, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(projectId, input.project.title.trim(), JSON.stringify(remapJson(input.project.extensions)), importedAt);
+      for (const document of input.documents) {
+        const nextId = documentIds.get(document.id);
+        if (!nextId) throw new Error('Imported document identity could not be remapped');
+        const nextExtensions = remapJson(document.extensions) as ExtensionData;
+        this.database.prepare(`
+          INSERT INTO workspace_documents
+            (id, project_id, parent_id, title, sort_order, revision, role, content, extensions, updated_at)
+          VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        `).run(
+          nextId,
+          projectId,
+          document.parentId ? documentIds.get(document.parentId) ?? null : null,
+          document.title,
+          document.order,
+          document.role ?? null,
+          document.content,
+          JSON.stringify(nextExtensions),
+          importedAt
+        );
+        this.insertDocumentRevision(nextId, 1, document.title, document.content, nextExtensions, 'project-import', 'Imported project archive');
+      }
+      for (const bucket of input.contextBuckets) {
+        const nextId = contextIds.get(bucket.id);
+        if (!nextId) throw new Error('Imported context identity could not be remapped');
+        this.database.prepare(`
+          INSERT INTO workspace_context_buckets
+            (id, project_id, document_id, scope, title, role, content, revision, extensions, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        `).run(
+          nextId,
+          projectId,
+          bucket.documentId ? documentIds.get(bucket.documentId) ?? null : null,
+          bucket.scope,
+          bucket.title,
+          bucket.role ?? null,
+          bucket.content,
+          JSON.stringify(remapJson(bucket.extensions)),
+          importedAt
+        );
+        this.insertBucketRevision(nextId, 1, bucket.title, bucket.role, bucket.content, 'project-import', 'Imported project archive');
+      }
+      for (const { asset, content } of input.assets) {
+        const nextId = assetIds.get(asset.id);
+        if (!nextId) throw new Error('Imported asset identity could not be remapped');
+        this.database.prepare(`
+          INSERT INTO workspace_assets (id, project_id, file_name, mime_type, byte_size, content, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(nextId, projectId, asset.fileName, asset.mimeType, content.byteLength, content, importedAt);
+      }
+    });
+    insert();
+    const workspace = this.workspace();
+    return {
+      project: workspace.projects.find((project) => project.id === projectId)!,
+      documents: workspace.documents.filter((document) => document.projectId === projectId),
+      contextBuckets: workspace.contextBuckets.filter((bucket) => bucket.projectId === projectId)
+    };
+  }
+
+  deleteProject(projectId: string): PersistentWorkspace {
+    const current = this.database.prepare('SELECT 1 FROM workspace_projects WHERE id = ?').get(projectId);
+    if (!current) throw new Error('Project not found');
+    const projectCount = (this.database.prepare('SELECT COUNT(*) count FROM workspace_projects').get() as { count: number }).count;
+    if (projectCount <= 1) throw new Error('The final project cannot be deleted; create or import another project first');
+    const remove = this.database.transaction(() => {
+      const documentIds = (this.database.prepare('SELECT id FROM workspace_documents WHERE project_id = ?').all(projectId) as { id: string }[]).map((row) => row.id);
+      if (documentIds.length && this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get()) {
+        const removeEvent = this.database.prepare('DELETE FROM events WHERE branch_id = ?');
+        for (const documentId of documentIds) removeEvent.run(documentId);
+      }
+      this.database.prepare(`
+        DELETE FROM workspace_context_bucket_revisions
+        WHERE bucket_id IN (SELECT id FROM workspace_context_buckets WHERE project_id = ?)
+      `).run(projectId);
+      this.database.prepare('DELETE FROM workspace_context_buckets WHERE project_id = ?').run(projectId);
+      this.database.prepare('DELETE FROM workspace_assets WHERE project_id = ?').run(projectId);
+      this.database.prepare(`
+        DELETE FROM workspace_document_revisions
+        WHERE document_id IN (SELECT id FROM workspace_documents WHERE project_id = ?)
+      `).run(projectId);
+      this.database.prepare('DELETE FROM workspace_documents WHERE project_id = ?').run(projectId);
+      this.database.prepare('DELETE FROM workspace_projects WHERE id = ?').run(projectId);
+    });
+    remove();
+    return this.workspace();
   }
 
   saveProject(projectId: string, title: string, nextExtensions?: ExtensionData): WorkspaceProject {

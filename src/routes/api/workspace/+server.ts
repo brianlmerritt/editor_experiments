@@ -55,6 +55,9 @@ export const POST: RequestHandler = async ({ request }) => {
       case 'reset_project':
         if (typeof body.id !== 'string') throw new Error('Project ID is required');
         return json({ workspace: workspaceRepository.resetProject(body.id) });
+      case 'delete_project':
+        if (typeof body.id !== 'string') throw new Error('Project ID is required');
+        return json({ workspace: workspaceRepository.deleteProject(body.id) });
       case 'create_document':
       {
         const input = inputObject(body);

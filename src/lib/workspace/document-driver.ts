@@ -1,4 +1,4 @@
-import { IndexeddbPersistence } from 'y-indexeddb';
+import { clearDocument, IndexeddbPersistence } from 'y-indexeddb';
 import * as Y from 'yjs';
 import type { ExtensionData } from './model';
 
@@ -17,6 +17,11 @@ export interface DocumentMirrorIdentity {
   documentTitle: string;
 }
 
+export interface DocumentMirrorTarget {
+  documentId: string;
+  mirrorIdentity: DocumentMirrorIdentity;
+}
+
 export interface WorkspaceCommit extends DocumentMirrorSnapshot {
   transactionId: string;
   sessionId: string;
@@ -26,6 +31,7 @@ export interface WorkspaceCommit extends DocumentMirrorSnapshot {
 export interface DocumentDriver {
   hydrate(snapshot: DocumentMirrorSnapshot): Promise<void>;
   commit(transaction: WorkspaceCommit): Promise<void>;
+  remove?(documents: DocumentMirrorTarget[]): Promise<void>;
 }
 
 export class NullDocumentDriver implements DocumentDriver {
@@ -69,6 +75,20 @@ export class YjsDocumentDriver implements DocumentDriver {
       workspaceRevision: Number(state.get('workspaceRevision') ?? 0),
       durableRevision: Number(state.get('durableRevision') ?? 0)
     };
+  }
+
+  async remove(documents: DocumentMirrorTarget[]): Promise<void> {
+    for (const document of documents) {
+      const openHandle = this.handles.get(document.documentId);
+      if (openHandle) {
+        const handle = await openHandle;
+        if (handle.persistence) await handle.persistence.clearData();
+        this.handles.delete(document.documentId);
+      } else if (this.persist) {
+        await clearDocument(documentMirrorDatabaseName(document.documentId, document.mirrorIdentity));
+      }
+      if (this.persist) await clearDocument(documentMirrorDatabaseName(document.documentId));
+    }
   }
 
   private open(documentId: string, identity?: DocumentMirrorIdentity): Promise<YjsHandle> {

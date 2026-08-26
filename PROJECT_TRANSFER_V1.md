@@ -7,8 +7,10 @@ Markdown remains a publishing/interchange export; it is not a project backup.
 
 The first lossless exporter exposed a serious retention defect: document revisions
 repeat growing AI run and Input arrays, producing archives hundreds of megabytes in
-size and more than a gigabyte when expanded. Inverse import is paused until history is
-normalised and compacted. The measurements, required roots, and migration order are in
+size and more than a gigabyte when expanded. Compact current-state import is now
+implemented; importing the exhaustive forensic history remains deliberately
+unsupported until that history is normalised and compacted. The measurements,
+required roots, and migration order are in
 [RETENTION_AND_COMPACTION.md](./RETENTION_AND_COMPACTION.md).
 
 The normal **compact** export is read-only and includes each current record once. It
@@ -65,8 +67,10 @@ current records without their repeated histories.
 Asset metadata and bytes remain separate.
 
 The current model represents forks as stable documents with parent lineage. Export
-preserves those IDs and links exactly. Import v1 will remap IDs as one coherent graph
-before anything is persisted.
+preserves those IDs and links exactly. Import v1 remaps database-global project,
+document, context, and asset IDs as one coherent graph before anything is persisted.
+Project-scoped evidence IDs remain stable while references to remapped records are
+updated.
 
 ## Included
 
@@ -103,10 +107,9 @@ An export may capture a queued or running AI request. The manifest reports how m
 Import will retain its evidence but convert it to interrupted work requiring an
 explicit retry; it will never resume a network request automatically.
 
-## Paused inverse import
+## Safe inverse import
 
-Import will resume only after the retention acceptance criteria are met. Version 1
-will then:
+Version 1 compact import:
 
 1. open and inspect the ZIP without mutating the workspace;
 2. validate the manifest, supported version, required files, path safety, record
@@ -114,8 +117,8 @@ will then:
 3. show a preview with title, document/revision/context/asset counts, active-run
    warning, and any recoverable omissions;
 4. always create a new project rather than overwrite or merge an existing one;
-5. remap project, document, revision, context, relationship, Todo, Input, run, and
-   asset IDs consistently;
+5. remap project, document, context, and asset IDs consistently throughout structured
+   project state;
 6. leave paid providers disabled and turn captured active runs into interrupted runs;
 7. adopt the validated candidate through one Svelte workspace operation, then persist
    it through the facade.
@@ -130,4 +133,12 @@ project** for the compact archive. The browser downloads `<project-name>.mnote.z
 Choose **Export forensic archive** only when every autosave/audit revision is required;
 the browser warns before attempting `<project-name>-forensic.mnote.zip`. **Export
 Markdown** remains in the current document menu and exports only that writing
-document.
+document. Choose **Import project…** and select a compact `.mnote.zip` file to inspect
+its contents and warnings before creating it as a new project. Forensic archives are
+not accepted by import.
+
+**Delete project** permanently removes the selected project’s current records,
+revision and context history, assets, project-scoped ledger rows, and recovery mirrors
+known to the current browser. At least one project must remain. Deleted SQLite pages
+become reusable database space but the file is not physically shrunk by an implicit,
+blocking `VACUUM`.
