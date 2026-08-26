@@ -1,6 +1,7 @@
 node_modules
 .env
-.svelte-kit
+.svelte-kit/*
+!.svelte-kit/tsconfig.json
 build
 .vite
 data/*.sqlite
