@@ -73,8 +73,10 @@ workspace layout. The next Navigator proof of concept is specified in
     owns in-flight run targets and transforms them through each edit. A preceding edit
     moves a run target; an intersecting edit discards it. Providers must return exact
     `source_text`; uniquely identifiable wrong offsets can be repaired at the transport
-    boundary, while missing or ambiguous anchors are rejected. Svelte verifies the
-    original and current excerpts before adopting or applying a proposal.
+    boundary. A selection-scoped revision uses the already captured selection as its
+    authoritative target. Missing or ambiguous review anchors remain visible as
+    unanchored Inputs and cannot edit prose until the writer explicitly attaches one
+    to a current selection. Svelte verifies the current excerpt before applying it.
 13. **Choosing an alternative required a second tick.** Clicking an alternative now
     applies that exact alternative immediately. The redundant acceptance tick has been
     removed; accept-and-edit remains available as a separate action.
@@ -112,7 +114,20 @@ workspace layout. The next Navigator proof of concept is specified in
     dispatched by itself and the provider reasonably reported that no prose followed
     it. Craft-pass range selection now excludes structural-only headings and scene
     dividers while leaving them unchanged in the Svelte-owned manuscript.
-20. **Custom-request example looked entered but was only a placeholder.** The field now
+
+20. **Usable revisions exhausted retries because the provider did not repeat an
+    anchor already selected by the writer.** Revision-option and alternative-draft
+    actions now inherit the captured selection. Document-wide replacements and review
+    findings with absent or ambiguous quotations become visible unanchored Inputs.
+    Their **Attach to selection** action is explicit, validates current Svelte text,
+    and is undoable. The run manager can also recover retained failed responses through
+    current local parsing without a paid provider resubmission. Writer-captured request
+    scopes may legitimately include boundary whitespace, unlike provider-chosen exact
+    quotations. New raw responses retain up to 250,000 characters so normal long-form
+    action output is not destroyed by the previous 6,000-character diagnostic cutoff.
+    Legacy cut-off JSON recovers only fully balanced option/finding objects and drops
+    the incomplete trailing object rather than repairing it into misleading prose.
+21. **Custom-request example looked entered but was only a placeholder.** The field now
     uses a neutral placeholder and presents the example as an explicit **Use example**
     action. Clicking it fills the real request value, enables submission, and allows
     Enter or **Suggest revisions** to dispatch without retyping the sentence.

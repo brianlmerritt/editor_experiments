@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationRequest, TaskPrompt } from '$lib/domain';
-import { configureProviderProfile, configureSuggestionProvider, generateSuggestions, parseProviderActionOutput, parseProviderSuggestions, resolveProviderRange, suggestionSourceAvailability } from './suggesters';
+import { configureProviderProfile, configureSuggestionProvider, generateSuggestions, parseProviderActionOutput, parseProviderSuggestions, recoverSuggestions, resolveProviderRange, suggestionSourceAvailability } from './suggesters';
 
 const providerRuntime = globalThis as typeof globalThis & { __marginNoteProviderSettings?: unknown };
 
@@ -291,6 +291,22 @@ No substantive issues detected.` } }]
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('retains provider output beyond the former 6000-character recovery cutoff', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const longInvalidOutput = 'not-json-'.repeat(1000);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: longInvalidOutput } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const providerRequest = request('noticed', { id: 'heighten', name: 'Heighten', version: 1, instruction: 'Heighten it.' });
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates.openrouter = 'visible';
+
+    const result = await generateSuggestions(providerRequest);
+
+    expect(result.errors.at(-1)?.rawOutput).toHaveLength(longInvalidOutput.length);
+    expect(longInvalidOutput.length).toBeGreaterThan(6000);
+  });
+
   it('uses the Anthropic Messages protocol for an Anthropic profile', async () => {
     configureProviderProfile({
       id: 'anthropic-test', name: 'Anthropic test', protocol: 'anthropic',
@@ -416,6 +432,128 @@ No substantive issues detected.` } }]
     const [result] = parseProviderActionOutput('```json\n{"options":[{"text":"Mara kept her eyes on the clock.","rationale":"Closer"},{"text":"The clock held Mara still.","rationale":"More figurative"},],}\n```', actionRequest);
     expect(result.variants).toEqual(['Mara kept her eyes on the clock.', 'The clock held Mara still.']);
     expect(result.comment).toContain('Closer');
+  });
+
+  it('uses the captured selection as the authoritative target for revision options', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ options: [
+        { text: 'Mara kept her eyes on the clock.', rationale: 'Closer' },
+        { text: 'The clock held Mara still.', rationale: 'More figurative' }
+      ] }) } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'revise', name: 'Revise', version: 1, instruction: 'Revise it.' }),
+      responseContract: 'revision_options' as const,
+      targetScope: 'selection' as const,
+      optionCount: 2
+    };
+    actionRequest.sourceStates['fake-sentinel'] = 'off';
+    actionRequest.sourceStates.openrouter = 'visible';
+
+    const result = await generateSuggestions(actionRequest);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual([]);
+    expect(result.proposals).toEqual([expect.objectContaining({
+      sourceText: 'Mara watched the clock.',
+      anchorStatus: 'request_scope',
+      variants: ['Mara kept her eyes on the clock.', 'The clock held Mara still.']
+    })]);
+  });
+
+  it('keeps an unusable review anchor as an unanchored Input without retrying', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ findings: [{
+        from: 0, to: 5, source_text: 'Peter', comment: 'Clarify whose perception governs this moment.',
+        correction: 'Mara saw Peter', confidence: 0.8
+      }] }) } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'review', name: 'Review', version: 1, instruction: 'Review it.' }),
+      responseContract: 'annotated_findings' as const,
+      targetScope: 'document' as const,
+      inputCategory: 'pov' as const
+    };
+    actionRequest.sourceStates['fake-sentinel'] = 'off';
+    actionRequest.sourceStates.openrouter = 'visible';
+
+    const result = await generateSuggestions(actionRequest);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual([]);
+    expect(result.proposals).toEqual([expect.objectContaining({
+      sourceText: 'Mara watched the clock.',
+      anchorStatus: 'unanchored',
+      variants: ['Mara saw Peter']
+    })]);
+  });
+
+  it('does not allow a document-wide revision response to become an automatic replacement target', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ options: [{ text: 'A rewritten document.', rationale: 'Tighter' }] }) } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'revise', name: 'Revise', version: 1, instruction: 'Revise it.' }),
+      responseContract: 'revision_options' as const,
+      targetScope: 'document' as const
+    };
+    actionRequest.sourceStates['fake-sentinel'] = 'off';
+    actionRequest.sourceStates.openrouter = 'visible';
+
+    const result = await generateSuggestions(actionRequest);
+
+    expect(result.proposals[0]).toMatchObject({ anchorStatus: 'unanchored', sourceText: 'Mara watched the clock.' });
+  });
+
+  it('replays retained anchor failures locally without calling a provider', () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'review', name: 'Review', version: 1, instruction: 'Review it.' }),
+      responseContract: 'annotated_findings' as const,
+      targetScope: 'document' as const,
+      inputCategory: 'distance' as const
+    };
+    const recovered = recoverSuggestions(actionRequest, [{
+      source: 'openrouter',
+      kind: 'provider_output',
+      classification: 'output_invalid',
+      recoveryAction: 'human',
+      recovered: true,
+      outcome: 'rejected',
+      message: 'Provider suggestions did not contain an exact, unambiguous source_text anchor.',
+      rawOutput: '{"findings":[{"from":0,"to":5,"source_text":"Peter","comment":"Clarify the perception.","correction":"Mara noticed Peter."}]}'
+    }]);
+
+    expect(recovered.proposals).toEqual([expect.objectContaining({ anchorStatus: 'unanchored', variants: ['Mara noticed Peter.'] })]);
+    expect(recovered.errors).toEqual([expect.objectContaining({ recovered: true, outcome: 'repaired_locally', localReplay: true })]);
+    expect(recovered.usage).toEqual([]);
+  });
+
+  it('salvages only complete revision options from a legacy 6000-character cutoff', () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const actionRequest = {
+      ...request('Mara watched the clock.', { id: 'revise', name: 'Revise', version: 1, instruction: 'Revise it.' }),
+      responseContract: 'revision_options' as const,
+      targetScope: 'selection' as const,
+      optionCount: 3
+    };
+    const complete = `${JSON.stringify({ text: 'Mara counted each tick.', rationale: 'Closer' })},${JSON.stringify({ text: 'The clock held Mara still.', rationale: 'More figurative' })}`;
+    const opening = `{"options":[${complete},{"text":"`;
+    const legacyCutoff = opening + 'unfinished'.repeat(Math.ceil((6000 - opening.length) / 10)).slice(0, 6000 - opening.length);
+    expect(legacyCutoff).toHaveLength(6000);
+
+    const recovered = recoverSuggestions(actionRequest, [{
+      source: 'openrouter', kind: 'provider_output', recovered: false, outcome: 'rejected',
+      message: 'Legacy cutoff', rawOutput: legacyCutoff
+    }]);
+
+    expect(recovered.proposals[0].variants).toEqual(['Mara counted each tick.', 'The clock held Mara still.']);
+    expect(recovered.errors[0]).toMatchObject({ recovered: true, localReplay: true });
   });
 
   it('validates exact finding anchors and optional corrections', () => {

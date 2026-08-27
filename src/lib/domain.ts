@@ -8,6 +8,7 @@ export type Category = (typeof categories)[number];
 export const suggestionStates = ['pending', 'accepted', 'rejected', 'cleared', 'superseded', 'stale', 'hidden', 'target_changed', 'target_removed'] as const;
 export type SuggestionState = (typeof suggestionStates)[number];
 export type SuggestionType = 'replacement' | 'insertion' | 'annotation';
+export type InputAnchorStatus = 'exact' | 'request_scope' | 'unanchored';
 export type SourceKind = 'local' | 'ai';
 export type SourceState = 'visible' | 'invisible' | 'off';
 export type WritingMode = 'drafting' | 'revising';
@@ -59,6 +60,7 @@ export interface InputProposal {
   from: number;
   to: number;
   sourceText: string;
+  anchorStatus?: InputAnchorStatus;
   type: SuggestionType;
   category: Category;
   comment: string;
@@ -99,6 +101,7 @@ export interface InputError {
   model?: string;
   protocol?: ProviderProtocol;
   latencyMs?: number;
+  localReplay?: boolean;
 }
 
 export interface Provenance {
@@ -137,6 +140,7 @@ export interface InputRecord {
   behaviourId: string;
   events: InputEvent[];
   anchor: RelativeAnchor;
+  anchorStatus?: InputAnchorStatus;
   type: SuggestionType;
   payload: { text?: string; comment: string };
   category: Category;
@@ -224,6 +228,7 @@ export interface GenerationRequest {
   inputCategory?: Category;
   maxOutputTokens?: number;
   temperature?: number;
+  targetScope?: 'selection' | 'document';
   context?: Array<{
     title: string;
     role?: string;

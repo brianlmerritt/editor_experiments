@@ -260,7 +260,11 @@ interface AIInteractionRequest {
 `CapturedTarget` includes stable domain identity, revision, exact source text where
 applicable, and the original ContentTarget. Provider-facing offsets are relative to
 that captured target, never guessed against whatever text exists when the reply
-arrives.
+arrives. For a selection-scoped revision, that captured selection is authoritative:
+the provider is not required to rediscover or repeat its anchor. A document review
+whose returned quotation is absent or ambiguous survives as an **unanchored Input**.
+It cannot alter prose until the writer explicitly selects text and attaches the Input
+to that selection through an undoable Svelte transaction.
 
 ## Prompt and provider boundary
 
@@ -368,20 +372,34 @@ The service and workspace apply distinct checks:
 
 1. **Transport** records HTTP/provider success or failure and usage.
 2. **Repair** attempts bounded local repair of common structured-output damage.
-3. **Schema validation** checks the declared output contract and exact ranges/enums.
+3. **Schema validation** checks the declared output contract, ranges, and enums.
 4. **Corrective retry** may occur for an output-only failure, with the validation
    error stated precisely; explicit truncation may increase the output allowance, and
    selected transient transport failures may receive a bounded transport retry.
 5. **Normalisation** removes provider envelope differences without inventing missing
    domain facts.
-6. **Workspace validation** verifies target identity, revisions, exact source text,
-   stable boundaries, allowed proposal kind, and current applicability.
+6. **Workspace validation** verifies target identity, revisions, stable boundaries,
+   allowed proposal kind, and current applicability. Exact returned quotations become
+   exact anchors; missing or ambiguous review quotations become non-applicable,
+   unanchored Inputs rather than fabricated ranges or output failures.
 7. **Consolidation** removes only literal or conservatively equivalent duplicates.
 8. **Adoption** creates Svelte-owned Inputs and persists their run evidence.
 
 Every malformed response is recorded in run diagnostics and logged to the browser
 console with attempt and recovery outcome. A recovered run may create Inputs; an
 exhausted run remains inspectable but creates no fabricated result.
+
+The run manager can replay retained failed provider text through the current parser,
+schema, and anchoring rules. This recovery performs no provider request and records
+that fact. It is particularly useful for earlier runs whose otherwise valid results
+were rejected solely because an anchor could not be resolved.
+
+Provider output retained for new runs uses a 250,000-character forensic ceiling rather
+than the former 6,000-character display-oriented cutoff. This keeps a 15,000-token
+action response recoverable while still bounding pathological output. Older responses
+already cut at 6,000 characters cannot recover material that was never stored, but
+local replay salvages fully balanced revision options or findings that precede the
+cutoff and discards the incomplete trailing item.
 
 The implemented craft path permits at most three attempts per provider. Authentication
 and configuration failures stop for reconfiguration. Manual retry is a separate run,
@@ -504,6 +522,8 @@ The first boundary slice is now represented in code:
 - the provider and run managers expose provider health state, participating sources,
   retained diagnostics and attempts, and a new-run retry of failed sources against an
   unchanged target;
+- retained output can instead be replayed locally from the run manager; no provider is
+  called, no usage is charged, and the original diagnostics remain in the run;
 - startup reconciliation converts orphaned queued/running work into an explicit
   interrupted failure while preserving completed Inputs and offering retry or
   complete-without-this-passage actions.
@@ -528,6 +548,10 @@ The first boundary slice is now represented in code:
   rather than a hidden per-call limit;
 - provider-returned alternatives still become Inputs. They do not directly edit the
   manuscript, Material, relationships, Todos, or Spine.
+- selection-scoped revision alternatives use the captured selection as their source
+  of truth. Ambiguous document-level changes and unlocatable findings remain visible
+  as unanchored Inputs; selecting prose and choosing **Attach to selection** is required
+  before any replacement can be accepted.
 
 This is the basement, not the complete AI system. Whole-document alternative drafts
 still need a fork/compare workflow before they should become a default action target.

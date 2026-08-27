@@ -3,16 +3,19 @@
 
   interface Props {
     suggestion: Suggestion;
+    label?: string;
     active?: boolean;
     selectedVariant?: number;
     revisionBusy?: boolean;
     revisionAvailable?: boolean;
+    canBindSelection?: boolean;
     onActivate?: () => void;
     onSelectVariant?: (index: number) => void;
     onAccept?: (index: number) => void;
     onReject?: (viaDrag: boolean) => void;
     onPreview?: (text: string | null) => void;
     onSuggestRevision?: () => void;
+    onBindSelection?: () => void;
     onSourceHover?: () => void;
     onMove?: (direction: -1 | 1) => void;
     onOrderPointerDown?: (event: PointerEvent) => void;
@@ -20,16 +23,19 @@
 
   let {
     suggestion,
+    label,
     active = false,
     selectedVariant = 0,
     revisionBusy = false,
     revisionAvailable = true,
+    canBindSelection = false,
     onActivate = () => {},
     onSelectVariant = () => {},
     onAccept = () => {},
     onReject = () => {},
     onPreview = () => {},
     onSuggestRevision = () => {},
+    onBindSelection = () => {},
     onSourceHover = () => {},
     onMove = () => {},
     onOrderPointerDown = () => {}
@@ -43,6 +49,8 @@
 
   let variants = $derived(suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : []);
   let meta = $derived(categoryMeta[suggestion.category]);
+  let displayLabel = $derived(label?.trim() || meta.label);
+  let unanchored = $derived(suggestion.anchorStatus === 'unanchored');
 
   function pointerDown(event: PointerEvent): void {
     if ((event.target as HTMLElement).closest('button')) return;
@@ -91,10 +99,16 @@
   onpointercancel={pointerUp}
 >
   <header>
-    <span class="category"><span class="icon">{meta.icon}</span>{meta.label}</span>
+    <span class="category"><span class="icon">{meta.icon}</span>{displayLabel}</span>
     <span class="confidence">{Math.round(suggestion.confidence * 100)}%</span>
   </header>
   <p class="observation">{suggestion.payload.comment}</p>
+  {#if unanchored}
+    <div class="anchor-warning">
+      <span>This review could not identify one exact passage. Select the text it should apply to.</span>
+      <button type="button" disabled={!canBindSelection} onclick={stopClick(onBindSelection)}>{canBindSelection ? 'Attach to selection' : 'Select text first'}</button>
+    </div>
+  {/if}
   {#if variants.length}
     <div class="variants" aria-label="Replacement variants">
       {#each variants as variant, index}
@@ -102,7 +116,7 @@
           type="button"
           class:selected={selectedVariant === index}
           title="Apply this alternative"
-          onclick={stopClick(() => { onSelectVariant(index); onAccept(index); })}
+          onclick={stopClick(() => { onSelectVariant(index); unanchored ? onBindSelection() : onAccept(index); })}
           onmouseenter={() => onPreview(variant.text)}
           onmouseleave={() => onPreview(null)}
         >
@@ -124,7 +138,7 @@
     <span class="decisions">
       <button class="reject" type="button" title="Reject (X)" onclick={stopClick(() => onReject(false))}>×</button>
       {#if variants.length}
-        <button class="accept" type="button" title="Accept selected replacement (Enter)" onclick={stopClick(() => onAccept(selectedVariant))}>✓</button>
+        <button class="accept" type="button" disabled={unanchored} title={unanchored ? 'Attach this Input to selected text before accepting it' : 'Accept selected replacement (Enter)'} onclick={stopClick(() => onAccept(selectedVariant))}>✓</button>
       {:else}
         <button class="suggest-revision" type="button" disabled={revisionBusy} onclick={stopClick(onSuggestRevision)}>{revisionBusy ? 'Suggesting…' : revisionAvailable ? 'Suggest revisions' : 'Enable AI to revise'}</button>
       {/if}
@@ -146,6 +160,9 @@
   .icon { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--category) 16%, transparent); color: color-mix(in srgb, var(--category) 82%, var(--ink)); font-size: 10px; }
   .confidence { color: var(--muted); font: 600 10px/1 var(--font-ui); }
   .observation { color: var(--ink-soft); font: 400 13px/1.45 var(--font-ui); margin: 10px 0; user-select: text; }
+  .anchor-warning { display: grid; gap: 7px; margin: 9px 0; border: 1px solid color-mix(in srgb, var(--category) 35%, var(--line)); border-radius: 3px; background: color-mix(in srgb, var(--category) 7%, var(--paper)); padding: 8px; color: var(--ink-soft); font: 600 10px/1.35 var(--font-ui); }
+  .anchor-warning button { justify-self: start; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink); padding: 6px 8px; font: 700 10px/1 var(--font-ui); cursor: pointer; }
+  .anchor-warning button:disabled { opacity: .55; cursor: default; }
   .variants { display: grid; gap: 5px; margin: 9px 0 10px; }
   .variants button { display: grid; grid-template-columns: 19px 1fr; gap: 7px; align-items: start; width: 100%; border: 1px solid transparent; border-radius: 3px; background: var(--paper-deep); color: var(--ink-soft); text-align: left; padding: 7px; font: 12px/1.35 var(--font-ui); cursor: pointer; }
   .variants button.selected { border-color: color-mix(in srgb, var(--category) 55%, var(--line)); background: color-mix(in srgb, var(--category) 8%, var(--paper)); }
@@ -158,6 +175,7 @@
   footer .reject:hover { border-color: var(--reject); color: var(--reject); }
   footer .accept { color: var(--accept); }
   footer .accept:hover { border-color: var(--accept); color: var(--accept); }
+  footer .accept:disabled { opacity: .35; cursor: default; }
   footer .order-handle { border: 0; border-radius: 3px; cursor: grab; touch-action: none; }
   footer .order-handle:active { cursor: grabbing; }
   footer .order-handle span { width: 13px; height: 17px; background-image: radial-gradient(circle, currentColor 1.2px, transparent 1.4px); background-position: 0 0; background-size: 6px 6px; opacity: .72; }

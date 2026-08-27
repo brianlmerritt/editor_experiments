@@ -1,5 +1,5 @@
 import { env } from '$env/dynamic/private';
-import type { Category, GenerationRequest, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, ProviderUsage, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
+import type { Category, GenerationRequest, InputAnchorStatus, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, ProviderUsage, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
 import { isExactTextSpan, makeId } from '$lib/domain';
 import { providerUsage } from '$lib/server/provider-usage';
 import { deleteStoredProviderProfile, maskCredential, readStoredProviderProfiles, upsertStoredProviderProfile, type StoredProviderProfile } from '$lib/server/provider-settings';
@@ -15,6 +15,7 @@ interface DraftSuggestion {
   variants?: string[];
   sourceText?: string;
   confidence: number;
+  anchorStatus?: InputAnchorStatus;
 }
 
 interface ConfiguredProvider {
@@ -30,6 +31,12 @@ interface ConfiguredProvider {
 
 interface RuntimeProviderSettings {
   profiles: Record<string, ConfiguredProvider>;
+}
+
+const maxRetainedProviderOutputCharacters = 250_000;
+
+function retainedProviderOutput(value: string): string {
+  return value.slice(0, maxRetainedProviderOutputCharacters);
 }
 
 interface LegacyRuntimeProviderSettings {
@@ -201,6 +208,7 @@ function proposalFromDraft(draft: DraftSuggestion, request: GenerationRequest, s
     from: draft.from - request.from,
     to: draft.to - request.from,
     sourceText: anchorText,
+    anchorStatus: draft.anchorStatus ?? 'exact',
     type,
     category: draft.category,
     comment: draft.comment,
@@ -634,6 +642,36 @@ export function resolveProviderRange(
   return isExactTextSpan(passage, from, to, draft.sourceText) ? { from, to } : null;
 }
 
+function attachProviderTargets(
+  parsed: Array<Omit<DraftSuggestion, 'from' | 'to'> & { from: number; to: number }>,
+  request: GenerationRequest
+): DraftSuggestion[] {
+  const requestOwnsTarget = request.responseContract === 'commentary'
+    || request.responseContract === 'revision_options'
+    || request.responseContract === 'alternative_draft';
+  return parsed.map((item) => {
+    if (requestOwnsTarget) {
+      const unsafeDocumentReplacement = request.targetScope === 'document' && item.type !== 'annotation';
+      return {
+        ...item,
+        from: request.from + item.from,
+        to: request.from + item.to,
+        anchorStatus: unsafeDocumentReplacement ? 'unanchored' : 'request_scope'
+      };
+    }
+    const range = resolveProviderRange(item, request.text);
+    return range
+      ? { ...item, from: request.from + range.from, to: request.from + range.to, anchorStatus: 'exact' }
+      : {
+          ...item,
+          from: request.from,
+          to: request.to,
+          sourceText: request.text,
+          anchorStatus: 'unanchored'
+        };
+  });
+}
+
 function statusRecovery(status: number): { classification: RecoveryClassification; recoveryAction: InputError['recoveryAction']; retryable: boolean } {
   if (status === 401 || status === 403) return { classification: 'authentication', recoveryAction: 'reconfigure', retryable: false };
   if (status === 429) return { classification: 'rate_limited', recoveryAction: 'retry_transient', retryable: true };
@@ -702,7 +740,7 @@ async function providerCompletion(
       recoveryAction: 'retry_transient',
       recovered: false,
       message,
-      rawOutput: rawResponse.slice(0, 6000)
+      rawOutput: retainedProviderOutput(rawResponse)
     }]);
   }
   if (provider.protocol === 'anthropic') {
@@ -804,7 +842,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         recovered: false,
         outcome: retryable ? 'retry_requested' : 'rejected',
         message: `Provider stopped at the ${maxTokens}-token output limit.`,
-        rawOutput: previousOutput.slice(0, 6000)
+        rawOutput: retainedProviderOutput(previousOutput)
       });
       if (!retryable) throw new ProviderOutputError('Provider output remained truncated after bounded recovery.', diagnostics);
       maxTokens = Math.min(50000, Math.max(12000, maxTokens * 2));
@@ -815,11 +853,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
     try {
       const parsedResult = parseActionOutputDetailed(previousOutput, request);
       const parsed = parsedResult.suggestions;
-      const drafts = parsed.flatMap((item) => {
-        const range = resolveProviderRange(item, request.text);
-        return range ? [{ ...item, from: request.from + range.from, to: request.from + range.to }] : [];
-      });
-      if (parsed.length && !drafts.length) throw new ProviderOutputError('Provider suggestions did not contain an exact, unambiguous source_text anchor.');
+      const drafts = attachProviderTargets(parsed, request);
       if (parsedResult.normalization !== 'none') {
         const extracted = parsedResult.normalization === 'extracted';
         diagnostics.push({
@@ -835,7 +869,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
           message: extracted
             ? 'Valid JSON was extracted from surrounding provider text.'
             : 'Malformed provider output was repaired locally before validation.',
-          rawOutput: previousOutput.slice(0, 6000)
+          rawOutput: retainedProviderOutput(previousOutput)
         });
       }
       for (let index = 0; index < diagnostics.length; index += 1) {
@@ -864,7 +898,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         recovered: false,
         outcome: attempt < maxAttempts ? 'retry_requested' : 'rejected',
         message: error.message,
-        rawOutput: previousOutput.slice(0, 6000)
+        rawOutput: retainedProviderOutput(previousOutput)
       });
       if (attempt === maxAttempts) throw new ProviderOutputError(`${error.message} Automatic corrective retries also failed.`, diagnostics, providerUsage({
         source: provider.id, model: provider.model, protocol: provider.protocol, attempts: attempt,
@@ -928,4 +962,68 @@ export async function generateSuggestions(request: GenerationRequest): Promise<{
     }
   }
   return { proposals, errors, usage };
+}
+
+/** Replays retained provider text through current local parsing and anchoring. No provider is called. */
+export function recoverSuggestions(
+  request: GenerationRequest,
+  retainedErrors: InputError[]
+): { proposals: InputProposal[]; errors: InputError[]; usage: ProviderUsage[] } {
+  const proposals: InputProposal[] = [];
+  const errors: InputError[] = [];
+  const providers = new Map(configuredProviders().map((provider) => [provider.id, provider]));
+  const latestBySource = new Map<string, InputError>();
+  for (const error of retainedErrors) {
+    if (error.kind === 'provider_output' && error.rawOutput) latestBySource.set(error.source, error);
+  }
+  for (const [source, retained] of latestBySource) {
+    try {
+      let replayOutput = retained.rawOutput!;
+      // Earlier Margin Note builds cut diagnostics at exactly 6000 characters.
+      // Salvage only balanced, complete array items rather than letting JSON repair
+      // turn the final cut-off option into a plausible but incomplete revision.
+      if (replayOutput.length === 6000 && (request.responseContract === 'revision_options' || request.responseContract === 'annotated_findings')) {
+        const key = request.responseContract === 'revision_options' ? 'options' : 'findings';
+        const completeItems = balancedJsonCandidates(replayOutput).flatMap((candidate) => {
+          try {
+            const value = JSON.parse(candidate) as unknown;
+            if (!record(value)) return [];
+            if (key === 'options' && typeof value.text === 'string') return [value];
+            if (key === 'findings' && typeof value.source_text === 'string' && typeof value.comment === 'string') return [value];
+          } catch {
+            // Only fully balanced legacy items are safe to salvage.
+          }
+          return [];
+        });
+        if (completeItems.length) replayOutput = JSON.stringify({ [key]: completeItems });
+      }
+      const parsed = parseActionOutputDetailed(replayOutput, request);
+      const drafts = attachProviderTargets(parsed.suggestions, request);
+      const provider = providers.get(source);
+      const sourceNumber = provider?.number ?? 3;
+      proposals.push(...drafts.map((draft) => {
+        const proposal = proposalFromDraft(draft, request, source, sourceNumber, 'ai', 0);
+        proposal.provenance.model = provider?.model ?? retained.model ?? source;
+        return proposal;
+      }));
+      errors.push({
+        ...retained,
+        recovered: true,
+        outcome: 'repaired_locally',
+        recoveryAction: 'repair_local',
+        localReplay: true,
+        message: 'Retained provider response was recovered locally without a new provider request.'
+      });
+    } catch (error) {
+      errors.push({
+        ...retained,
+        recovered: false,
+        outcome: 'rejected',
+        recoveryAction: 'human',
+        localReplay: true,
+        message: error instanceof Error ? error.message : 'Retained provider response could not be recovered locally.'
+      });
+    }
+  }
+  return { proposals, errors, usage: [] };
 }

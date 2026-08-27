@@ -114,6 +114,134 @@ const selectionPrompt: TaskPrompt = {
 };
 
 describe('semantic workspace history', () => {
+  it('adopts the writer-captured request scope even when the selection ends in whitespace', async () => {
+    const capturedDocument: EditorDocumentSnapshot = {
+      doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'noticed ' }] }] },
+      text: 'noticed ',
+      selection: { from: 1, to: 9 }
+    };
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [{ kind: 'craft_input', payload: { ...proposal(), to: 8, sourceText: 'noticed ', anchorStatus: 'request_scope', variants: ['observed '] } }],
+      diagnostics: [],
+      context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document('noticed ')];
+    workspace.setEditorReady(capturedDocument);
+
+    const adopted = await workspace.runSelectionPass({ from: 1, to: 9, text: 'noticed ' }, selectionPrompt);
+
+    expect(adopted).toHaveLength(1);
+    expect(adopted[0]).toMatchObject({
+      anchorStatus: 'request_scope',
+      anchor: { from: 1, to: 9, text: 'noticed ' },
+      variants: [expect.objectContaining({ text: 'observed ' })]
+    });
+  });
+
+  it('keeps the captured editor range across paragraph boundaries', async () => {
+    const selectedText = 'One\nTwo';
+    const capturedDocument: EditorDocumentSnapshot = {
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'One' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Two' }] }
+        ]
+      },
+      text: 'One\n\nTwo',
+      selection: { from: 1, to: 9 }
+    };
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [{
+        kind: 'craft_input',
+        payload: {
+          ...proposal(),
+          to: selectedText.length,
+          sourceText: selectedText,
+          anchorStatus: 'request_scope',
+          variants: ['First\nSecond']
+        }
+      }],
+      diagnostics: [],
+      context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document(selectedText)];
+    workspace.setEditorReady(capturedDocument);
+
+    const adopted = await workspace.runSelectionPass({ from: 1, to: 9, text: selectedText }, selectionPrompt);
+
+    expect(adopted[0]).toMatchObject({
+      anchorStatus: 'request_scope',
+      anchor: { from: 1, to: 9, text: selectedText }
+    });
+  });
+
+  it('realigns saved request-scope inputs to their captured run target on load', () => {
+    const selectedText = 'One\nTwo';
+    const run: CraftRun = {
+      id: 'run-recovered', scope: 'selection', documentId: 'main', sourceRevision: 1,
+      target: textTarget('main', 1, 9, selectedText), originalText: selectedText,
+      promptId: 'suggest-revisions', promptVersion: 1, sourceStates: { openrouter: 'visible' },
+      state: 'completed', proposalIds: ['input-recovered'], errors: [], createdAt: '2026-08-18T00:00:00Z'
+    };
+    const recovered: Suggestion = {
+      ...input(),
+      id: 'input-recovered',
+      kind: 'revision_options',
+      anchorStatus: 'request_scope',
+      target: textTarget('main', 1, 8, selectedText),
+      anchor: { from: 1, to: 8, text: selectedText },
+      provenance: { ...input().provenance, runId: run.id, actionId: 'suggest-revisions' }
+    };
+    const storedDocument: WorkspaceDocument = {
+      ...document(selectedText),
+      extensions: { margin_note: { authorityVersion: 2, inputs: [recovered], runs: [run] } } as unknown as WorkspaceDocument['extensions']
+    };
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+
+    expect(workspace['loadDocumentDomain'](storedDocument)).toMatchObject({ realignedCapturedInputs: 1 });
+    expect(workspace.inputs[0]).toMatchObject({
+      anchor: { from: 1, to: 9, text: selectedText },
+      order: 1
+    });
+  });
+
+  it('reattaches an unanchored Input to an explicit current selection through undoable state', async () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+    workspace.inputs = [{ ...input(), anchorStatus: 'unanchored', target: textTarget('main', 1, 8, 'noticed') }];
+
+    expect(await workspace.bindInputToSelection('input-1', 1, 8, 'noticed')).toBe(true);
+    expect(workspace.inputs[0]).toMatchObject({
+      anchorStatus: 'exact',
+      anchor: { from: 1, to: 8, text: 'noticed' },
+      events: [expect.objectContaining({ type: 'reattached', previousExcerpt: 'noticed' })]
+    });
+    expect(workspace.undoStack.at(-1)?.label).toBe('Attach Input to selection');
+
+    workspace.undoWorkspace();
+    expect(workspace.inputs[0].anchorStatus).toBe('unanchored');
+  });
+
+  it('refuses to bind an unanchored Input to stale selected text', async () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+    workspace.inputs = [{ ...input(), anchorStatus: 'unanchored' }];
+
+    expect(await workspace.bindInputToSelection('input-1', 1, 8, 'different')).toBe(false);
+    expect(workspace.inputs[0].anchorStatus).toBe('unanchored');
+    expect(workspace.notice).toContain('Select the exact text');
+  });
+
   it('clears live Inputs without turning them into never-ask-again rejections', async () => {
     const workspace = new WorkspaceState(fakeFacade());
     workspace.branchId = 'main';
@@ -700,7 +828,7 @@ describe('semantic workspace history', () => {
 
     const migrated = workspace['loadDocumentDomain'](legacyDocument);
 
-    expect(migrated).toBe(1);
+    expect(migrated).toMatchObject({ archivedLegacyInputs: 1 });
     expect(workspace.inputs[0].state).toBe('stale');
     expect(workspace.workspaceRevision).toBe(12);
   });

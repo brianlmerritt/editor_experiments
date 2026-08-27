@@ -63,11 +63,12 @@ provider settings as though they were one portable workspace. Follow
 
 For a quick tour:
 
-1. Click **Run action** in the Inputs panel to discuss or review the exact document,
-   or select text and use **Actions…** to target only that selection. Confirm the
+1. Click **Perform action…** in the Inputs panel to discuss or review the exact
+   document, or select text and use the same command beside the selection to target
+   only that selection. Confirm the
    response contract and read-only Writing Context in the preflight before running.
    Use **Manage actions** to edit the four project-owned defaults or add another.
-2. Click **Perform review** in the Inputs panel for the existing passage-by-passage
+2. Click **Review document** in the Inputs panel for the existing passage-by-passage
    review workflow. Edit the **Review Instructions** and start the review. Inputs
    appear progressively as each passage/provider check completes.
 3. Preview a replacement, accept/reject it, or use `Tab`, `1`–`3`, `Enter`, and `X`
@@ -122,8 +123,9 @@ The implemented architecture slice provides:
 - a shared content-target transformer for inputs and formats;
 - delayed AI targets transformed through intervening edits, with changed passages
   discarded and exact provider source text verified before adoption;
-- rejection of mid-word or whitespace-padded AI anchors and conservative semantic
-  consolidation of paraphrased same-source annotations at the same locus;
+- rejection of mid-word or whitespace-padded AI anchors; ambiguous review findings
+  remain visible as unanchored Inputs that require an explicit selection attachment,
+  while selection-scoped revisions use the captured selection as authoritative;
 - provider responses treated as proposals from which Svelte creates authoritative
   input IDs, targets, lifecycle, and provenance;
 - typed Svelte-owned AI activities and runs that capture an immutable target, action,
@@ -146,6 +148,9 @@ The implemented architecture slice provides:
   two corrective retries when output remains unusable; every malformed reply is
   retained in run diagnostics and logged to the browser console with its recovery
   outcome, while exhausted output failures do not produce a transient popup;
+- retained failed output can be replayed from **History** without another provider
+  call; recovered unanchored Inputs remain non-applicable until attached to selected
+  text, and that attachment participates in writing undo/redo;
 - typed provider failures distinguish malformed output, truncation, transient
   transport, rate limits, authentication, and configuration; bounded automatic
   recovery retries transient failures and raises truncated output budgets, while
@@ -212,7 +217,7 @@ classification, and retained error details. A failed or partially successful run
 retry only its failed configured providers; this creates a new auditable run and never
 overwrites the earlier attempt or repeats successful providers.
 
-**Perform review** first opens the Writing Context preflight. Edit the **Review
+**Review document** first opens the Writing Context preflight. Edit the **Review
 Instructions**, inspect the required target and **Spine (including story brief)**,
 choose whether applicable Material, relationships, and open Todos are included, and
 use **Add context…** for other content-bearing project Material. Those choices are

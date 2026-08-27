@@ -1,4 +1,4 @@
-import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputError, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIContextSelection, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
 import { FacadeAIInteractionService } from '$lib/ai/service';
 import { cloneDefaultAIActions, normalizedAIActions, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
@@ -62,6 +62,7 @@ function isInputProposalPayload(value: unknown): value is InputProposal {
     && Number.isInteger(proposal.from)
     && Number.isInteger(proposal.to)
     && typeof proposal.sourceText === 'string'
+    && (proposal.anchorStatus === undefined || proposal.anchorStatus === 'exact' || proposal.anchorStatus === 'request_scope' || proposal.anchorStatus === 'unanchored')
     && (proposal.type === 'replacement' || proposal.type === 'insertion' || proposal.type === 'annotation')
     && categories.includes(proposal.category as Category)
     && typeof proposal.comment === 'string'
@@ -83,6 +84,11 @@ interface NavigatorHistoryEntry {
   before: NavigatorHistorySnapshot;
   after: NavigatorHistorySnapshot;
   createdAt: number;
+}
+
+interface DocumentDomainLoadResult {
+  archivedLegacyInputs: number;
+  realignedCapturedInputs: number;
 }
 
 export type DocumentSaveState = 'saved' | 'pending' | 'saving' | 'failed';
@@ -445,13 +451,22 @@ export class WorkspaceState {
       if (loaded.providerSettingsError) {
         this.lastError = `Writing workspace loaded, but AI provider settings are unavailable: ${loaded.providerSettingsError}`;
       }
-      const migratedLegacyInputs = this.loadDocumentDomain(this.currentDocument);
+      const domainLoad = this.loadDocumentDomain(this.currentDocument);
       const interruptedRuns = this.reconcileInterruptedRuns();
-      if (migratedLegacyInputs) {
-        this.notice = `${migratedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
+      if (domainLoad.archivedLegacyInputs) {
+        this.notice = `${domainLoad.archivedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
+      } else if (domainLoad.realignedCapturedInputs) {
+        this.notice = `${domainLoad.realignedCapturedInputs} saved AI ${domainLoad.realignedCapturedInputs === 1 ? 'input was' : 'inputs were'} realigned to the writer's captured selection.`;
       }
       if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
-      if (migratedLegacyInputs || interruptedRuns) await this.persistDomainState(interruptedRuns ? 'Reconcile interrupted AI runs' : 'Archive legacy input targets');
+      if (domainLoad.archivedLegacyInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
+        const reason = interruptedRuns
+          ? 'Reconcile interrupted AI runs'
+          : domainLoad.realignedCapturedInputs
+            ? 'Realign captured AI input targets'
+            : 'Archive legacy input targets';
+        await this.persistDomainState(reason);
+      }
       this.costUsd = loaded.stats.costUsd;
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('margin-note:project', this.projectId);
@@ -1133,6 +1148,87 @@ export class WorkspaceState {
     );
   }
 
+  canRecoverRun(runId: string): boolean {
+    const run = this.runs.find((item) => item.id === runId);
+    if (!run?.request || !this.aiService.recover) return false;
+    const latestBySource = new Map<string, InputError>();
+    for (const error of run.errors) if (error.kind === 'provider_output' && error.rawOutput) latestBySource.set(error.source, error);
+    return [...latestBySource.values()].some((error) => !error.localReplay && (!error.recovered || run.proposalIds.length === 0));
+  }
+
+  async recoverRun(runId: string): Promise<Suggestion[]> {
+    const run = this.runs.find((item) => item.id === runId);
+    if (!run?.request || !this.aiService.recover || !this.canRecoverRun(runId)) return [];
+    const target = firstTextTarget(run.target);
+    const currentText = target && this.documentSnapshot
+      ? documentTextBetween(this.documentSnapshot, target.start, target.end)
+      : null;
+    if (!target || currentText !== run.originalText) {
+      this.notice = 'That retained response no longer matches its captured passage and cannot be recovered.';
+      return [];
+    }
+    const latestBySource = new Map<string, InputError>();
+    for (const error of run.errors) if (error.kind === 'provider_output' && error.rawOutput) latestBySource.set(error.source, error);
+    const retained = [...latestBySource.values()].filter((error) =>
+      !error.localReplay && (!error.recovered || run.proposalIds.length === 0));
+    const response = await this.aiService.recover(run.request, retained);
+    const proposals = response.proposals.filter((proposal) =>
+      run.permittedProposalKinds?.includes(proposal.kind) && isInputProposalPayload(proposal.payload));
+    const adopted = proposals.flatMap((proposal) => {
+      const input = this.adoptProposal(proposal.payload as InputProposal, run, target.start, proposal.kind);
+      return input ? [input] : [];
+    });
+    const returnedProposalSources = new Set(response.proposals.flatMap((proposal) => {
+      const payload = proposal.payload as Partial<InputProposal> | undefined;
+      return typeof payload?.source === 'string' ? [payload.source] : [];
+    }));
+    const adoptedSources = new Set(adopted.map((input) => input.source));
+    const recoveredSources = new Set([
+      ...adoptedSources,
+      ...response.diagnostics
+        .filter((diagnostic) => diagnostic.recovered && !returnedProposalSources.has(diagnostic.source))
+        .map((diagnostic) => diagnostic.source)
+    ]);
+    const adoptionDiagnostics: AIServiceDiagnostic[] = [...returnedProposalSources]
+      .filter((source) => !adoptedSources.has(source))
+      .map((source) => ({
+        source,
+        kind: 'contract',
+        classification: 'contract',
+        recoveryAction: 'human',
+        recovered: false,
+        outcome: 'rejected',
+        message: 'The retained response parsed, but its proposal failed current local target validation.'
+      }));
+    const updatedErrors = run.errors.map((error) => recoveredSources.has(error.source) && error.kind === 'provider_output'
+      ? { ...error, recovered: true, outcome: 'repaired_locally' as const, recoveryAction: 'repair_local' as const }
+      : error);
+    const remainingFailures = updatedErrors.some((error) => !error.recovered);
+    this.runs = this.runs.map((item) => item.id === runId ? {
+      ...item,
+      state: remainingFailures ? (adopted.length ? 'partial' : 'failed') : 'completed',
+      proposalIds: [...new Set([...item.proposalIds, ...adopted.map((input) => input.id)])],
+      errors: [...updatedErrors, ...response.diagnostics, ...adoptionDiagnostics],
+      completedAt: new Date().toISOString()
+    } : item);
+    if (run.activityId) this.refreshAIActivity(run.activityId);
+    await this.coalesceSuggestions([...this.suggestions, ...adopted]);
+    for (const input of adopted) {
+      await this.log(input.state === 'hidden' ? 'generated_hidden' : 'suggestion_generated', {
+        runId,
+        recoveredLocally: true,
+        suggestion: input
+      }, input.id);
+    }
+    const failedRecovery = [...new Map([...response.diagnostics, ...adoptionDiagnostics]
+      .filter((diagnostic) => !diagnostic.recovered)
+      .map((diagnostic) => [diagnostic.source, diagnostic])).values()];
+    this.notice = adopted.length
+      ? `${adopted.length} retained ${adopted.length === 1 ? 'Input was' : 'Inputs were'} recovered locally.${failedRecovery.length ? ` ${failedRecovery.map((item) => `${item.source}: ${item.message}`).join(' · ')}` : ''} No provider was called.`
+      : `${failedRecovery.map((item) => `${item.source}: ${item.message}`).join(' · ') || 'The retained responses could not be recovered locally.'} No provider was called.`;
+    return adopted;
+  }
+
   async retryRun(runId: string): Promise<Suggestion[]> {
     const previous = this.runs.find((run) => run.id === runId);
     if (!previous || (previous.state !== 'failed' && previous.state !== 'partial')) return [];
@@ -1378,11 +1474,16 @@ export class WorkspaceState {
 
   private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number, kind = 'craft_input'): Suggestion | null {
     const insertion = proposal.type === 'insertion' && proposal.from === proposal.to && proposal.sourceText === '';
-    if (!insertion && !isExactTextSpan(run.originalText, proposal.from, proposal.to, proposal.sourceText)) return null;
+    const capturedRequestTarget = proposal.anchorStatus === 'request_scope' || proposal.anchorStatus === 'unanchored';
+    if (capturedRequestTarget) {
+      if (proposal.from !== 0 || proposal.to !== run.originalText.length || proposal.sourceText !== run.originalText) return null;
+    } else if (!insertion && !isExactTextSpan(run.originalText, proposal.from, proposal.to, proposal.sourceText)) return null;
     if (insertion && (proposal.from < 0 || proposal.from > run.originalText.length)) return null;
     const id = makeId('input');
-    const from = currentStart + proposal.from;
-    const to = currentStart + proposal.to;
+    const capturedTarget = capturedRequestTarget ? firstTextTarget(run.target) : null;
+    if (capturedRequestTarget && (!capturedTarget || capturedTarget.nodeId !== this.branchId)) return null;
+    const from = capturedTarget?.start ?? currentStart + proposal.from;
+    const to = capturedTarget?.end ?? currentStart + proposal.to;
     const variants = proposal.variants
       .filter((text) => text !== proposal.sourceText)
       .map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, proposal.confidence - index * 0.04) }));
@@ -1397,6 +1498,7 @@ export class WorkspaceState {
       behaviourId: 'craft-input',
       events: [],
       anchor: { from, to, text: proposal.sourceText },
+      anchorStatus: proposal.anchorStatus ?? 'exact',
       type,
       payload: { text: variants[0]?.text, comment: proposal.comment },
       category: proposal.category,
@@ -1419,6 +1521,43 @@ export class WorkspaceState {
   activate(id: string | null): void { this.activeSuggestionId = id; }
   setPreview(suggestionId: string, text: string): void { this.preview = { suggestionId, text }; }
   clearPreview(): void { this.preview = null; }
+
+  async bindInputToSelection(id: string, from: number, to: number, selectedText: string): Promise<boolean> {
+    const input = this.inputs.find((item) => item.id === id);
+    if (!input || input.anchorStatus !== 'unanchored' || !this.documentSnapshot) return false;
+    if (from >= to || !selectedText || documentTextBetween(this.documentSnapshot, from, to) !== selectedText) {
+      this.notice = 'Select the exact text this Input should apply to, then attach it again.';
+      return false;
+    }
+    const before = this.historySnapshot(this.documentSnapshot);
+    const transactionId = makeId('transaction');
+    this.inputs = this.inputs.map((item) => item.id === id ? {
+      ...item,
+      target: textTarget(this.branchId, from, to, selectedText),
+      anchor: { from, to, text: selectedText },
+      anchorStatus: 'exact',
+      order: from,
+      events: [...item.events, {
+        type: 'reattached',
+        revision: this.workspaceRevision + 1,
+        transactionId,
+        previousTarget: item.target,
+        previousExcerpt: item.anchor.text
+      }]
+    } : item);
+    this.workspaceRevision += 1;
+    const after = this.historySnapshot(this.documentSnapshot);
+    this.pushHistory({
+      id: transactionId,
+      source: 'input',
+      label: 'Attach Input to selection',
+      before,
+      after,
+      createdAt: Date.now()
+    });
+    await this.persistDomainState('Attach Input to selection');
+    return true;
+  }
 
   async resolveSuggestion(id: string, state: 'accepted' | 'rejected' | 'stale', eventType: LedgerEvent['type'], payload: Record<string, unknown> = {}): Promise<void> {
     const suggestion = this.suggestions.find((item) => item.id === id);
@@ -1531,7 +1670,7 @@ export class WorkspaceState {
     const targetDocument = this.documents.find((document) => document.id === id);
     if (!targetDocument) throw new Error(`Document not found: ${id}`);
     this.branchId = id;
-    const migratedLegacyInputs = this.loadDocumentDomain(targetDocument);
+    const domainLoad = this.loadDocumentDomain(targetDocument);
     const interruptedRuns = this.reconcileInterruptedRuns();
     this.documentSnapshot = null;
     this.undoStack = [];
@@ -1541,7 +1680,17 @@ export class WorkspaceState {
       localStorage.setItem('margin-note:branch', id);
     }
     if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
-    if (migratedLegacyInputs || interruptedRuns) await this.persistDomainState(interruptedRuns ? 'Reconcile interrupted AI runs' : 'Archive legacy input targets');
+    if (domainLoad.realignedCapturedInputs) {
+      this.notice = `${domainLoad.realignedCapturedInputs} saved AI ${domainLoad.realignedCapturedInputs === 1 ? 'input was' : 'inputs were'} realigned to the writer's captured selection.`;
+    }
+    if (domainLoad.archivedLegacyInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
+      const reason = interruptedRuns
+        ? 'Reconcile interrupted AI runs'
+        : domainLoad.realignedCapturedInputs
+          ? 'Realign captured AI input targets'
+          : 'Archive legacy input targets';
+      await this.persistDomainState(reason);
+    }
     void this.facade.suggestionHistory(id).then((data) => {
       if (this.branchId !== id) return;
       this.ledger = data.events;
@@ -2546,7 +2695,7 @@ export class WorkspaceState {
     this.preview = null;
   }
 
-  private loadDocumentDomain(document: WorkspaceDocument | null): number {
+  private loadDocumentDomain(document: WorkspaceDocument | null): DocumentDomainLoadResult {
     const stored = document?.extensions.margin_note;
     const value = stored && typeof stored === 'object' && !Array.isArray(stored)
       ? stored as Record<string, unknown>
@@ -2566,6 +2715,27 @@ export class WorkspaceState {
     });
     this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
     this.runs = Array.isArray(value?.runs) ? value.runs as CraftRun[] : [];
+    const runsById = new Map(this.runs.map((run) => [run.id, run]));
+    let realignedCapturedInputs = 0;
+    this.inputs = this.inputs.map((input) => {
+      if ((input.anchorStatus !== 'request_scope' && input.anchorStatus !== 'unanchored')
+        || (input.state !== 'pending' && input.state !== 'hidden')
+        || input.events.length
+        || !input.provenance.runId) return input;
+      const run = runsById.get(input.provenance.runId);
+      const capturedTarget = run ? firstTextTarget(run.target) : null;
+      if (!run || !capturedTarget || capturedTarget.nodeId !== (document?.id ?? this.branchId)
+        || input.anchor.text !== run.originalText) return input;
+      const currentTarget = firstTextTarget(input.target);
+      if (currentTarget?.start === capturedTarget.start && currentTarget.end === capturedTarget.end) return input;
+      realignedCapturedInputs += 1;
+      return {
+        ...input,
+        target: textTarget(capturedTarget.nodeId, capturedTarget.start, capturedTarget.end, run.originalText),
+        anchor: { from: capturedTarget.start, to: capturedTarget.end, text: run.originalText },
+        order: capturedTarget.start
+      };
+    });
     this.activities = Array.isArray(value?.activities) ? value.activities as AIActivityRecord[] : [];
     if (value?.sourceStates && typeof value.sourceStates === 'object' && !Array.isArray(value.sourceStates)) {
       this.sourceStates = { ...this.sourceStates, ...value.sourceStates as Record<string, SourceState> };
@@ -2582,7 +2752,7 @@ export class WorkspaceState {
       this.behaviours['format-default'] = { ...defaultAttachmentBehaviours['format-default'] };
     }
     this.workspaceRevision = typeof value?.revision === 'number' ? value.revision : document?.revision ?? 0;
-    return migratedLegacyInputs;
+    return { archivedLegacyInputs: migratedLegacyInputs, realignedCapturedInputs };
   }
 
   private domainExtensions(): WorkspaceDocument['extensions'] {

@@ -322,6 +322,10 @@ export class WorkspaceFacade {
     return this.post('/api/suggest', request, signal);
   }
 
+  recoverInputs(request: GenerationRequest, errors: InputError[]): Promise<InputProposalBatch> {
+    return this.post('/api/suggest/recover', { request, errors });
+  }
+
   async saveBrief(value: WritingBrief, sessionId: string, branchId: string): Promise<void> {
     await this.post('/api/settings', { kind: 'brief', value, sessionId, branchId });
   }

@@ -10,7 +10,7 @@
   import { workspace } from '$lib/state/workspace.svelte';
   import { providerPresetFor, settings as providerSettings } from '$lib/state/settings.svelte';
   import type { ContextBucket, ContextScope } from '$lib/workspace/model';
-  import { clampEditorZoom, clampNavigatorWidth, DEFAULT_EDITOR_ZOOM, DEFAULT_NAVIGATOR_WIDTH, maxNavigatorWidth, MAX_EDITOR_ZOOM, MIN_EDITOR_ZOOM, MIN_NAVIGATOR_WIDTH } from '$lib/workspace/layout';
+  import { clampEditorZoom, clampInputsWidth, clampNavigatorWidth, DEFAULT_EDITOR_ZOOM, DEFAULT_INPUTS_WIDTH, DEFAULT_NAVIGATOR_WIDTH, maxInputsWidth, maxNavigatorWidth, MAX_EDITOR_ZOOM, MIN_EDITOR_ZOOM, MIN_INPUTS_WIDTH, MIN_NAVIGATOR_WIDTH } from '$lib/workspace/layout';
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
   import type { AIContextSelection } from '$lib/ai/contracts';
@@ -69,11 +69,13 @@
   let navigatorVisible = $state(true);
   let reviewPanelVisible = $state(true);
   let navigatorWidth = $state(DEFAULT_NAVIGATOR_WIDTH);
+  let inputsWidth = $state(DEFAULT_INPUTS_WIDTH);
   let editorZoom = $state(DEFAULT_EDITOR_ZOOM);
   let viewportWidth = $state(1440);
   let draggedInputId = $state<string | null>(null);
   let inputDropTarget = $state<{ id: string; position: 'before' | 'after' } | null>(null);
-  let resizeCleanup: (() => void) | null = null;
+  let navigatorResizeCleanup: (() => void) | null = null;
+  let inputsResizeCleanup: (() => void) | null = null;
   let inputDragCleanup: (() => void) | null = null;
   let dismissedProviderIssueKey = $state<string | null>(null);
   let contextPreflightOpen = $state(false);
@@ -156,14 +158,17 @@
         navigatorVisible?: boolean;
         reviewPanelVisible?: boolean;
         navigatorWidth?: number;
+        inputsWidth?: number;
         editorZoom?: number;
       };
       navigatorVisible = saved.navigatorVisible !== false;
       reviewPanelVisible = saved.reviewPanelVisible !== false;
       navigatorWidth = clampNavigatorWidth(saved.navigatorWidth ?? DEFAULT_NAVIGATOR_WIDTH, window.innerWidth);
+      inputsWidth = clampInputsWidth(saved.inputsWidth ?? DEFAULT_INPUTS_WIDTH, window.innerWidth);
       editorZoom = clampEditorZoom(saved.editorZoom ?? DEFAULT_EDITOR_ZOOM);
     } catch {
       navigatorWidth = clampNavigatorWidth(DEFAULT_NAVIGATOR_WIDTH, window.innerWidth);
+      inputsWidth = clampInputsWidth(DEFAULT_INPUTS_WIDTH, window.innerWidth);
       editorZoom = DEFAULT_EDITOR_ZOOM;
     }
     void workspace.initialize().then(() => {
@@ -175,6 +180,7 @@
     const relayout = () => {
       viewportWidth = window.innerWidth;
       navigatorWidth = clampNavigatorWidth(navigatorWidth, window.innerWidth);
+      inputsWidth = clampInputsWidth(inputsWidth, window.innerWidth);
     };
     window.addEventListener('keydown', keydown);
     window.addEventListener('resize', relayout);
@@ -183,7 +189,8 @@
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('resize', relayout);
       window.removeEventListener('scroll', relayout);
-      resizeCleanup?.();
+      navigatorResizeCleanup?.();
+      inputsResizeCleanup?.();
       inputDragCleanup?.();
       if (editTimer) clearTimeout(editTimer);
       if (documentSaveTimer) clearTimeout(documentSaveTimer);
@@ -193,7 +200,7 @@
   });
 
   function persistWorkbenchLayout(): void {
-    localStorage.setItem(layoutStorageKey, JSON.stringify({ navigatorVisible, reviewPanelVisible, navigatorWidth, editorZoom }));
+    localStorage.setItem(layoutStorageKey, JSON.stringify({ navigatorVisible, reviewPanelVisible, navigatorWidth, inputsWidth, editorZoom }));
   }
 
   function toggleNavigatorPane(): void {
@@ -208,6 +215,10 @@
 
   function setNavigatorWidth(width: number): void {
     navigatorWidth = clampNavigatorWidth(width, window.innerWidth);
+  }
+
+  function setInputsWidth(width: number): void {
+    inputsWidth = clampInputsWidth(width, window.innerWidth);
   }
 
   function setEditorZoom(zoom: number): void {
@@ -225,11 +236,12 @@
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', stop);
       document.body.classList.remove('resizing-navigator');
-      resizeCleanup = null;
+      navigatorResizeCleanup = null;
       persistWorkbenchLayout();
     };
-    resizeCleanup?.();
-    resizeCleanup = stop;
+    navigatorResizeCleanup?.();
+    inputsResizeCleanup?.();
+    navigatorResizeCleanup = stop;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', stop);
   }
@@ -238,6 +250,33 @@
     if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
     event.preventDefault();
     setNavigatorWidth(navigatorWidth + (event.key === 'ArrowLeft' ? -20 : 20));
+    persistWorkbenchLayout();
+  }
+
+  function startInputsResize(event: PointerEvent): void {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inputsWidth;
+    document.body.classList.add('resizing-inputs');
+    const move = (moveEvent: PointerEvent) => setInputsWidth(startWidth + startX - moveEvent.clientX);
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      document.body.classList.remove('resizing-inputs');
+      inputsResizeCleanup = null;
+      persistWorkbenchLayout();
+    };
+    navigatorResizeCleanup?.();
+    inputsResizeCleanup?.();
+    inputsResizeCleanup = stop;
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+  }
+
+  function resizeInputsWithKeyboard(event: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    setInputsWidth(inputsWidth + (event.key === 'ArrowLeft' ? 20 : -20));
     persistWorkbenchLayout();
   }
 
@@ -464,6 +503,12 @@
     refreshLiveSuggestions();
   }
 
+  async function recoverFailedRun(runId: string): Promise<void> {
+    const recovered = await workspace.recoverRun(runId);
+    refreshLiveSuggestions();
+    if (recovered[0]) void activateCard(recovered[0].id);
+  }
+
   async function completeInterrupted(): Promise<void> {
     for (const run of interruptedRuns) await workspace.completeInterruptedRun(run.id);
   }
@@ -593,6 +638,11 @@
     await runSelectionPrompt(prompt);
   }
 
+  function inputCardLabel(suggestion: Suggestion): string {
+    return workspace.actions.find((action) => action.id === suggestion.provenance.actionId)?.name
+      ?? categoryMeta[suggestion.category].label;
+  }
+
   async function selectSuggestionForRevision(suggestion: Suggestion): Promise<void> {
     revisionSuggestionId = suggestion.id;
     customRequestOpen = false;
@@ -665,8 +715,22 @@
     const suggestion = liveSuggestions.find((item) => item.id === id);
     workspace.activate(id);
     await tick();
-    if (suggestion) editor?.focusSuggestion(suggestion);
+    if (suggestion?.anchorStatus === 'unanchored') showNotice('This Input is unanchored. Select the relevant text, then choose Attach to selection.');
+    else if (suggestion) editor?.focusSuggestion(suggestion);
     cardsElement?.querySelector<HTMLElement>(`.card-slot[data-suggestion-id="${id}"] .card`)?.focus({ preventScroll: true });
+  }
+
+  async function bindInputToSelection(suggestion: Suggestion): Promise<void> {
+    if (!selection.text.trim()) {
+      showNotice('Select the text this Input should apply to, then choose Attach to selection.');
+      return;
+    }
+    if (!await workspace.bindInputToSelection(suggestion.id, selection.from, selection.to, selection.text)) return;
+    refreshLiveSuggestions();
+    await tick();
+    const rebound = workspace.inputs.find((item) => item.id === suggestion.id);
+    if (rebound) editor?.focusSuggestion(rebound);
+    showNotice('Input attached to the selected text. Choose a revision to apply it.');
   }
 
   function chooseVariant(id: string, index: number): void {
@@ -677,6 +741,10 @@
   async function accept(suggestion: Suggestion, index: number, viaKeyboard = false): Promise<void> {
     const currentEditor = editor;
     if (!currentEditor) return;
+    if (suggestion.anchorStatus === 'unanchored') {
+      showNotice('Select the intended text and attach this Input before accepting a revision.');
+      return;
+    }
     const variants = suggestion.variants.length ? suggestion.variants : suggestion.payload.text !== undefined ? [{ id: `${suggestion.id}_primary`, text: suggestion.payload.text }] : [];
     const variant = variants[index];
     if (!variant) return;
@@ -1067,7 +1135,7 @@
     </div>
   </header>
 
-  <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px`}>
+  <div class="workbench" class:navigator-hidden={!navigatorVisible} style={`--navigator-width:${navigatorWidth}px;--inputs-width:${inputsWidth}px`}>
     {#if navigatorVisible}
       <div class="navigator-pane"><Navigator onOpenNode={switchDocument} onSwitchProject={switchProject} onCreateProject={createProject} onRenameProject={renameProject} onResetProject={resetProject} onDeleteProject={deleteProject} onImportProject={chooseProjectImport} onExportProject={exportProject} onStorageAnalysis={openStorageAnalysis} {projectExporting} /></div>
       <button
@@ -1160,7 +1228,7 @@
                 {#if revisionSuggestion}
                   <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
                 {/if}
-                <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => openActionRunner('selection')}>Actions…</button>
+                <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => openActionRunner('selection')}>Perform action…</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('heighten')}>Heighten</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('cadence')}>Vary cadence</button>
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('distance')}>More distant</button>
@@ -1185,7 +1253,16 @@
 
       </div>
 
-        {#if reviewPanelVisible}<aside class="inputs-panel">
+        {#if reviewPanelVisible}
+          <button
+            type="button"
+            class="inputs-resizer"
+            aria-label={`Resize Inputs panel, currently ${inputsWidth} pixels wide`}
+            title={`Drag to resize Inputs between ${MIN_INPUTS_WIDTH} and ${maxInputsWidth(viewportWidth)} pixels`}
+            onpointerdown={startInputsResize}
+            onkeydown={resizeInputsWithKeyboard}
+          ><span aria-hidden="true"></span></button>
+          <aside class="inputs-panel">
           <header class="inputs-panel-header">
             <div class="inputs-heading">
               <div><span>Inputs</span><strong>{liveSuggestions.length} shown</strong></div>
@@ -1197,26 +1274,33 @@
               </small>
             </div>
             <div class="inputs-header-actions">
-              <button
-                type="button"
-                class:active={inputControlsOpen}
-                aria-expanded={inputControlsOpen}
-                onclick={() => inputControlsOpen = !inputControlsOpen}
-              >Filters{hiddenInputFilterCount ? ` ${hiddenInputFilterCount}` : ''}</button>
-              <button type="button" disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Run action</button>
-              <button type="button" onclick={() => actionManagerOpen = true}>Manage actions</button>
-              <button
-                type="button"
-                class="review-document"
-                disabled={workspace.generating || workspace.paused || !enabledRunSourceCount}
-                onclick={openReviewPreflight}
-              >{workspace.generating ? 'Reviewing…' : 'Perform review'}</button>
+              <div class="inputs-management-actions">
+                <span>Manage</span>
+                <button
+                  type="button"
+                  class:active={inputControlsOpen}
+                  aria-expanded={inputControlsOpen}
+                  onclick={() => inputControlsOpen = !inputControlsOpen}
+                >Filters{hiddenInputFilterCount ? ` ${hiddenInputFilterCount}` : ''}</button>
+                <button type="button" aria-label="Manage actions" title="Manage project AI actions" onclick={() => actionManagerOpen = true}>Actions</button>
+              </div>
+              <div class="inputs-execution-actions">
+                <span>Perform</span>
+                <button type="button" aria-label="Perform action…" title={workspace.paused ? 'Resume AI to perform an action' : !enabledRunSourceCount ? 'Enable at least one configured AI provider to perform an action' : selection.text.trim() ? 'Perform a project action on the current selection' : 'Perform a project action on the current document'} disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Action…</button>
+                <button
+                  type="button"
+                  class="review-document"
+                  aria-label="Review document"
+                  disabled={workspace.generating || workspace.paused || !enabledRunSourceCount}
+                  onclick={openReviewPreflight}
+                >{workspace.generating ? 'Reviewing…' : 'Document review'}</button>
+              </div>
             </div>
           </header>
 
           {#if contextPreflightOpen && reviewContextManifest}
             <section class="context-preflight" aria-label="Writing Context preflight">
-              <header><div><strong>Writing Context</strong><small>Perform review preflight</small></div><span>{contextPreflightLocked ? 'Locked while running' : 'Check before sending'}</span></header>
+              <header><div><strong>Writing Context</strong><small>Review document preflight</small></div><span>{contextPreflightLocked ? 'Locked while running' : 'Check before sending'}</span></header>
               <label class="review-instructions"><b>Review Instructions</b><textarea rows="4" disabled={contextPreflightLocked} bind:value={sentinelInstruction}></textarea><small>Tell the selected reviewers what to examine in this run.</small></label>
               <div class="context-required">
                 <b>Always included</b>
@@ -1246,7 +1330,7 @@
                 <span>0 trimmed</span>
               </div>
               {#if contextPreflightTargetId !== workspace.branchId}<p class="context-warning">Return to the original review document before running.</p>{/if}
-              <footer><button type="button" disabled={contextPreflightLocked} onclick={() => contextPreflightOpen = false}>Cancel</button><button type="button" class="primary" disabled={contextPreflightLocked || !sentinelInstruction.trim() || contextPreflightTargetId !== workspace.branchId} onclick={() => void runReviewFromPreflight()}>{contextPreflightLocked ? 'Reviewing…' : 'Perform review'}</button></footer>
+              <footer><button type="button" disabled={contextPreflightLocked} onclick={() => contextPreflightOpen = false}>Cancel</button><button type="button" class="primary" disabled={contextPreflightLocked || !sentinelInstruction.trim() || contextPreflightTargetId !== workspace.branchId} onclick={() => void runReviewFromPreflight()}>{contextPreflightLocked ? 'Reviewing…' : 'Start review'}</button></footer>
             </section>
           {/if}
 
@@ -1344,16 +1428,19 @@
               >
                 <SuggestionCard
                   {suggestion}
+                  label={inputCardLabel(suggestion)}
                   active={workspace.activeSuggestionId === suggestion.id}
                   selectedVariant={selectedVariants[suggestion.id] ?? 0}
                   revisionBusy={workspace.generating && revisionSuggestionId === suggestion.id}
                   revisionAvailable={hasRevisionProvider}
+                  canBindSelection={Boolean(selection.text.trim())}
                   onActivate={() => void activateCard(suggestion.id)}
                   onSelectVariant={(index) => chooseVariant(suggestion.id, index)}
                   onAccept={(index) => accept(suggestion, index)}
                   onReject={(viaDrag) => reject(suggestion, viaDrag)}
                   onPreview={(text) => text === null ? workspace.clearPreview() : workspace.setPreview(suggestion.id, text)}
                   onSuggestRevision={() => void startSuggestionRevision(suggestion)}
+                  onBindSelection={() => void bindInputToSelection(suggestion)}
                   onSourceHover={() => workspace.log('source_tooltip_hovered', { source: suggestion.source, sourceNumber: suggestion.sourceNumber }, suggestion.id)}
                   onMove={(direction) => void moveInputOneStep(suggestion.id, direction)}
                   onOrderPointerDown={(event) => beginInputDrag(suggestion.id, event)}
@@ -1404,7 +1491,7 @@
   {#if actionRunnerOpen && selectedAction}
     <div class="modal-backdrop" role="presentation" onclick={() => { if (!actionRunnerLocked) actionRunnerOpen = false; }}>
       <div class="settings action-runner" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="action-runner-title" onclick={stopPropagation} onkeydown={stopPropagation}>
-        <header><div><small>Project AI action</small><h2 id="action-runner-title">Run action</h2></div><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>×</button></header>
+        <header><div><small>Project AI action</small><h2 id="action-runner-title">Perform action</h2></div><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>×</button></header>
         <label>Action<select value={selectedAction.id} disabled={actionRunnerLocked} onchange={(event) => chooseAction(event.currentTarget.value)}>{#each workspace.actions as action}<option value={action.id}>{action.name}</option>{/each}</select></label>
         <p class="provider-intro"><strong>{selectedAction.description || selectedAction.name}</strong><br />{selectedAction.instruction}</p>
         <fieldset class="action-targets"><legend>One target</legend>{#if selectedAction.allowedTargets.includes('selection')}<label><input type="radio" name="action-target" value="selection" checked={actionRunnerScope === 'selection'} disabled={actionRunnerLocked || !selection.text.trim()} onchange={() => changeActionScope('selection')} />Selection{actionRunnerRange ? ` · ${actionRunnerRange.text.trim().split(/\s+/).length} words` : ''}</label>{/if}{#if selectedAction.allowedTargets.includes('document')}<label><input type="radio" name="action-target" value="document" checked={actionRunnerScope === 'document'} disabled={actionRunnerLocked || selectedAction.requiresSelection} onchange={() => changeActionScope('document')} />Current document</label>{/if}</fieldset>
@@ -1431,6 +1518,17 @@
         providers={providerSettings.sources.filter((source) => source.number >= 3).map((source) => ({ id: source.id, label: providerSettings.sourceAvailability[source.id]?.name ?? source.label, model: providerSettings.sourceAvailability[source.id]?.model, available: providerSettings.sourceAvailability[source.id]?.available === true }))}
         onSave={saveAction}
         onDelete={deleteAction}
+        onRun={(id) => {
+          const action = workspace.actions.find((item) => item.id === id);
+          if (!action) return;
+          actionManagerOpen = false;
+          const scope = selection.text.trim() && action.allowedTargets.includes('selection')
+            ? 'selection'
+            : action.allowedTargets.includes('document') && !action.requiresSelection
+              ? 'document'
+              : 'selection';
+          openActionRunner(scope, id);
+        }}
         onClose={() => actionManagerOpen = false}
       />
     </div>
@@ -1495,6 +1593,7 @@
               {#each run.errors as error}
                 <div class="run-diagnostic"><b>{error.source}</b><span>{error.classification?.replaceAll('_', ' ') ?? error.kind ?? 'error'}{#if error.attempt} · attempt {error.attempt}/{error.maxAttempts ?? error.attempt}{/if}{#if error.recovered} · recovered{/if}</span><small>{error.message}</small></div>
               {/each}
+              {#if workspace.canRecoverRun(run.id)}<button type="button" onclick={() => void recoverFailedRun(run.id)}>Recover retained responses</button>{/if}
               {#if (run.state === 'failed' || run.state === 'partial') && run.errors.some((error) => !error.recovered && providerSettings.sourceAvailability[error.source]?.available)}<button type="button" onclick={() => void retryFailedRun(run.id)}>Retry failed providers</button>{/if}
               {#if run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)}<button type="button" onclick={() => void workspace.completeInterruptedRun(run.id)}>Complete without this passage</button>{/if}
             </article>
@@ -1714,7 +1813,7 @@
   .navigator-resizer span { position: absolute; top: 50%; left: 2px; width: 2px; height: 38px; transform: translateY(-50%); border-radius: 2px; background: color-mix(in srgb, var(--muted) 58%, transparent); }
   :global(body.resizing-navigator) { cursor: col-resize; user-select: none; }
   main { display: flex; min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex-direction: column; overflow: hidden; }
-  .workspace { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 22vw, 420px); min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex: 1 1 auto; overflow: hidden; }
+  .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 6px var(--inputs-width); min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex: 1 1 auto; overflow: hidden; }
   .workspace.review-hidden { grid-template-columns: minmax(0, 1fr); }
   .document-column { min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: auto; padding: 0 clamp(16px, 1.8vw, 36px) 72px; scrollbar-gutter: stable; }
   .editor-pane-header { position: sticky; z-index: 14; top: 0; display: flex; min-height: 58px; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 7px 0; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); backdrop-filter: blur(12px); }
@@ -1763,13 +1862,20 @@
   .custom-request .request-example { max-width: 260px; color: #d7d2c8; text-align: left; white-space: normal; }
   .custom-request button:disabled { opacity: .4; cursor: default; }
   .inputs-panel { min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: auto; padding: 0 18px; border-left: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 84%, var(--paper)); scrollbar-gutter: stable; }
-  .inputs-panel-header { position: sticky; z-index: 4; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 58px; padding: 9px 0; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); }
+  .inputs-resizer { position: relative; z-index: 5; width: 6px; height: 100%; padding: 0; border: 0; border-radius: 0; background: color-mix(in srgb, var(--line) 55%, transparent); cursor: col-resize; outline: none; touch-action: none; }
+  .inputs-resizer::after { position: absolute; inset: 0 -3px; content: ''; }
+  .inputs-resizer:hover, .inputs-resizer:focus-visible { background: var(--accent); }
+  .inputs-resizer span { position: absolute; top: 50%; left: 2px; width: 2px; height: 38px; transform: translateY(-50%); border-radius: 2px; background: color-mix(in srgb, var(--muted) 58%, transparent); }
+  :global(body.resizing-inputs) { cursor: col-resize; user-select: none; }
+  .inputs-panel-header { position: sticky; z-index: 4; top: 0; display: grid; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--canvas) 94%, var(--paper)); }
   .inputs-heading { min-width: 0; }
   .inputs-heading > div { display: flex; align-items: baseline; gap: 8px; }
   .inputs-heading span { font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .09em; }
   .inputs-heading strong, .inputs-heading small { color: var(--muted); font: 500 9px/1.35 var(--font-ui); }
   .inputs-heading small { display: block; margin-top: 4px; }
-  .inputs-header-actions { display: flex; align-items: center; gap: 5px; }
+  .inputs-header-actions { display: grid; justify-content: end; gap: 5px; }
+  .inputs-header-actions > div { display: grid; grid-template-columns: 52px auto auto; align-items: center; justify-content: end; gap: 5px; }
+  .inputs-header-actions > div > span { color: var(--muted); font: 700 8px/1 var(--font-ui); text-align: right; text-transform: uppercase; letter-spacing: .06em; }
   .inputs-header-actions button, .inputs-panel-footer button { border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink-soft); padding: 7px 9px; font: 700 9px/1 var(--font-ui); cursor: pointer; white-space: nowrap; }
   .inputs-header-actions button.active { border-color: var(--accent); color: var(--accent); }
   .inputs-header-actions .review-document { border-color: var(--accent); background: var(--accent); color: white; }
@@ -1988,7 +2094,6 @@
   .new-context > button:disabled { opacity: .45; cursor: default; }
   .new-context::after { display: block; clear: both; content: ''; }
   @media (max-width: 980px) {
-    .workspace { grid-template-columns: minmax(0, 1fr) minmax(270px, 36vw); }
     .workspace.review-hidden { grid-template-columns: minmax(0, 1fr); }
     .brand small { display: none; }
   }

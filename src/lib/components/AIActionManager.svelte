@@ -8,10 +8,11 @@
     providers: ProviderChoice[];
     onSave: (action: AIActionDefinition) => Promise<void>;
     onDelete: (id: string) => Promise<void>;
+    onRun: (id: string) => void;
     onClose: () => void;
   }
 
-  let { actions, providers, onSave, onDelete, onClose }: Props = $props();
+  let { actions, providers, onSave, onDelete, onRun, onClose }: Props = $props();
   let selectedId = $state('');
   let draft = $state<AIActionDefinition>(copy(undefined));
   let initialized = $state(false);
@@ -95,7 +96,7 @@
 
 <div class="action-manager" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="action-manager-title" onclick={(event) => event.stopPropagation()} onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') onClose(); }}>
   <header><div><small>Project settings</small><h2 id="action-manager-title">AI actions</h2></div><button type="button" onclick={onClose}>×</button></header>
-  <p class="intro">Actions belong to this project and travel with its compact export. They define one target, read-only context, and one response contract.</p>
+  <p class="intro">Actions belong to this project and travel with its compact export. Run them here or use <b>Perform action…</b> in Inputs or beside selected text.</p>
   <div class="body">
     <aside>
       {#each actions as action}
@@ -114,7 +115,7 @@
       <div class="two"><label>Revision options<input type="number" min="1" max="5" disabled={draft.responseContract !== 'revision_options'} bind:value={draft.optionCount} /></label><label>Temperature <small>blank lets the provider decide</small><input type="number" min="0" max="2" step="0.1" value={draft.temperature ?? ''} oninput={(event) => draft.temperature = event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value)} /></label></div>
       <label class="explanation"><input type="checkbox" bind:checked={draft.includeExplanation} />Request explanations where the contract supports them</label>
       {#if error}<p class="error" role="alert">{error}</p>{/if}
-      <footer><div>{#if selectedId}<button type="button" class:danger={deleteArmed} disabled={saving} onclick={remove}>{deleteArmed ? 'Confirm delete' : 'Delete'}</button>{/if}</div><button type="button" disabled={saving} onclick={onClose}>Close</button><button class="primary" disabled={saving || !draft.name.trim() || !draft.instruction.trim() || !draft.allowedTargets.length}>{saving ? 'Saving…' : 'Save action'}</button></footer>
+      <footer><div>{#if selectedId}<button type="button" class:danger={deleteArmed} disabled={saving} onclick={remove}>{deleteArmed ? 'Confirm delete' : 'Delete'}</button>{/if}</div>{#if selectedId}<button type="button" disabled={saving} onclick={() => onRun(selectedId)}>Run saved action</button>{/if}<button type="button" disabled={saving} onclick={onClose}>Close</button><button class="primary" disabled={saving || !draft.name.trim() || !draft.instruction.trim() || !draft.allowedTargets.length}>{saving ? 'Saving…' : 'Save action'}</button></footer>
     </form>
   </div>
 </div>

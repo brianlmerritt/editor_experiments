@@ -104,6 +104,7 @@ export interface AIServiceDiagnostic {
   model?: string;
   protocol?: 'openai_compatible' | 'anthropic';
   latencyMs?: number;
+  localReplay?: boolean;
 }
 
 export interface AIInteractionResult<T = unknown> {
@@ -115,6 +116,7 @@ export interface AIInteractionResult<T = unknown> {
 
 export interface AIInteractionService {
   execute(request: AIInteractionRequest, signal?: AbortSignal): Promise<AIInteractionResult>;
+  recover?(request: AIInteractionRequest, diagnostics: AIServiceDiagnostic[]): Promise<AIInteractionResult>;
 }
 
 export type AIActivityState = 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'discarded';
