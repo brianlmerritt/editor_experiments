@@ -762,6 +762,74 @@ Multiple panes are projections over one Svelte workspace aggregate. They must no
 create competing document stores or permit ProseMirror instances to become separate
 authorities.
 
+### First concrete split and fork workflows
+
+The first pane manager should prove useful writing workflows without requiring a diff
+engine:
+
+1. **Live document beside fork B.** One pane shows the current document on fork A and
+   another shows the corresponding logical document on fork B. Both are editable,
+   clearly labelled, independently scrollable projections. No visual diff is required
+   for the first slice.
+2. **Append or generate on a fork.** A generation or revision action captures the
+   focused pane's `forkId`, document, selection or insertion point, and Writing
+   Context. To try the result on a new fork, the writer first creates or selects that
+   fork; the returned proposal belongs only to it and still requires explicit
+   acceptance. Appending to an existing fork is the same operation after focusing
+   that fork. AI never bypasses the Input and Svelte transaction boundary merely
+   because the destination is experimental.
+3. **Different Material at the same time.** A scene can remain open beside a character,
+   location, Spine, Todo, research Node, or another scene. Commands, selection, Inputs,
+   and Writing Context follow the focused pane.
+4. **Derived multi-item views.** A Collection may open a read-only or navigable list
+   of all direct children; a Node may open a list of all confirmed relationships; a
+   container may expose all direct child material. Opening an entry replaces the
+   focused pane or opens a new split. Editing many underlying documents as though the
+   aggregate were one document is explicitly later work.
+5. **Reference while writing.** A writer can keep the active scene editable while a
+   supporting pane shows the relevant character state, outline, research, Todo, or
+   relationship list without moving the main pane.
+6. **Fork comparison without diff.** Two panes, explicit fork labels, matching logical
+   Node identity, and independent navigation provide the initial comparison surface.
+   Textual or semantic diffs, selective hunk adoption, and scoring follow later.
+
+Each pane therefore needs independent Node/fork identity, scroll, selection, zoom,
+location history, and Navigator memory. Closing or replacing a pane must not close or
+replace the canonical document. Two panes showing the same logical document and fork
+must update from one Svelte-owned document state while retaining separate selections
+and scroll positions; transaction broadcast must avoid editor feedback loops.
+
+### Implementation difficulty and staging
+
+The CSS split tree is not the difficult part. The current single-pane POC has one
+global `branchId`, editor handle, document snapshot, selection, and writing history.
+Those assumptions must become a Svelte-owned pane registry and focused-pane context
+before a second ProseMirror view is safe.
+
+- **Basic horizontal/vertical pane layout:** moderate. The full-height resizable shell
+  already establishes the available central workspace.
+- **Different Material documents in separate panes:** moderate once document state is
+  keyed by Node rather than one active global document.
+- **Collection-child and relationship-list views:** low to moderate as read-only
+  derived projections; substantially harder if edited as one combined document.
+- **The same document/fork in two live panes:** moderate to high because transactions
+  must update one Svelte authority and synchronise both ProseMirror projections
+  without sharing cursor state or producing loops.
+- **A content-only fork of one document:** moderate to high. Stable logical identity,
+  lineage, fork-specific content, commands, undo, and Inputs all need explicit keys.
+- **A work fork varying Spine, Material, relationships, and Todos:** high and should
+  follow content-fork proof rather than be hidden inside the first pane slice.
+- **AI append/revision on a selected fork:** moderate after pane and content-fork
+  identity exist; unsafe before that because a run could target the wrong lineage.
+- **Visual diffs, selective cross-fork adoption, and cross-pane drag/copy:** later,
+  high-interaction work that is not required to prove the underlying model.
+
+The safe sequence is: introduce pane identities with one pane; move active document,
+selection, editor projection, and location memory behind the focused pane; add a
+second pane showing a different Material Node; support the same document in two
+views; introduce content-only fork identity; then permit AI actions and generation on
+the explicitly focused fork. Work-level graph forks and diffs come afterwards.
+
 ## Durable material versus attached activity
 
 Not every stored object belongs in the Navigator.
@@ -822,16 +890,18 @@ and Navigator structure have been proved.
 
 ### Inputs, lints, suggestions, and chat
 
-- whether these are different Input kinds, states/components of one editorial thread,
-  or a mixture of both;
-- how one observation can become discussion, alternatives, accepted work, a human
-  edit, and resolution without losing provenance;
-- which objects appear as Input cards or badges and which can be explicitly adopted
-  into authoritative Navigator material;
-- how duplicate or semantically overlapping findings are consolidated;
+- [AI_BOUNDARY.md](./AI_BOUNDARY.md) now defines the first management direction:
+  conservatively grouped editorial concerns over retained underlying Inputs, separate
+  lifecycle sections, expandable model evidence, group actions, and paginated History;
+- choose and test the exact overlap thresholds used for deterministic concern
+  grouping, plus explicit reversible manual merge/split behaviour;
+- decide how an observation grows into discussion, alternatives, accepted work, a
+  human edit, and resolution without losing provenance;
+- decide which objects appear as cards, concern summaries, or badges and which can be
+  explicitly adopted into authoritative Navigator material;
 - how work is prioritised globally and filtered to the selected node;
 - how an edit suggests that work may be complete without AI resolving it silently;
-- card dismissal, archival, recovery, and undo semantics;
+- finalise concern dismissal, archival, recovery, bulk action, and undo semantics;
 - conversation scope, lifetime, context selection, and promotion to durable notes.
 
 ### Input categories, filters, and provider sources

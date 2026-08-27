@@ -159,6 +159,8 @@ The implemented architecture slice provides:
 - document review opens a Writing Context preflight with locked target and
   **Spine (including story brief)** evidence; optional Material, relationships, Todos, and writer-added
   Navigator Material are remembered per project/action and frozen into each run;
+  additional Material choices are compactly grouped by the project's Material types
+  with numeric title ordering and selected/available counts;
 - Review Instructions live in that Inputs preflight rather than in a separate Brief
   screen. The Spine owns the story brief and overall writing direction;
 - enabled providers run as independent passage/provider checks within one review

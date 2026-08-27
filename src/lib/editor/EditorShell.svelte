@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorState, TextSelection, type Command, type Transaction } from 'prosemirror-state';
+  import { EditorState, Selection, TextSelection, type Command, type Transaction } from 'prosemirror-state';
   import { EditorView } from 'prosemirror-view';
   import type { Node as ProseMirrorNode, Slice } from 'prosemirror-model';
   import { keymap } from 'prosemirror-keymap';
@@ -13,6 +13,7 @@
   import { editorSchema as schema } from './schema';
   import { clipboardImageStrategy, mapPastedImageNodes, pastedImageSources, removeUnusablePastedImages } from './image-paste';
   import { normalizeListSlice, normalizeSelectedList } from './list-normalization';
+  import { multilineReplacementSlice } from './plain-text-replacement';
   import { richDocumentFromProseMirror, richDocumentFromText, richDocumentToProseMirror, type RichDocument } from '$lib/workspace/rich-document';
   import { liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
   import {
@@ -351,7 +352,14 @@
     let transaction = view.state.tr;
     let acceptedFrom = range.from;
     let acceptedText = text;
-    if (text) transaction = transaction.replaceWith(range.from, range.to, schema.text(text));
+    let multiline = false;
+    if (text) {
+      const slice = multilineReplacementSlice(text, schema);
+      if (slice) {
+        multiline = true;
+        transaction = transaction.replaceRange(range.from, range.to, slice);
+      } else transaction = transaction.replaceWith(range.from, range.to, schema.text(text));
+    }
     else {
       const deletion = planDocumentDeletion(view.state.doc, range.from, range.to);
       acceptedFrom = deletion.from;
@@ -360,8 +368,13 @@
         ? transaction.replaceWith(deletion.from, deletion.to, schema.text(deletion.insert))
         : transaction.delete(deletion.from, deletion.to);
     }
-    const caret = Math.max(1, Math.min(acceptedFrom + acceptedText.length, transaction.doc.content.size));
-    transaction = transaction.setSelection(TextSelection.create(transaction.doc, caret));
+    const caret = Math.max(1, Math.min(
+      multiline ? transaction.mapping.map(range.to, 1) : acceptedFrom + acceptedText.length,
+      transaction.doc.content.size
+    ));
+    transaction = transaction.setSelection(multiline
+      ? Selection.near(transaction.doc.resolve(caret), -1)
+      : TextSelection.create(transaction.doc, caret));
     transaction.setMeta('workspaceOrigin', { kind: 'input_acceptance', inputId: suggestion.id, source: suggestion.source } satisfies EditorTransactionOrigin);
     transaction.setMeta('addToHistory', true);
     view.dispatch(transaction);

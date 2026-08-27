@@ -461,6 +461,64 @@ Writing Context needs a clear inspect/edit surface, but its final modal, panel, 
 split-pane presentation remains a UX decision. The domain boundary does not depend on
 that choice.
 
+## Input management direction
+
+The Inputs panel must not become an indefinitely growing flat stack of cards. An
+Input remains non-authoritative evidence, but its purpose may differ: an observation,
+revision proposal, alternative draft, unanchored finding, discussion response, or a
+future proposed Todo, Material change, relationship, or Spine amendment.
+
+Related Inputs should be projected as one **editorial concern** when conservative,
+deterministic evidence agrees that they concern the same work:
+
+- the same document and fork;
+- the same or substantially overlapping target;
+- the same category;
+- a compatible action, intent, and response kind.
+
+The concern is a management projection, not permission to discard underlying Inputs.
+Expanding it exposes every provider response, revision alternative, provenance record,
+failure, and dissenting opinion. Its summary may say, for example, **3 agree · 1
+disagrees · 2 revisions · 1 provider failed**. Initial grouping must not ask AI to
+silently decide that semantically similar findings are equivalent. Broader suggested
+merges, if useful later, require writer confirmation and remain reversible.
+
+The working surface should distinguish lifecycle from Input kind:
+
+- **Needs decision** — actionable Inputs with a current target;
+- **Needs anchor** — useful unanchored findings awaiting an explicit writer selection;
+- **Deferred** — deliberately postponed without rejection;
+- **Resolved** — accepted, rejected, superseded, dismissed, or addressed by a
+  confirmed human edit;
+- **History** — archived evidence and completed or superseded runs.
+
+Clearing a current pending batch remains distinct from rejection, suppression, and
+archival. It removes working clutter without asserting that the same concern must
+never appear in a future review.
+
+A concern may be expanded, collapsed, deferred, dismissed, archived, reopened, or
+used to request further alternatives. An unanchored concern can be attached to an
+explicit selection. Later adoption actions may promote selected evidence into a
+canonical Todo, Material note, relationship, or Spine amendment, but no promotion is
+automatic. Bulk actions operate only on explicitly selected concerns and enter the
+Svelte transaction and undo path.
+
+Presentation should reflect purpose rather than forcing every kind into one card:
+
+- observations emphasise diagnosis and evidence;
+- revisions compare the original with selectable alternatives;
+- discussions remain readable and may yield explicitly extracted work;
+- unanchored findings emphasise attachment rather than acceptance;
+- project-change proposals show the exact bounded operation awaiting approval.
+
+The live panel should load current actionable summaries rather than rendering the
+complete historical ledger. History needs facade-backed filtering and pagination or
+virtualisation, with full provider evidence loaded only when expanded. The first
+bounded implementation slice is therefore: deterministic concern grouping; **Needs
+decision**, **Needs anchor**, and **Resolved** sections; expandable source evidence;
+group-level defer/dismiss/archive; and separately paginated History. Threaded chat,
+AI-authored project changes, and semantic merging are later decisions.
+
 ## Phase 1 implementation gate
 
 Before expanding AI features, implementation must be able to prove:

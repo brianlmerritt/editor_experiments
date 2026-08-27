@@ -142,6 +142,9 @@ workspace layout. The next Navigator proof of concept is specified in
 - Margin-note revision bridge: browser QA clicked **Suggest revisions** on the `felt`
   distance annotation, verified the exact word became the editor selection, and found
   **Address Distance note**, standard craft actions, and the guarded custom request.
+- Multiline AI alternatives are inserted as actual ProseMirror paragraphs. LF, CRLF,
+  CR, and blank-line separators no longer collapse into one dense paragraph when an
+  alternative is accepted; single-line alternatives remain inline replacements.
 - Automated tests: 16 files passed, 82 tests passed.
 - `npm run check`: 0 errors and 0 warnings.
 - `npm run build`: passed.

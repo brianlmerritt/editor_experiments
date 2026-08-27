@@ -17,6 +17,7 @@
   import type { AIActionDefinition, AIActionTargetScope } from '$lib/ai/actions';
   import type { ProjectExportMode, ProjectImportPreview } from '$lib/workspace/project-transfer';
   import type { StorageAnalysis } from '$lib/workspace/retention';
+  import { groupAIContextMaterials, type AIContextMaterialGroup } from '$lib/workspace/context-materials';
 
   type ContextDraft = Pick<ContextBucket, 'title' | 'role' | 'content'>;
 
@@ -141,6 +142,16 @@
   let actionContextManifest = $derived(selectedAction && actionRunnerOpen
     ? workspace.actionContextPreview(selectedAction, actionRunnerScope, actionRunnerRange, actionRunnerContext)
     : null);
+  let reviewContextMaterialGroups = $derived(groupAIContextMaterials(
+    workspace.aiContextMaterials,
+    workspace.navigator.collections,
+    contextPreflightTargetId
+  ));
+  let actionContextMaterialGroups = $derived(groupAIContextMaterials(
+    workspace.aiContextMaterials,
+    workspace.navigator.collections,
+    workspace.branchId
+  ));
 
   const activityLabels: Record<CraftActivityState, string> = {
     running: 'Running',
@@ -1118,6 +1129,39 @@
 
 </script>
 
+{#snippet contextMaterialPicker(
+  groups: AIContextMaterialGroup[],
+  contextSelection: AIContextSelection,
+  disabled: boolean,
+  toggle: (sourceId: string) => void
+)}
+  <div class="context-picker">
+    {#each groups as group (group.id)}
+      <section class="context-picker-group">
+        <header>
+          <strong>{group.label}</strong>
+          <span>{group.items.filter((item) => contextSelection.addedSourceIds.includes(item.id)).length}/{group.items.length}</span>
+        </header>
+        <div>
+          {#each group.items as item (item.id)}
+            <label title={workspace.navigatorNodeLabel(item)}>
+              <input
+                type="checkbox"
+                checked={contextSelection.addedSourceIds.includes(item.id)}
+                {disabled}
+                onchange={() => toggle(item.id)}
+              />
+              <span>{workspace.navigatorNodeLabel(item)}</span>
+            </label>
+          {/each}
+        </div>
+      </section>
+    {:else}
+      <p>No other Material exists in this project.</p>
+    {/each}
+  </div>
+{/snippet}
+
 <svelte:head><title>Margin Note — writing support</title><meta name="description" content="A meta-first creative writing support workbench." /></svelte:head>
 
 <input class="visually-hidden" bind:this={projectImportInput} type="file" accept=".mnote.zip,application/zip" aria-label="Import Margin Note project" onchange={inspectProjectImport} />
@@ -1316,13 +1360,7 @@
               </div>
               <button class="add-context" type="button" disabled={contextPreflightLocked} aria-expanded={contextPickerOpen} onclick={() => contextPickerOpen = !contextPickerOpen}>+ Add context…</button>
               {#if contextPickerOpen}
-                <div class="context-picker">
-                  {#each workspace.aiContextMaterials.filter((item) => item.id !== contextPreflightTargetId) as item}
-                    <label><input type="checkbox" checked={reviewContextSelection.addedSourceIds.includes(item.id)} onchange={() => toggleAddedContext(item.id)} /><span>{workspace.navigatorNodeLabel(item)}</span><small>{workspace.navigatorNodeType(item)}</small></label>
-                  {:else}
-                    <p>No other Material exists in this project.</p>
-                  {/each}
-                </div>
+                {@render contextMaterialPicker(reviewContextMaterialGroups, reviewContextSelection, contextPreflightLocked, toggleAddedContext)}
               {/if}
               <div class="context-manifest-summary">
                 <span>{reviewContextManifest.items.filter((item) => item.sent).length} included</span>
@@ -1502,7 +1540,7 @@
             <div class="context-required"><b>Always included</b>{#each actionContextManifest.items.filter((item) => item.inclusion === 'required' && item.sourceType !== 'action') as item}<div class="required-context-row"><span>🔒 {item.title}</span><small>v{item.sourceRevision}</small></div>{/each}</div>
             <div class="context-options"><b>Include applicable context</b><label><input type="checkbox" bind:checked={actionRunnerContext.includeMaterial} disabled={actionRunnerLocked} />Material</label><label><input type="checkbox" bind:checked={actionRunnerContext.includeRelationships} disabled={actionRunnerLocked} />Relationships</label><label><input type="checkbox" bind:checked={actionRunnerContext.includeTodos} disabled={actionRunnerLocked} />Open Todos</label></div>
             <button class="add-context" type="button" disabled={actionRunnerLocked} aria-expanded={actionContextPickerOpen} onclick={() => actionContextPickerOpen = !actionContextPickerOpen}>+ Add context…</button>
-            {#if actionContextPickerOpen}<div class="context-picker">{#each workspace.aiContextMaterials.filter((item) => item.id !== workspace.branchId) as item}<label><input type="checkbox" checked={actionRunnerContext.addedSourceIds.includes(item.id)} onchange={() => toggleActionContext(item.id)} /><span>{workspace.navigatorNodeLabel(item)}</span><small>{workspace.navigatorNodeType(item)}</small></label>{:else}<p>No other Material exists in this project.</p>{/each}</div>{/if}
+            {#if actionContextPickerOpen}{@render contextMaterialPicker(actionContextMaterialGroups, actionRunnerContext, actionRunnerLocked, toggleActionContext)}{/if}
             <div class="context-manifest-summary"><span>{actionContextManifest.items.filter((item) => item.sent).length} included</span><span>{actionContextManifest.items.filter((item) => !item.sent).length} omitted</span></div>
           </section>
         {:else}<p class="reset-warning">The selected target is empty or no longer matches the editor.</p>{/if}
@@ -1880,7 +1918,7 @@
   .inputs-header-actions button.active { border-color: var(--accent); color: var(--accent); }
   .inputs-header-actions .review-document { border-color: var(--accent); background: var(--accent); color: white; }
   .inputs-header-actions button:disabled { opacity: .42; cursor: default; }
-  .context-preflight { display: grid; gap: 10px; margin-top: 10px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 4px; background: var(--paper); padding: 11px; }
+  .context-preflight { display: grid; gap: 8px; margin-top: 8px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 4px; background: var(--paper); padding: 10px; }
   .context-preflight > header { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
   .context-preflight > header div { display: grid; gap: 3px; }
   .context-preflight > header strong { color: var(--ink-soft); font: 700 10px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
@@ -1893,15 +1931,20 @@
   .context-required > b, .context-options > b { color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
   .context-required button { display: flex; align-items: center; justify-content: space-between; gap: 7px; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink-soft); padding: 7px; text-align: left; cursor: pointer; }
   .context-required button small { color: var(--muted); font: 7px/1 var(--font-ui); white-space: nowrap; }
-  .context-options { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
+  .context-options { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
   .context-options > b { flex-basis: 100%; }
-  .context-options label, .context-picker label { display: flex; align-items: center; gap: 5px; color: var(--ink-soft); font: 9px/1.2 var(--font-ui); }
+  .context-options label, .context-picker label { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--ink-soft); font: 9px/1.2 var(--font-ui); }
   .context-options input, .context-picker input { accent-color: var(--accent); }
   .add-context { justify-self: start; border: 1px dashed var(--line-strong); border-radius: 3px; background: transparent; color: var(--accent); padding: 6px 8px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
-  .context-picker { display: grid; max-height: 180px; gap: 3px; overflow: auto; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; padding: 6px; }
-  .context-picker label { padding: 5px; }
+  .context-picker { display: grid; max-height: min(38vh, 300px); overflow: auto; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; }
+  .context-picker-group + .context-picker-group { border-top: 1px solid var(--line); }
+  .context-picker-group > header { position: sticky; z-index: 1; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--paper-deep); padding: 5px 8px; }
+  .context-picker-group > header strong { color: var(--ink-soft); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
+  .context-picker-group > header span { color: var(--muted); font: 8px/1 var(--font-mono); }
+  .context-picker-group > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .context-picker label { min-width: 0; padding: 6px 8px; cursor: pointer; }
+  .context-picker label:hover { background: var(--accent-soft); }
   .context-picker label span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .context-picker label small { color: var(--muted); font: 7px/1 var(--font-ui); }
   .context-picker p { margin: 6px; color: var(--muted); font: 9px/1.4 var(--font-ui); }
   .context-manifest-summary { display: flex; gap: 8px; color: var(--muted); font: 8px/1 var(--font-mono); }
   .context-warning { margin: 0; color: var(--reject); font: 9px/1.4 var(--font-ui); }
@@ -2035,6 +2078,8 @@
   .settings input, .settings select, .settings textarea { width: 100%; border: 1px solid var(--line); border-radius: 3px; background: #fffefa; color: var(--ink); padding: 9px 10px; outline: none; font: 12px/1.45 var(--font-ui); resize: vertical; }
   .settings input:focus, .settings textarea:focus, .settings select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .settings label small, .version { justify-self: end; color: var(--muted); font-size: 8px; }
+  .settings .context-options label, .settings .context-picker label { display: flex; gap: 6px; margin: 0; font: 9px/1.2 var(--font-ui); }
+  .settings .context-options input, .settings .context-picker input { width: 13px; height: 13px; margin: 0; padding: 0; }
   .settings > footer, .settings form > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
   .settings footer p { flex: 1; margin: 0; color: var(--muted); font: 9px/1.5 var(--font-ui); }
   .settings footer button { border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink-soft); padding: 8px 12px; font-size: 10px; cursor: pointer; }
