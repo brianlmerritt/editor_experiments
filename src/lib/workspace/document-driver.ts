@@ -44,6 +44,17 @@ interface YjsHandle {
   persistence?: IndexeddbPersistence;
 }
 
+const mirrorDatabaseVersion = 2;
+const excludedMirrorMarginNoteKeys = new Set(['runs', 'contextSnapshots', 'activities']);
+
+function mirrorExtensions(extensions: ExtensionData): ExtensionData {
+  const copy = JSON.parse(JSON.stringify(extensions)) as ExtensionData;
+  const marginNote = copy.margin_note;
+  if (!marginNote || typeof marginNote !== 'object' || Array.isArray(marginNote)) return copy;
+  for (const key of excludedMirrorMarginNoteKeys) delete marginNote[key];
+  return copy;
+}
+
 /**
  * A write-behind Yjs document mirror. It receives canonical Svelte snapshots through
  * WorkspaceFacade and never supplies live editor state directly.
@@ -99,6 +110,11 @@ export class YjsDocumentDriver implements DocumentDriver {
       if (!this.persist) return { doc };
       const persistence = new IndexeddbPersistence(documentMirrorDatabaseName(documentId, identity), doc);
       await persistence.whenSynced;
+      if (identity) {
+        void clearDocument(legacyDocumentMirrorDatabaseName(documentId, identity)).catch((error) => {
+          console.warn('[Margin Note] Legacy document mirror cleanup failed', { documentId, error });
+        });
+      }
       return { doc, persistence };
     })();
     this.handles.set(documentId, opened);
@@ -109,7 +125,7 @@ export class YjsDocumentDriver implements DocumentDriver {
     doc.transact(() => {
       const state = doc.getMap<unknown>('workspace');
       state.set('content', snapshot.content);
-      state.set('extensions', JSON.parse(JSON.stringify(snapshot.extensions)));
+      state.set('extensions', mirrorExtensions(snapshot.extensions));
       state.set('workspaceRevision', snapshot.workspaceRevision);
       state.set('durableRevision', snapshot.durableRevision);
       state.set('lastOrigin', origin);
@@ -139,6 +155,13 @@ function stableStorageSuffix(value: string): string {
  * Stable ID suffixes prevent projects or documents with identical titles colliding.
  */
 export function documentMirrorDatabaseName(documentId: string, identity?: DocumentMirrorIdentity): string {
+  if (!identity) return `margin-note:v${mirrorDatabaseVersion}:document:${documentId}`;
+  const project = readableStoragePart(identity.projectTitle, 'untitled-project');
+  const document = readableStoragePart(identity.documentTitle, 'untitled-document');
+  return `margin-note:v${mirrorDatabaseVersion}:document:${project}-${stableStorageSuffix(identity.projectId)}:${document}-${stableStorageSuffix(documentId)}`;
+}
+
+function legacyDocumentMirrorDatabaseName(documentId: string, identity?: DocumentMirrorIdentity): string {
   if (!identity) return `margin-note:document:${documentId}`;
   const project = readableStoragePart(identity.projectTitle, 'untitled-project');
   const document = readableStoragePart(identity.documentTitle, 'untitled-document');

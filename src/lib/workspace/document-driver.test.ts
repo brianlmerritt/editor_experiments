@@ -7,7 +7,7 @@ describe('Yjs document driver', () => {
     const commit: WorkspaceCommit = {
       documentId: 'main',
       content: 'Canonical Rune text.',
-      extensions: { margin_note: { revision: 7 } },
+      extensions: { margin_note: { revision: 7, inputs: [{ id: 'input-1' }], runs: [{ id: 'run-1' }], contextSnapshots: { context_1: {} }, activities: [{ id: 'activity-1' }] } },
       workspaceRevision: 7,
       durableRevision: 3,
       transactionId: 'transaction-7',
@@ -20,7 +20,7 @@ describe('Yjs document driver', () => {
     expect(await driver.inspect('main')).toEqual({
       documentId: 'main',
       content: 'Canonical Rune text.',
-      extensions: { margin_note: { revision: 7 } },
+      extensions: { margin_note: { revision: 7, inputs: [{ id: 'input-1' }] } },
       workspaceRevision: 7,
       durableRevision: 3
     });
@@ -33,10 +33,10 @@ describe('document mirror database names', () => {
       projectId: 'project_4db8912cc781',
       projectTitle: 'AGI: The Book Test',
       documentTitle: 'Chapter 1 — Entrance Fee'
-    })).toBe('margin-note:document:agi-the-book-test-4db8912cc781:chapter-1-entrance-fee-9f2c5a7b6652');
+    })).toBe('margin-note:v2:document:agi-the-book-test-4db8912cc781:chapter-1-entrance-fee-9f2c5a7b6652');
   });
 
   it('keeps the legacy identity when project metadata is unavailable', () => {
-    expect(documentMirrorDatabaseName('main')).toBe('margin-note:document:main');
+    expect(documentMirrorDatabaseName('main')).toBe('margin-note:v2:document:main');
   });
 });

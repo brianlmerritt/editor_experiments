@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorDocumentSnapshot } from './transactions';
-import { completeDocumentMappedRange, completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween } from './document';
+import { completeDocumentMappedRange, completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween, mappedDocumentRangeMatches } from './document';
 
 const snapshot: EditorDocumentSnapshot = {
   doc: {
@@ -57,6 +57,38 @@ describe('canonical document ranges', () => {
     expect(mapped.text).toBe('One\nA\uFFFCB');
     expect(mapped.textMap.starts).toEqual([1, 2, 3, 4, 6, 7, 8]);
     expect(mapped.textMap.ends).toEqual([2, 3, 4, 6, 7, 8, 9]);
+  });
+
+  it('compares whole-document review targets through the same mapped projection used at dispatch', () => {
+    const structured: EditorDocumentSnapshot = {
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Opening' }] },
+          { type: 'paragraph' },
+          { type: 'horizontal_rule' },
+          { type: 'paragraph', content: [{ type: 'text', text: 'The story begins.' }] }
+        ]
+      },
+      text: 'Opening\n\nThe story begins.',
+      selection: { from: 0, to: 0 }
+    };
+    const captured = completeDocumentMappedRange(structured);
+
+    expect(mappedDocumentRangeMatches(structured, captured)).toBe(true);
+    expect(documentTextBetween(structured, captured.from, captured.to)).not.toBe(captured.text);
+    expect(mappedDocumentRangeMatches({
+      ...structured,
+      doc: {
+        ...structured.doc,
+        content: [
+          { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Opening' }] },
+          { type: 'paragraph' },
+          { type: 'horizontal_rule' },
+          { type: 'paragraph', content: [{ type: 'text', text: 'A changed beginning.' }] }
+        ]
+      }
+    }, captured)).toBe(false);
   });
 
   it('does not dispatch standalone craft requests for headings or scene dividers', () => {

@@ -83,6 +83,27 @@ describe('WorkspaceFacade', () => {
     });
   });
 
+  it('does not let a stalled browser mirror block the authoritative workspace', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input) => {
+      const path = String(input);
+      if (path === '/api/workspace') return json(persistent);
+      if (path === '/api/settings') return json({ brief, prompts, sourceAvailability });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0, codexTokens: 0 } });
+      return json({ error: 'unexpected path' }, 404);
+    });
+    const driver: DocumentDriver = {
+      hydrate: vi.fn(() => new Promise<void>(() => {})),
+      commit: vi.fn(async () => {})
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await new WorkspaceFacade(fetcher, driver, 1).load();
+
+    expect(result.activeDocumentId).toBe('main');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Document mirror hydration timed out'));
+    warn.mockRestore();
+  });
+
   it('keeps a recoverable provider-settings warning separate from the loaded writing workspace', async () => {
     const fetcher = vi.fn<FetchLike>(async (input) => {
       const path = String(input);

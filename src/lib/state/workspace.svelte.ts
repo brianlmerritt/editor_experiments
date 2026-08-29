@@ -9,7 +9,7 @@ import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
-import { completeDocumentMappedRange, completeDocumentRange, documentTextBetween, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
+import { completeDocumentMappedRange, completeDocumentRange, documentTextBetween, mappedDocumentRangeMatches, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
 import { compactRunHistory, resolveRunContext, resolveRunRequest, storeContextSnapshot, type AIContextSnapshots } from '$lib/workspace/run-retention';
 import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
@@ -1527,10 +1527,17 @@ export class WorkspaceState {
       if (actionableErrors.length) this.notice = actionableErrors.map((item) => `${item.source}: ${item.message}`).join(' · ');
       const currentRun = this.runs.find((item) => item.id === run.id);
       const target = currentRun ? firstTextTarget(currentRun.target) : null;
-      const currentText = target && this.documentSnapshot
-        ? documentTextBetween(this.documentSnapshot, target.start, target.end)
-        : null;
-      if (!currentRun || currentRun.state !== 'running' || !target || currentText !== currentRun.originalText) {
+      const currentTargetMatches = currentRun && target && this.documentSnapshot
+        ? configuration.textMap
+          ? mappedDocumentRangeMatches(this.documentSnapshot, {
+              from: target.start,
+              to: target.end,
+              text: currentRun.originalText,
+              textMap: configuration.textMap
+            })
+          : documentTextBetween(this.documentSnapshot, target.start, target.end) === currentRun.originalText
+        : false;
+      if (!currentRun || currentRun.state !== 'running' || !target || !currentTargetMatches) {
         this.runs = this.runs.map((item) => item.id === run.id
           ? { ...item, state: 'discarded', errors: diagnostics, completedAt: new Date().toISOString() }
           : item);

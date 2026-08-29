@@ -606,7 +606,10 @@ for selected legacy material, so paste and repair do not maintain separate list 
 `WorkspaceFacade.commit` durably saves the Svelte snapshot and then passes the
 acknowledged snapshot to a private Yjs/IndexedDB document driver. Yjs is a write-behind
 mirror and possible future collaboration implementation; it neither binds to
-ProseMirror nor supplies live application state. Provider transports likewise return
+ProseMirror nor supplies live application state. Mirror work has a bounded wait and
+cannot prevent workspace startup or make a successful durable save appear unfinished.
+Versioned mirror databases omit AI run history, activities, and shared context
+snapshots; those remain in durable storage and can be rebuilt downstream. Provider transports likewise return
 untrusted `InputProposal` data. Svelte owns run lifecycle, validates proposal anchors,
 creates input IDs and targets, and decides whether a delayed result remains applicable.
 

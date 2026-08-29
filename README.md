@@ -263,8 +263,10 @@ called only from SvelteKit server routes.
 ## Persistence
 
 - Browser recovery/collaboration mirror: Yjs in IndexedDB keys named
-  `margin-note:document:<document-id>`, written only through the facade document
-  driver after Svelte commits.
+  `margin-note:v2:document:<project-and-document-identity>`, written only through the
+  facade document driver after Svelte commits. Mirror hydration is bounded and cannot
+  block the authoritative workspace; AI run history and context snapshots are not
+  copied into this rebuildable mirror.
 - Projects, durable documents, immutable document/context versions, and the event
   ledger: `data/writing-ledger.sqlite` by default.
 - Inputs, formats, behaviour profiles, and workspace revision are stored under the

@@ -75,6 +75,17 @@ export function completeDocumentMappedRange(snapshot: EditorDocumentSnapshot): M
   };
 }
 
+export function mappedDocumentRangeMatches(snapshot: EditorDocumentSnapshot, captured: MappedDocumentRange): boolean {
+  const current = completeDocumentMappedRange(snapshot);
+  return current.from === captured.from
+    && current.to === captured.to
+    && current.text === captured.text
+    && current.textMap.starts.length === captured.textMap.starts.length
+    && current.textMap.ends.length === captured.textMap.ends.length
+    && current.textMap.starts.every((position, index) => position === captured.textMap.starts[index])
+    && current.textMap.ends.every((position, index) => position === captured.textMap.ends[index]);
+}
+
 export function documentParagraphs(snapshot: EditorDocumentSnapshot): DocumentRange[] {
   const document = schema.nodeFromJSON(snapshot.doc);
   const paragraphs: DocumentRange[] = [];

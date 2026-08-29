@@ -123,8 +123,25 @@ function exportFilename(response: Response): string {
 export class WorkspaceFacade {
   constructor(
     private readonly fetcher: FetchLike = fetch,
-    private readonly documentDriver: DocumentDriver = defaultDocumentDriver()
+    private readonly documentDriver: DocumentDriver = defaultDocumentDriver(),
+    private readonly mirrorWaitMs = 2_000
   ) {}
+
+  private async settleMirror(operation: Promise<void>, label: string): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = Symbol('mirror_timeout');
+    try {
+      const result = await Promise.race([
+        operation.then(() => null),
+        new Promise<symbol>((resolve) => { timeout = setTimeout(() => resolve(timedOut), this.mirrorWaitMs); })
+      ]);
+      if (result === timedOut) console.warn(`[Margin Note] ${label} timed out; Svelte and durable storage remain authoritative.`);
+    } catch (error) {
+      console.warn(`[Margin Note] ${label} failed; Svelte and durable storage remain authoritative.`, error);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
 
   async load(preferred?: { projectId?: string; documentId?: string }): Promise<WorkspaceBootstrap> {
     const persistent = await this.get<PersistentWorkspace>('/api/workspace');
@@ -161,7 +178,7 @@ export class WorkspaceFacade {
     const extension = activeDocument.extensions.margin_note;
     const workspaceRevision = extension && typeof extension === 'object' && !Array.isArray(extension)
       && typeof extension.revision === 'number' ? extension.revision : activeDocument.revision;
-    await this.documentDriver.hydrate({
+    await this.settleMirror(this.documentDriver.hydrate({
       documentId: activeDocument.id,
       mirrorIdentity: {
         projectId: activeProject.id,
@@ -172,7 +189,7 @@ export class WorkspaceFacade {
       extensions: activeDocument.extensions,
       workspaceRevision,
       durableRevision: activeDocument.revision
-    });
+    }), 'Document mirror hydration');
     return bootstrap;
   }
 
@@ -184,7 +201,10 @@ export class WorkspaceFacade {
       createdBy: transaction.sessionId,
       reason: transaction.reason
     });
-    await this.documentDriver.commit({ ...transaction, durableRevision: document.revision });
+    await this.settleMirror(
+      this.documentDriver.commit({ ...transaction, durableRevision: document.revision }),
+      'Document mirror commit'
+    );
     return {
       transactionId: transaction.transactionId,
       documentId: document.id,

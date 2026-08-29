@@ -183,8 +183,9 @@ The facade also supplies the document driver with project and document display
 identity. The Yjs adapter uses it only to name its device-local IndexedDB recovery
 mirror; the name is not a domain ID and does not become authoritative state. Names
 include stable project and document ID suffixes so two works or documents with the
-same title cannot share a mirror. Legacy opaque mirrors remain a storage-migration
-concern and are never silently deleted during hydration.
+same title cannot share a mirror. The mirror namespace is versioned. Hydration of a
+new namespace may retire its known older recovery mirror after the durable snapshot
+is available; it never deletes the durable project.
 
 ## Transactions, undo, and the façade
 
@@ -247,8 +248,11 @@ save, fork, export, formatting, or generation commands.
 `commit` saves the Svelte snapshot to the durable document service, then mirrors the
 acknowledged snapshot into a private `DocumentDriver`. The current browser driver uses
 Yjs and IndexedDB without binding Yjs to the editor. `load` hydrates that mirror from
-the durable snapshot. The driver can be replaced without changing Svelte state or
-editor components.
+the durable snapshot. Mirror hydration and commits are bounded, best-effort downstream
+work: a stalled or corrupt browser mirror warns in the console but cannot block Svelte
+from opening or the durable service from saving. Rebuildable AI run history and shared
+context snapshots are omitted from the mirror payload. The driver can be replaced
+without changing Svelte state or editor components.
 
 `requestInputs` transports a Svelte-created request and returns untrusted
 `InputProposal` values. It does not return domain inputs. `WorkspaceState` owns the

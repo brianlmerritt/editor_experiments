@@ -754,6 +754,35 @@ describe('semantic workspace history', () => {
     expect(workspace.activities.at(-1)?.state).toBe('completed');
   });
 
+  it('does not falsely discard an unchanged whole document with empty structural blocks', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [], diagnostics: [], context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document('Opening\n\n---\n\nThe story begins.')];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off' };
+    workspace.setEditorReady({
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Opening' }] },
+          { type: 'paragraph' },
+          { type: 'horizontal_rule' },
+          { type: 'paragraph', content: [{ type: 'text', text: 'The story begins.' }] }
+        ]
+      },
+      text: 'Opening\n\n---\n\nThe story begins.',
+      selection: { from: 0, to: 0 }
+    });
+
+    await workspace.runCraftPass({ id: 'sentinel', name: 'Review', version: 1, instruction: 'Review it.' });
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(workspace.runs).toHaveLength(1);
+    expect(workspace.runs[0].state).toBe('completed');
+  });
+
   it('dispatches one whole-document run per remote provider instead of one call per paragraph', async () => {
     const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({ proposals: [], diagnostics: [], context: request.context }));
     const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
