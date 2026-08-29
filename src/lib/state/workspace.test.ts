@@ -708,13 +708,14 @@ describe('semantic workspace history', () => {
       'Heighten', 'Main draft', 'Spine (including story brief)', 'Mara'
     ]));
     expect(workspace.activities.at(-1)).toMatchObject({ state: 'completed', runIds: [request.runId] });
-    expect(workspace.runs.at(-1)?.contextManifest).toEqual(request.context);
+    const completedRun = workspace.runs.at(-1)!;
+    expect(workspace.runContextManifest(completedRun)).toEqual(request.context);
     expect(adopted[0].provenance).toMatchObject({
       activityId: request.activityId,
       runId: request.runId,
       actionId: 'heighten',
       actionVersion: 1,
-      contextManifestId: request.runId
+      contextManifestId: completedRun.contextSnapshotId
     });
     expect(workspace.currentDocument?.content).toBe('noticed');
   });
@@ -861,7 +862,7 @@ describe('semantic workspace history', () => {
     const request = execute.mock.calls[0][0] as AIInteractionRequest;
     expect(request.context.items.find((item) => item.sourceId === 'context-mara')).toMatchObject({ sent: false, omissionReason: 'writer_excluded' });
     expect(request.context.items.find((item) => item.sourceId === 'research')).toMatchObject({ sent: true, inclusion: 'writer_added' });
-    expect(workspace.runs[0].requestedContextManifest).toEqual(request.context);
+    expect(workspace.runContextManifest(workspace.runs[0])).toEqual(request.context);
   });
 
   it('reconciles orphaned running work into an explicit durable decision', async () => {

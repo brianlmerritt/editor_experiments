@@ -91,7 +91,8 @@ describe('WorkspaceRepository', () => {
         margin_note: {
           revision: 2,
           inputs: [{ id: 'input-1', state: 'pending' }],
-          runs: [{ id: 'run-1', state: 'running' }]
+          runs: [{ id: 'run-1', state: 'running' }],
+          contextSnapshots: { context_1: { workspaceRevision: 2 } }
         }
       },
       reason: 'Record running craft pass'
@@ -100,7 +101,8 @@ describe('WorkspaceRepository', () => {
     expect(operational.revision).toBe(2);
     expect(operational.extensions.margin_note).toMatchObject({
       inputs: [{ id: 'input-1', state: 'pending' }],
-      runs: [{ id: 'run-1', state: 'running' }]
+      runs: [{ id: 'run-1', state: 'running' }],
+      contextSnapshots: { context_1: { workspaceRevision: 2 } }
     });
     expect(repository.documentRevisionCount(documentId)).toBe(1);
 
@@ -113,7 +115,8 @@ describe('WorkspaceRepository', () => {
           document: { type: 'doc', content: [] },
           formats: [],
           inputs: [{ id: 'input-1', state: 'accepted' }],
-          runs: [{ id: 'run-1', state: 'completed' }]
+          runs: [{ id: 'run-1', state: 'completed' }],
+          contextSnapshots: { context_1: { workspaceRevision: 3 } }
         }
       },
       reason: 'Accept revision'

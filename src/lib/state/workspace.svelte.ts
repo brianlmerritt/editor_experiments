@@ -10,6 +10,7 @@ import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasS
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
 import { completeDocumentMappedRange, completeDocumentRange, documentTextBetween, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
+import { compactRunHistory, resolveRunContext, resolveRunRequest, storeContextSnapshot, type AIContextSnapshots } from '$lib/workspace/run-retention';
 import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
 import {
@@ -106,6 +107,7 @@ export class WorkspaceState {
   inputs = $state<Suggestion[]>([]);
   formats = $state<FormatAttachment[]>([]);
   runs = $state<CraftRun[]>([]);
+  contextSnapshots = $state<AIContextSnapshots>({});
   activities = $state<AIActivityRecord[]>([]);
   behaviours = $state<Record<string, AttachmentBehaviour>>({ ...defaultAttachmentBehaviours });
   workspaceRevision = $state(0);
@@ -842,6 +844,10 @@ export class WorkspaceState {
     return this.settingsState.sourceAvailable(sourceId);
   }
 
+  runContextManifest(run: CraftRun): AIContextManifest | undefined {
+    return resolveRunContext(run, this.contextSnapshots);
+  }
+
   toggleCategory(category: Category): void {
     this.categoryVisibility[category] = !this.categoryVisibility[category];
   }
@@ -1245,7 +1251,7 @@ export class WorkspaceState {
 
   canRecoverRun(runId: string): boolean {
     const run = this.runs.find((item) => item.id === runId);
-    if (!run?.request || !this.aiService.recover) return false;
+    if (!run || !resolveRunRequest(run, this.contextSnapshots) || !this.aiService.recover) return false;
     const latestBySource = new Map<string, InputError>();
     for (const error of run.errors) if (error.kind === 'provider_output' && error.rawOutput) latestBySource.set(error.source, error);
     return [...latestBySource.values()].some((error) => !error.localReplay && (!error.recovered || run.proposalIds.length === 0));
@@ -1253,7 +1259,9 @@ export class WorkspaceState {
 
   async recoverRun(runId: string): Promise<Suggestion[]> {
     const run = this.runs.find((item) => item.id === runId);
-    if (!run?.request || !this.aiService.recover || !this.canRecoverRun(runId)) return [];
+    if (!run || !this.aiService.recover || !this.canRecoverRun(runId)) return [];
+    const request = resolveRunRequest(run, this.contextSnapshots);
+    if (!request) return [];
     const target = firstTextTarget(run.target);
     const currentText = target && this.documentSnapshot
       ? documentTextBetween(this.documentSnapshot, target.start, target.end)
@@ -1266,7 +1274,7 @@ export class WorkspaceState {
     for (const error of run.errors) if (error.kind === 'provider_output' && error.rawOutput) latestBySource.set(error.source, error);
     const retained = [...latestBySource.values()].filter((error) =>
       !error.localReplay && (!error.recovered || run.proposalIds.length === 0));
-    const response = await this.aiService.recover(run.request, retained);
+    const response = await this.aiService.recover(request, retained);
     const proposals = response.proposals.filter((proposal) =>
       run.permittedProposalKinds?.includes(proposal.kind) && isInputProposalPayload(proposal.payload));
     const adopted = proposals.flatMap((proposal) => {
@@ -1412,6 +1420,8 @@ export class WorkspaceState {
       exactText: input.text
     };
     const context = this.contextManifest(action, capturedTarget, contextSelection);
+    const storedContext = storeContextSnapshot(this.contextSnapshots, context);
+    this.contextSnapshots = storedContext.snapshots;
     const run: CraftRun = {
       id: makeId('run'),
       batchId: activity.id,
@@ -1425,8 +1435,7 @@ export class WorkspaceState {
       promptVersion: input.prompt.version,
       channel,
       intent,
-      requestedContextManifest: context,
-      contextManifest: context,
+      contextSnapshotId: storedContext.id,
       permittedProposalKinds,
       sourceStates: { ...requestedSourceStates },
       state: 'running',
@@ -1475,7 +1484,12 @@ export class WorkspaceState {
       }
       if (providerUsage.length) await this.refreshLedger();
       const contractDiagnostics: AIServiceDiagnostic[] = [];
-      if (!validReturnedContext(request.context, response.context)) {
+      const returnedContextValid = validReturnedContext(request.context, response.context);
+      const returnedContext = returnedContextValid
+        ? storeContextSnapshot(this.contextSnapshots, response.context)
+        : null;
+      if (returnedContext) this.contextSnapshots = returnedContext.snapshots;
+      if (!returnedContextValid) {
         contractDiagnostics.push({
           source: 'interaction_service',
           kind: 'contract' as const,
@@ -1525,8 +1539,11 @@ export class WorkspaceState {
         this.notice = 'The passage changed while the craft pass was running, so its proposals were safely discarded.';
         return [];
       }
+      const adoptionRun = returnedContext
+        ? { ...currentRun, contextSnapshotId: returnedContext.id }
+        : currentRun;
       const adopted = (contractDiagnostics.some((diagnostic) => diagnostic.message.includes('Writing Context')) ? [] : proposals).flatMap((proposal) => {
-        const inputRecord = this.adoptProposal(proposal.payload, currentRun, target.start, proposal.kind, configuration.textMap);
+        const inputRecord = this.adoptProposal(proposal.payload, adoptionRun, target.start, proposal.kind, configuration.textMap);
         return inputRecord ? [inputRecord] : [];
       });
       this.runs = this.runs.map((item) => item.id === run.id ? {
@@ -1534,7 +1551,7 @@ export class WorkspaceState {
         state: diagnostics.some((error) => !error.recovered) ? (adopted.length ? 'partial' : 'failed') : 'completed',
         proposalIds: adopted.map((item) => item.id),
         errors: diagnostics,
-        contextManifest: response.context,
+        contextSnapshotId: returnedContext?.id ?? item.contextSnapshotId,
         completedAt: new Date().toISOString()
       } : item);
       this.refreshAIActivity(activity.id);
@@ -1617,7 +1634,7 @@ export class WorkspaceState {
         runId: run.id,
         actionId: run.promptId,
         actionVersion: run.promptVersion,
-        contextManifestId: run.id
+        contextManifestId: run.contextSnapshotId
       }
     };
   }
@@ -2853,7 +2870,12 @@ export class WorkspaceState {
       return { ...normalized, state: 'stale' as const };
     });
     this.formats = Array.isArray(value?.formats) ? value.formats as FormatAttachment[] : [];
-    this.runs = Array.isArray(value?.runs) ? value.runs as CraftRun[] : [];
+    const storedSnapshots = value?.contextSnapshots && typeof value.contextSnapshots === 'object' && !Array.isArray(value.contextSnapshots)
+      ? value.contextSnapshots as AIContextSnapshots
+      : {};
+    const compactedRunHistory = compactRunHistory(Array.isArray(value?.runs) ? value.runs as CraftRun[] : [], storedSnapshots);
+    this.runs = compactedRunHistory.runs;
+    this.contextSnapshots = compactedRunHistory.contextSnapshots;
     const runsById = new Map(this.runs.map((run) => [run.id, run]));
     let realignedCapturedInputs = 0;
     this.inputs = this.inputs.map((input) => {
@@ -2896,6 +2918,7 @@ export class WorkspaceState {
 
   private domainExtensions(): WorkspaceDocument['extensions'] {
     const current = this.currentDocument?.extensions ?? {};
+    const compactedRunHistory = compactRunHistory(this.runs, this.contextSnapshots);
     return {
       ...current,
       margin_note: {
@@ -2905,7 +2928,8 @@ export class WorkspaceState {
         inputs: [...this.inputs],
         document: this.richDocument,
         formats: [...this.formats],
-        runs: [...this.runs],
+        runs: compactedRunHistory.runs,
+        contextSnapshots: compactedRunHistory.contextSnapshots,
         activities: [...this.activities],
         sourceStates: { ...this.sourceStates },
         inputSourceVisibility: { ...this.inputSourceVisibility },
@@ -2915,6 +2939,9 @@ export class WorkspaceState {
   }
 
   private async persistDomainState(reason: string): Promise<void> {
+    const compactedRunHistory = compactRunHistory(this.runs, this.contextSnapshots);
+    this.runs = compactedRunHistory.runs;
+    this.contextSnapshots = compactedRunHistory.contextSnapshots;
     await this.queueCommit(reason);
   }
 

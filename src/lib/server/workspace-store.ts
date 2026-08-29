@@ -91,6 +91,7 @@ const operationalMarginNoteKeys = new Set([
   'revision',
   'inputs',
   'runs',
+  'contextSnapshots',
   'activities',
   'sourceStates',
   'inputSourceVisibility'

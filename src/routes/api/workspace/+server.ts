@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import type { ExtensionData } from '$lib/workspace/model';
 import { getBranches } from '$lib/server/ledger';
+import { compactDocumentRunPayloads } from '$lib/workspace/run-retention';
 import {
   workspaceRepository,
   type CreateContextBucketInput,
@@ -33,7 +34,8 @@ export const GET: RequestHandler = ({ url }) => {
     const bucketId = url.searchParams.get('bucket');
     if (documentId) return json({ revisions: workspaceRepository.documentRevisions(documentId) });
     if (bucketId) return json({ revisions: workspaceRepository.bucketRevisions(bucketId) });
-    return json(workspaceRepository.workspace(getBranches()));
+    const workspace = workspaceRepository.workspace(getBranches());
+    return json({ ...workspace, documents: workspace.documents.map(compactDocumentRunPayloads) });
   } catch (error) {
     return errorResponse(error);
   }

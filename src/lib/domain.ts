@@ -271,8 +271,9 @@ export interface CraftRun {
   intent?: AIInteractionIntent;
   requestedContextManifest?: AIContextManifest;
   contextManifest?: AIContextManifest;
+  contextSnapshotId?: string;
   permittedProposalKinds?: string[];
-  request?: AIInteractionRequest;
+  request?: Omit<AIInteractionRequest, 'context'> & { context?: AIContextManifest };
   sourceStates: Record<string, SourceState>;
   state: RunState;
   proposalIds: string[];

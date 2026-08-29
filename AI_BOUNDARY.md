@@ -234,6 +234,14 @@ interface AIContextManifest {
 }
 ```
 
+The manifest is an immutable, content-addressed context snapshot. The document stores
+each distinct snapshot once and runs retain its snapshot ID. Byte-equivalent context
+therefore reuses the same snapshot; a changed target, revision, action, instruction,
+or included item creates a new one. The transport expands the snapshot into a complete
+provider request, but run history does not embed another copy. Retry and retained-output
+recovery rehydrate the request from the snapshot. Interrupted runs with no provider
+output retain their diagnostics without retaining an unusable context payload.
+
 The exact type may change, but these facts may not disappear. If token budgeting
 trims or summarises supplied context, the service returns the final manifest and the
 run records that transformation. A provider adapter cannot silently add hidden
@@ -571,6 +579,9 @@ The first boundary slice is now represented in code:
   combined deterministic local-check request inside the shared activity. This keeps
   frozen project context from being repeated once per paragraph, while completed
   providers still publish Inputs progressively with independent recovery provenance;
+- persisted run history stores each distinct immutable Writing Context once per
+  document and references it by content-derived snapshot ID. Completed runs retain
+  outcomes, usage, diagnostics, and provenance without duplicating provider requests;
 - whole-document provider offsets are translated through a captured character-to-editor
   position map before Svelte creates an Input. Block boundaries and inline atoms cannot
   cause later findings to drift;

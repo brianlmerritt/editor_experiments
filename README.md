@@ -168,6 +168,9 @@ The implemented architecture slice provides:
   activity; deterministic local sources share one local request. Successful Inputs
   become visible as each source completes, without repeating the full selected Writing
   Context for every paragraph;
+- distinct immutable Writing Context is stored once per document and referenced from
+  run history by a content-derived snapshot ID. Retries rehydrate that snapshot only
+  when needed, preventing repeated context from dominating workspace startup and export;
 - whole-document findings are mapped from provider text offsets back to exact editor
   positions, including content after block boundaries and inline images;
 - Reviews and Actions have independent activity state. Suggesting revisions from an

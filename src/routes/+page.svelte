@@ -1709,12 +1709,12 @@
               .join(', ')}
             <article class={`run-${run.state}`}>
               <header><div><strong>{run.promptId}</strong><span>{run.scope ?? 'selection'} · {run.originalText.length} characters</span></div><b>{run.state}</b></header>
-              <p>{new Date(run.createdAt).toLocaleString()} · {participatingSources || 'No recorded sources'} · {run.proposalIds.length} Inputs · {run.contextManifest?.items.filter((item) => item.sent).length ?? 0} context items</p>
+              <p>{new Date(run.createdAt).toLocaleString()} · {participatingSources || 'No recorded sources'} · {run.proposalIds.length} Inputs · {workspace.runContextManifest(run)?.items.filter((item) => item.sent).length ?? 0} context items</p>
               {#each run.errors as error}
                 <div class="run-diagnostic"><b>{error.source}</b><span>{error.classification?.replaceAll('_', ' ') ?? error.kind ?? 'error'}{#if error.attempt} · attempt {error.attempt}/{error.maxAttempts ?? error.attempt}{/if}{#if error.recovered} · recovered{/if}</span><small>{error.message}</small></div>
               {/each}
               {#if workspace.canRecoverRun(run.id)}<button type="button" onclick={() => void recoverFailedRun(run.id)}>Recover retained responses</button>{/if}
-              {#if (run.state === 'failed' || run.state === 'partial') && run.errors.some((error) => !error.recovered && providerSettings.sourceAvailability[error.source]?.available)}<button type="button" onclick={() => void retryFailedRun(run.id)}>Retry failed providers</button>{/if}
+              {#if run.request && (run.state === 'failed' || run.state === 'partial') && run.errors.some((error) => !error.recovered && providerSettings.sourceAvailability[error.source]?.available)}<button type="button" onclick={() => void retryFailedRun(run.id)}>Retry failed providers</button>{/if}
               {#if run.errors.some((error) => error.classification === 'interrupted' && !error.recovered)}<button type="button" onclick={() => void workspace.completeInterruptedRun(run.id)}>Complete without this passage</button>{/if}
             </article>
           {:else}
