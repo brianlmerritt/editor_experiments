@@ -44,6 +44,7 @@ export function providerUsage(input: {
   reportedCostUsd?: number;
 }): ProviderUsage {
   const { reportedCostUsd, ...base } = input;
+  if (input.protocol === 'codex_app_server') return { ...base, costBasis: 'unavailable' };
   if (typeof input.reportedCostUsd === 'number' && Number.isFinite(input.reportedCostUsd)) {
     return { ...base, costUsd: Math.max(0, input.reportedCostUsd), costBasis: 'provider_reported' };
   }
@@ -106,4 +107,15 @@ export function trackedProviderSpend(events: SpendEvent[]): number {
     total += estimateProviderCost(item.model, item) ?? 0;
   }
   return total;
+}
+
+export function trackedCodexTokens(events: SpendEvent[]): number {
+  return events.reduce((total, event) => {
+    if (event.type !== 'provider_usage_recorded') return total;
+    const usage = object(event.payload.usage);
+    if (usage.protocol !== 'codex_app_server') return total;
+    return total
+      + Math.max(0, finiteNumber(usage.inputTokens) ?? 0)
+      + Math.max(0, finiteNumber(usage.outputTokens) ?? 0);
+  }, 0);
 }

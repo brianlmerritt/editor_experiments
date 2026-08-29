@@ -13,7 +13,7 @@ export type SourceKind = 'local' | 'ai';
 export type SourceState = 'visible' | 'invisible' | 'off';
 export type WritingMode = 'drafting' | 'revising';
 
-export type ProviderProtocol = 'openai_compatible' | 'anthropic';
+export type ProviderProtocol = 'openai_compatible' | 'anthropic' | 'codex_app_server';
 
 export interface ProviderProfileInput {
   id?: string;
@@ -34,7 +34,22 @@ export interface SourceAvailability {
   configurable?: boolean;
   reason?: string;
   credentialHint?: string;
-  persistence?: 'local_file' | 'environment';
+  persistence?: 'local_file' | 'environment' | 'chatgpt_session';
+}
+
+export interface CodexConnectionStatus {
+  available: boolean;
+  connected: boolean;
+  accountType: 'chatgpt' | 'apiKey' | 'other' | 'none';
+  email?: string;
+  planType?: string;
+  userAgent?: string;
+  reason?: string;
+}
+
+export interface CodexLoginStart {
+  loginId: string;
+  authUrl: string;
 }
 
 export interface RelativeAnchor {
@@ -239,6 +254,7 @@ export interface GenerationRequest {
 }
 
 export type RunState = 'queued' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'discarded';
+export type AIRequestChannel = 'reviews' | 'actions';
 
 export interface CraftRun {
   id: string;
@@ -251,6 +267,7 @@ export interface CraftRun {
   originalText: string;
   promptId: string;
   promptVersion: number;
+  channel?: AIRequestChannel;
   intent?: AIInteractionIntent;
   requestedContextManifest?: AIContextManifest;
   contextManifest?: AIContextManifest;

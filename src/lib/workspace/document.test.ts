@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorDocumentSnapshot } from './transactions';
-import { completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween } from './document';
+import { completeDocumentMappedRange, completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween } from './document';
 
 const snapshot: EditorDocumentSnapshot = {
   doc: {
@@ -32,6 +32,31 @@ describe('canonical document ranges', () => {
       to: 37,
       text: 'First paragraph.\nSecond paragraph.'
     });
+  });
+
+  it('maps whole-document review offsets back to editor positions across blocks and inline leaves', () => {
+    const mapped = completeDocumentMappedRange({
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'One' }] },
+          {
+            type: 'paragraph',
+            content: [
+              { type: 'text', text: 'A' },
+              { type: 'image', attrs: { src: 'asset:test' } },
+              { type: 'text', text: 'B' }
+            ]
+          }
+        ]
+      },
+      text: 'One\n\nA\uFFFCB',
+      selection: { from: 0, to: 0 }
+    });
+
+    expect(mapped.text).toBe('One\nA\uFFFCB');
+    expect(mapped.textMap.starts).toEqual([1, 2, 3, 4, 6, 7, 8]);
+    expect(mapped.textMap.ends).toEqual([2, 3, 4, 6, 7, 8, 9]);
   });
 
   it('does not dispatch standalone craft requests for headings or scene dividers', () => {

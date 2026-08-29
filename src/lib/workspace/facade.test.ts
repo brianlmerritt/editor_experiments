@@ -37,7 +37,7 @@ describe('WorkspaceFacade', () => {
       const path = String(input);
       if (path === '/api/workspace') return json(persistent);
       if (path === '/api/settings') return json({ brief, prompts, sourceAvailability });
-      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25 } });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25, codexTokens: 0 } });
       return json({ error: 'unexpected path' }, 404);
     });
 
@@ -48,7 +48,7 @@ describe('WorkspaceFacade', () => {
       prompts,
       branches,
       events,
-      stats: { events: 1, costUsd: 0.25 },
+      stats: { events: 1, costUsd: 0.25, codexTokens: 0 },
       persistent,
       activeProjectId: 'project',
       activeDocumentId: 'main',
@@ -62,7 +62,7 @@ describe('WorkspaceFacade', () => {
       const path = String(input);
       if (path === '/api/workspace') return json(persistent);
       if (path === '/api/settings') return json({ brief, prompts, sourceAvailability });
-      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25 } });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0.25, codexTokens: 0 } });
       return json({ error: 'unexpected path' }, 404);
     });
     const driver: DocumentDriver = { hydrate: vi.fn(async () => {}), commit: vi.fn(async () => {}) };
@@ -93,7 +93,7 @@ describe('WorkspaceFacade', () => {
         sourceAvailability: { 'local-craft': { available: true }, 'fake-sentinel': { available: true } },
         providerSettingsError: 'Could not parse provider settings.'
       });
-      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0 } });
+      if (path === '/api/events?history=suggestions&branch=main') return json({ events, stats: { events: 1, costUsd: 0, codexTokens: 0 } });
       return json({ error: 'unexpected path' }, 404);
     });
 

@@ -1,4 +1,4 @@
-import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type Branch, type Category, type CraftRun, type GenerationRequest, type InputError, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
+import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type AIRequestChannel, type Branch, type Category, type CraftRun, type GenerationRequest, type InputError, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIContextSelection, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
 import { FacadeAIInteractionService } from '$lib/ai/service';
 import { cloneDefaultAIActions, normalizedAIActions, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
@@ -9,7 +9,7 @@ import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
-import { completeDocumentRange, documentCraftParagraphs, documentTextBetween, type DocumentRange } from '$lib/workspace/document';
+import { completeDocumentMappedRange, completeDocumentRange, documentTextBetween, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
 import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
 import {
@@ -99,7 +99,8 @@ export class WorkspaceState {
   branchId = $state('main');
   // Kept in provider requests for backward compatibility; the UI is one continuous workflow.
   mode = $state<WritingMode>('revising');
-  paused = $state(false);
+  reviewsEnabled = $state(true);
+  actionsEnabled = $state(true);
   activeSuggestionId = $state<string | null>(null);
   preview = $state<{ suggestionId: string; text: string } | null>(null);
   inputs = $state<Suggestion[]>([]);
@@ -129,12 +130,15 @@ export class WorkspaceState {
   categoryVisibility = $state<Record<Category, boolean>>(Object.fromEntries(categories.map((category) => [category, true])) as Record<Category, boolean>);
   densityCap = $state(8);
   costUsd = $state(0);
+  codexTokens = $state(0);
   loading = $state(true);
   generating = $state(false);
+  reviewsGenerating = $state(false);
+  actionsGenerating = $state(false);
   notice = $state<string | null>(null);
   lastError = $state<string | null>(null);
   documentSaveStates = $state<Record<string, DocumentSaveState>>({});
-  private dispatches = new Map<string, AbortController>();
+  private dispatches = new Map<string, { controller: AbortController; channel: AIRequestChannel }>();
   private dispatchRunIds = new Map<string, string>();
   private documentSaves = new Map<string, Promise<void>>();
   private documentSaveVersions = new Map<string, number>();
@@ -276,25 +280,51 @@ export class WorkspaceState {
     return stored.enabled !== false;
   }
 
-  private stopActiveReviewRequests(): void {
-    for (const controller of this.dispatches.values()) controller.abort();
-    this.dispatches.clear();
+  private projectActionsEnabled(project: WorkspaceProject | null): boolean {
+    const stored = project?.extensions.action_settings;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+      return this.projectReviewsEnabled(project);
+    }
+    return stored.enabled !== false;
   }
 
-  private applyProjectReviewPreference(): void {
-    this.paused = !this.projectReviewsEnabled(this.currentProject);
-    if (this.paused) this.stopActiveReviewRequests();
+  private stopActiveRequests(channel: AIRequestChannel): void {
+    for (const [key, dispatch] of this.dispatches) {
+      if (dispatch.channel !== channel) continue;
+      dispatch.controller.abort();
+      this.dispatches.delete(key);
+    }
+    this.refreshGeneratingState();
   }
 
-  private async setProjectReviewsEnabled(projectId: string, enabled: boolean): Promise<void> {
+  private refreshGeneratingState(): void {
+    this.reviewsGenerating = [...this.dispatches.values()].some((dispatch) => dispatch.channel === 'reviews');
+    this.actionsGenerating = [...this.dispatches.values()].some((dispatch) => dispatch.channel === 'actions');
+    this.generating = this.reviewsGenerating || this.actionsGenerating;
+  }
+
+  private applyProjectParticipationPreferences(): void {
+    this.reviewsEnabled = this.projectReviewsEnabled(this.currentProject);
+    this.actionsEnabled = this.projectActionsEnabled(this.currentProject);
+    if (!this.reviewsEnabled) this.stopActiveRequests('reviews');
+    if (!this.actionsEnabled) this.stopActiveRequests('actions');
+  }
+
+  private async setProjectParticipation(
+    projectId: string,
+    changes: { reviewsEnabled?: boolean; actionsEnabled?: boolean }
+  ): Promise<void> {
     const project = this.projects.find((item) => item.id === projectId);
     if (!project) return;
+    const reviewsEnabled = changes.reviewsEnabled ?? this.projectReviewsEnabled(project);
+    const actionsEnabled = changes.actionsEnabled ?? this.projectActionsEnabled(project);
     const saved = await this.facade.saveProject(project.id, project.title, {
       ...project.extensions,
-      review_settings: { enabled }
+      review_settings: { enabled: reviewsEnabled },
+      action_settings: { enabled: actionsEnabled }
     });
     this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
-    if (projectId === this.projectId) this.applyProjectReviewPreference();
+    if (projectId === this.projectId) this.applyProjectParticipationPreferences();
   }
 
   async saveAIAction(input: AIActionDefinition): Promise<AIActionDefinition> {
@@ -466,7 +496,7 @@ export class WorkspaceState {
       this.contextBuckets = loaded.persistent.contextBuckets;
       this.projectId = loaded.activeProjectId;
       this.branchId = loaded.activeDocumentId;
-      this.applyProjectReviewPreference();
+      this.applyProjectParticipationPreferences();
       this.navigator = readNavigatorState(this.currentProject);
       this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
       this.loadNavigatorMemory();
@@ -496,6 +526,7 @@ export class WorkspaceState {
         await this.persistDomainState(reason);
       }
       this.costUsd = loaded.stats.costUsd;
+      this.codexTokens = loaded.stats.codexTokens ?? 0;
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('margin-note:project', this.projectId);
         localStorage.setItem('margin-note:document', this.branchId);
@@ -741,6 +772,7 @@ export class WorkspaceState {
     const data = await this.facade.events();
     this.ledger = data.events;
     this.costUsd = data.stats.costUsd;
+    this.codexTokens = data.stats.codexTokens ?? 0;
   }
 
   async setMode(next: WritingMode): Promise<void> {
@@ -751,12 +783,20 @@ export class WorkspaceState {
     await this.log('mode_switch', { from: previous, to: next, pendingSuggestions: this.pendingCount });
   }
 
-  async togglePause(): Promise<void> {
-    const enabled = this.paused;
-    this.paused = !enabled;
-    if (this.paused) this.stopActiveReviewRequests();
-    await this.setProjectReviewsEnabled(this.projectId, enabled);
-    await this.log(this.paused ? 'paused' : 'resumed', { mode: this.mode });
+  async toggleReviews(): Promise<void> {
+    const enabled = !this.reviewsEnabled;
+    this.reviewsEnabled = enabled;
+    if (!enabled) this.stopActiveRequests('reviews');
+    await this.setProjectParticipation(this.projectId, { reviewsEnabled: enabled });
+    await this.log(enabled ? 'resumed' : 'paused', { mode: this.mode, channel: 'reviews' });
+  }
+
+  async toggleActions(): Promise<void> {
+    const enabled = !this.actionsEnabled;
+    this.actionsEnabled = enabled;
+    if (!enabled) this.stopActiveRequests('actions');
+    await this.setProjectParticipation(this.projectId, { actionsEnabled: enabled });
+    await this.log(enabled ? 'resumed' : 'paused', { mode: this.mode, channel: 'actions' });
   }
 
   async toggleRunSource(sourceId: string): Promise<void> {
@@ -770,8 +810,8 @@ export class WorkspaceState {
     const next: SourceState = previous === 'off' ? 'visible' : 'off';
     this.sourceStates[sourceId] = next;
     if (next === 'off') {
-      for (const [key, controller] of this.dispatches) {
-        if (key.includes(`:${sourceId}:`)) { controller.abort(); this.dispatches.delete(key); }
+      for (const [key, dispatch] of this.dispatches) {
+        if (key.includes(`:${sourceId}:`)) { dispatch.controller.abort(); this.dispatches.delete(key); }
       }
     }
     await this.log('source_state_changed', { source: sourceId, purpose: 'run_participation', from: previous, to: next });
@@ -1069,10 +1109,10 @@ export class WorkspaceState {
     contextSelection: AIContextSelection = this.contextSelection(prompt.id),
     onProgress?: (inputs: Suggestion[]) => void
   ): Promise<Suggestion[]> {
-    if (!this.documentSnapshot) return [];
+    if (!this.reviewsEnabled || !this.documentSnapshot) return [];
     const activity = this.beginAIActivity(prompt, 'document');
-    const ranges = documentCraftParagraphs(this.documentSnapshot);
-    if (!ranges.length) {
+    const range = completeDocumentMappedRange(this.documentSnapshot);
+    if (!range.text.trim()) {
       this.refreshAIActivity(activity.id);
       await this.persistDomainState('Complete empty AI activity');
       return [];
@@ -1083,25 +1123,53 @@ export class WorkspaceState {
       await this.persistDomainState('Complete AI activity without sources');
       return [];
     }
-    const isolatedSourceStates = (activeSourceId: string): Record<string, SourceState> => Object.fromEntries(
-      Object.entries(this.sourceStates).map(([sourceId, state]) => [sourceId, sourceId === activeSourceId ? state : 'off'])
-    );
-    const results = await Promise.all(ranges.flatMap((range) => enabledSources.map(async ([sourceId]) => {
+    const sourceNumbers = new Map(this.settingsState.sources.map((source) => [source.id, source.number]));
+    const localSourceIds = enabledSources.map(([sourceId]) => sourceId).filter((sourceId) => (sourceNumbers.get(sourceId) ?? 3) < 3);
+    const remoteSourceIds = enabledSources.map(([sourceId]) => sourceId).filter((sourceId) => (sourceNumbers.get(sourceId) ?? 3) >= 3);
+    const groups = [
+      ...(localSourceIds.length ? [{ key: 'local', sourceIds: localSourceIds }] : []),
+      ...remoteSourceIds.map((sourceId) => ({ key: sourceId, sourceIds: [sourceId] }))
+    ];
+    const isolatedSourceStates = (activeSourceIds: string[]): Record<string, SourceState> => {
+      const active = new Set(activeSourceIds);
+      return Object.fromEntries(
+        Object.entries(this.sourceStates).map(([sourceId, state]) => [sourceId, active.has(sourceId) ? state : 'off'])
+      );
+    };
+    const results = await Promise.all(groups.map(async (group) => {
       const inputs = await this.requestInputRun(
-        { ...range, prompt },
-        `${this.branchId}:${sourceId}:paragraph:${range.from}:${range.to}`,
+        { from: range.from, to: range.to, text: range.text, prompt },
+        `${this.branchId}:${group.key}:document:${range.from}:${range.to}`,
         activity,
-        isolatedSourceStates(sourceId),
-        contextSelection
+        isolatedSourceStates(group.sourceIds),
+        contextSelection,
+        { channel: 'reviews', textMap: range.textMap }
       );
       onProgress?.(inputs);
       return inputs;
-    })));
+    }));
     return results.flat();
   }
 
+  async runInputRevisionPass(inputId: string, prompt: TaskPrompt): Promise<Suggestion[]> {
+    const input = this.inputs.find((item) => item.id === inputId);
+    const target = input ? firstTextTarget(input.target) : null;
+    if (!input || (input.state !== 'pending' && input.state !== 'hidden') || !target || target.nodeId !== this.branchId || !this.documentSnapshot) {
+      this.notice = 'That Input is no longer attached to editable text.';
+      return [];
+    }
+    const currentText = documentTextBetween(this.documentSnapshot, target.start, target.end);
+    if (currentText !== input.anchor.text) {
+      this.inputs = this.inputs.map((item) => item.id === inputId ? { ...item, state: 'target_changed' as const } : item);
+      this.notice = 'That Input expired because its passage changed.';
+      void this.persistDomainState('Expire changed Input before revision');
+      return [];
+    }
+    return this.runSelectionPass({ from: target.start, to: target.end, text: currentText }, prompt);
+  }
+
   async runSelectionPass(range: DocumentRange, prompt: TaskPrompt): Promise<Suggestion[]> {
-    if (!this.documentSnapshot) return [];
+    if (!this.actionsEnabled || !this.documentSnapshot) return [];
     const canonicalText = documentTextBetween(this.documentSnapshot, range.from, range.to);
     if (canonicalText !== range.text) {
       this.notice = 'The selection changed before the run began. Select it again.';
@@ -1135,7 +1203,7 @@ export class WorkspaceState {
     contextSelection: AIContextSelection = this.actionContextSelection(action)
   ): Promise<Suggestion[]> {
     const document = this.currentDocument;
-    if (!document || !action.allowedTargets.includes(scope)) return [];
+    if (!this.actionsEnabled || !document || !action.allowedTargets.includes(scope)) return [];
     const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentRange(this.documentSnapshot) : null;
     if (!targetRange?.text.trim() || (action.requiresSelection && scope !== 'selection')) {
       this.notice = action.requiresSelection ? 'This action requires a text selection.' : 'The selected target is empty.';
@@ -1171,7 +1239,7 @@ export class WorkspaceState {
       activity,
       sourceStates,
       contextSelection,
-      { action: this.definitionSnapshot(action, scope) }
+      { action: this.definitionSnapshot(action, scope), channel: 'actions' }
     );
   }
 
@@ -1259,6 +1327,8 @@ export class WorkspaceState {
   async retryRun(runId: string): Promise<Suggestion[]> {
     const previous = this.runs.find((run) => run.id === runId);
     if (!previous || (previous.state !== 'failed' && previous.state !== 'partial')) return [];
+    const channel = previous.channel ?? (previous.promptId === 'sentinel' ? 'reviews' : 'actions');
+    if ((channel === 'reviews' && !this.reviewsEnabled) || (channel === 'actions' && !this.actionsEnabled)) return [];
     const target = firstTextTarget(previous.target);
     const currentText = target && this.documentSnapshot
       ? documentTextBetween(this.documentSnapshot, target.start, target.end)
@@ -1296,7 +1366,7 @@ export class WorkspaceState {
       activity,
       retrySourceStates,
       defaultAIContextSelection,
-      { action: capturedAction }
+      { action: capturedAction, channel }
     );
     const retry = this.runs.find((run) => run.activityId === activity.id);
     if (retry && (retry.state === 'completed' || retry.state === 'partial')) {
@@ -1318,10 +1388,11 @@ export class WorkspaceState {
     activity: AIActivityRecord,
     requestedSourceStates: Record<string, SourceState> = this.sourceStates,
     contextSelection: AIContextSelection = defaultAIContextSelection,
-    configuration: { action?: AIActionSnapshot } = {}
+    configuration: { action?: AIActionSnapshot; channel?: AIRequestChannel; textMap?: DocumentTextMap } = {}
   ): Promise<Suggestion[]> {
-    if (this.paused) return [];
-    this.dispatches.get(rangeKey)?.abort();
+    const channel = configuration.channel ?? 'actions';
+    if ((channel === 'reviews' && !this.reviewsEnabled) || (channel === 'actions' && !this.actionsEnabled)) return [];
+    this.dispatches.get(rangeKey)?.controller.abort();
     const replacedRunId = this.dispatchRunIds.get(rangeKey);
     const replacedRun = replacedRunId ? this.runs.find((run) => run.id === replacedRunId) : undefined;
     if (replacedRunId) {
@@ -1352,6 +1423,7 @@ export class WorkspaceState {
       originalText: input.text,
       promptId: input.prompt.id,
       promptVersion: input.prompt.version,
+      channel,
       intent,
       requestedContextManifest: context,
       contextManifest: context,
@@ -1366,9 +1438,9 @@ export class WorkspaceState {
     this.activities = this.activities.map((item) => item.id === activity.id
       ? { ...item, runIds: [...item.runIds, run.id] }
       : item);
-    this.dispatches.set(rangeKey, controller);
+    this.dispatches.set(rangeKey, { controller, channel });
     this.dispatchRunIds.set(rangeKey, run.id);
-    this.generating = true;
+    this.refreshGeneratingState();
     await this.log('suggestions_requested', { runId: run.id, batchId: run.batchId, scope: run.scope, range: [input.from, input.to], promptId: input.prompt.id, characters: input.text.length });
     try {
       const request: AIInteractionRequest = {
@@ -1454,7 +1526,7 @@ export class WorkspaceState {
         return [];
       }
       const adopted = (contractDiagnostics.some((diagnostic) => diagnostic.message.includes('Writing Context')) ? [] : proposals).flatMap((proposal) => {
-        const inputRecord = this.adoptProposal(proposal.payload, currentRun, target.start, proposal.kind);
+        const inputRecord = this.adoptProposal(proposal.payload, currentRun, target.start, proposal.kind, configuration.textMap);
         return inputRecord ? [inputRecord] : [];
       });
       this.runs = this.runs.map((item) => item.id === run.id ? {
@@ -1493,13 +1565,13 @@ export class WorkspaceState {
       this.lastError = error instanceof Error ? error.message : 'Suggestion request failed';
       return [];
     } finally {
-      if (this.dispatches.get(rangeKey) === controller) this.dispatches.delete(rangeKey);
+      if (this.dispatches.get(rangeKey)?.controller === controller) this.dispatches.delete(rangeKey);
       if (this.dispatchRunIds.get(rangeKey) === run.id) this.dispatchRunIds.delete(rangeKey);
-      this.generating = this.dispatches.size > 0;
+      this.refreshGeneratingState();
     }
   }
 
-  private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number, kind = 'craft_input'): Suggestion | null {
+  private adoptProposal(proposal: InputProposal, run: CraftRun, currentStart: number, kind = 'craft_input', textMap?: DocumentTextMap): Suggestion | null {
     const insertion = proposal.type === 'insertion' && proposal.from === proposal.to && proposal.sourceText === '';
     const capturedRequestTarget = proposal.anchorStatus === 'request_scope' || proposal.anchorStatus === 'unanchored';
     if (capturedRequestTarget) {
@@ -1509,8 +1581,13 @@ export class WorkspaceState {
     const id = makeId('input');
     const capturedTarget = capturedRequestTarget ? firstTextTarget(run.target) : null;
     if (capturedRequestTarget && (!capturedTarget || capturedTarget.nodeId !== this.branchId)) return null;
-    const from = capturedTarget?.start ?? currentStart + proposal.from;
-    const to = capturedTarget?.end ?? currentStart + proposal.to;
+    const mappedFrom = proposal.type === 'insertion'
+      ? textMap?.starts[proposal.from] ?? textMap?.ends[proposal.from - 1]
+      : textMap?.starts[proposal.from];
+    const mappedTo = proposal.type === 'insertion' ? mappedFrom : textMap?.ends[proposal.to - 1];
+    if (textMap && !capturedTarget && (mappedFrom === undefined || mappedTo === undefined)) return null;
+    const from = capturedTarget?.start ?? mappedFrom ?? currentStart + proposal.from;
+    const to = capturedTarget?.end ?? mappedTo ?? currentStart + proposal.to;
     const variants = proposal.variants
       .filter((text) => text !== proposal.sourceText)
       .map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, proposal.confidence - index * 0.04) }));
@@ -1722,6 +1799,7 @@ export class WorkspaceState {
       if (this.branchId !== id) return;
       this.ledger = data.events;
       this.costUsd = data.stats.costUsd;
+      this.codexTokens = data.stats.codexTokens ?? 0;
     }).catch((error) => {
       if (this.branchId === id) this.lastError = error instanceof Error ? error.message : 'Could not load document history';
     });
@@ -1731,7 +1809,7 @@ export class WorkspaceState {
   async switchProject(id: string): Promise<void> {
     if (id === this.projectId) return;
     this.projectId = id;
-    this.applyProjectReviewPreference();
+    this.applyProjectParticipationPreferences();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
@@ -1764,13 +1842,17 @@ export class WorkspaceState {
     });
     this.projects = [...this.projects, {
       ...project,
-      extensions: { ...project.extensions, review_settings: { enabled: false } }
+      extensions: {
+        ...project.extensions,
+        review_settings: { enabled: false },
+        action_settings: { enabled: true }
+      }
     }];
     this.documents = [...this.documents, document, todos];
     const persistent = await this.facade.persistentWorkspace();
     this.contextBuckets = persistent.contextBuckets;
     this.projectId = project.id;
-    this.applyProjectReviewPreference();
+    this.applyProjectParticipationPreferences();
     this.actions = cloneDefaultAIActions();
     this.navigator = emptyNavigatorState();
     this.navigatorMemory = emptyNavigatorMemory();
@@ -1792,7 +1874,7 @@ export class WorkspaceState {
     this.projects = result.workspace.projects;
     this.documents = result.workspace.documents;
     this.contextBuckets = result.workspace.contextBuckets;
-    await this.setProjectReviewsEnabled(result.projectId, false);
+    await this.setProjectParticipation(result.projectId, { reviewsEnabled: false, actionsEnabled: true });
     await this.activatePersistedProject(result.projectId);
     return result.preview;
   }
@@ -1813,7 +1895,7 @@ export class WorkspaceState {
 
   private async activatePersistedProject(projectId: string): Promise<void> {
     this.projectId = projectId;
-    this.applyProjectReviewPreference();
+    this.applyProjectParticipationPreferences();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);

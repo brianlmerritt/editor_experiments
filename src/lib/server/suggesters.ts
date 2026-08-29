@@ -2,6 +2,7 @@ import { env } from '$env/dynamic/private';
 import type { Category, GenerationRequest, InputAnchorStatus, InputError, InputProposal, ProviderProfileInput, ProviderProtocol, ProviderUsage, RecoveryClassification, SourceAvailability, Suggestion } from '$lib/domain';
 import { isExactTextSpan, makeId } from '$lib/domain';
 import { providerUsage } from '$lib/server/provider-usage';
+import { codexAppServer, CodexAppServerError } from '$lib/server/codex-app-server';
 import { deleteStoredProviderProfile, maskCredential, readStoredProviderProfiles, upsertStoredProviderProfile, type StoredProviderProfile } from '$lib/server/provider-settings';
 import { jsonrepair } from 'jsonrepair';
 
@@ -115,7 +116,8 @@ export function configureProviderProfile(input: ProviderProfileInput, options: {
   const id = input.id?.trim() || makeId('provider');
   const key = input.key?.trim() || stored?.key || environmentKey(id);
   const profileInput = { ...input, id, key };
-  const local = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/.test(input.baseUrl.trim());
+  const appServer = input.protocol === 'codex_app_server';
+  const local = appServer || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/.test(input.baseUrl.trim());
   if (!input.name.trim() || !input.model.trim() || !input.baseUrl.trim()) throw new Error('Provider name, base URL, and model are required.');
   if (!key && !local) throw new Error('A remote provider requires an API key.');
   const persist = options.persist !== false;
@@ -187,8 +189,8 @@ export function suggestionSourceAvailability(): Record<string, SourceAvailabilit
     baseUrl: provider.baseUrl,
     sourceNumber: provider.number,
     configurable: provider.persistence === 'local_file',
-    credentialHint: provider.key ? maskCredential(provider.key) : undefined,
-    persistence: provider.persistence
+    credentialHint: provider.protocol === 'codex_app_server' ? 'ChatGPT session' : provider.key ? maskCredential(provider.key) : undefined,
+    persistence: provider.protocol === 'codex_app_server' ? 'chatgpt_session' : provider.persistence
   };
   return availability;
 }
@@ -684,8 +686,24 @@ async function providerCompletion(
   provider: ConfiguredProvider,
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
   maxTokens: number,
-  temperature?: number
+  temperature?: number,
+  outputSchema?: Record<string, unknown>
 ): Promise<{ content: string; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteTokens?: number; costUsd?: number; truncated: boolean }> {
+  if (provider.protocol === 'codex_app_server') {
+    try {
+      const completion = await codexAppServer().complete({ model: provider.model, messages, maxOutputTokens: maxTokens, outputSchema });
+      return { ...completion, truncated: false };
+    } catch (error) {
+      const classification = error instanceof CodexAppServerError ? error.classification : 'provider_unavailable';
+      const recoveryAction = classification === 'authentication' || classification === 'configuration' ? 'reconfigure'
+        : classification === 'rate_limited' || classification === 'transient' ? 'retry_transient'
+          : 'human';
+      const message = error instanceof Error ? error.message : 'Codex app-server request failed.';
+      throw new ProviderRequestError(message, [{
+        kind: 'provider_request', classification, recoveryAction, recovered: false, message
+      }]);
+    }
+  }
   const endpoint = provider.protocol === 'anthropic' ? '/messages' : '/chat/completions';
   const headers = provider.protocol === 'anthropic'
     ? { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...(provider.key ? { 'x-api-key': provider.key } : {}) }
@@ -776,6 +794,60 @@ async function providerCompletion(
   };
 }
 
+function structuredOutputSchema(request: GenerationRequest): Record<string, unknown> | undefined {
+  if (request.responseContract === 'commentary' || request.responseContract === 'alternative_draft') return undefined;
+  if (request.responseContract === 'revision_options') return {
+    type: 'object', additionalProperties: false, required: ['options'],
+    properties: {
+      options: {
+        type: 'array',
+        minItems: 1,
+        maxItems: Math.max(1, Math.min(5, request.optionCount ?? 3)),
+        items: {
+          type: 'object', additionalProperties: false, required: ['text', 'rationale'],
+          properties: { text: { type: 'string' }, rationale: { type: 'string' } }
+        }
+      }
+    }
+  };
+  if (request.responseContract === 'annotated_findings') return {
+    type: 'object', additionalProperties: false, required: ['findings'],
+    properties: {
+      findings: {
+        type: 'array', items: {
+          type: 'object', additionalProperties: false,
+          required: ['from', 'to', 'source_text', 'comment', 'correction', 'confidence'],
+          properties: {
+            from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 },
+            source_text: { type: 'string' }, comment: { type: 'string' },
+            correction: { type: ['string', 'null'] }, confidence: { type: 'number', minimum: 0, maximum: 1 }
+          }
+        }
+      }
+    }
+  };
+  return {
+    type: 'object', additionalProperties: false, required: ['suggestions'],
+    properties: {
+      suggestions: {
+        type: 'array', items: {
+          type: 'object', additionalProperties: false,
+          required: ['from', 'to', 'source_text', 'type', 'category', 'comment', 'replacement', 'variants', 'confidence'],
+          properties: {
+            from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 },
+            source_text: { type: 'string' },
+            type: { type: 'string', enum: ['annotation', 'replacement', 'insertion'] },
+            category: { type: 'string', enum: ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] },
+            comment: { type: 'string' }, replacement: { type: ['string', 'null'] },
+            variants: { type: 'array', items: { type: 'string' } },
+            confidence: { type: 'number', minimum: 0, maximum: 1 }
+          }
+        }
+      }
+    }
+  };
+}
+
 async function requestConfiguredProvider(provider: ConfiguredProvider, request: GenerationRequest): Promise<{ drafts: DraftSuggestion[]; latencyMs: number; usage: ProviderUsage; diagnostics: Array<Omit<InputError, 'source'>> }> {
   const started = performance.now();
   const originalPrompt = assemblePrompt(request);
@@ -802,7 +874,7 @@ async function requestConfiguredProvider(provider: ConfiguredProvider, request: 
         ];
     let completion;
     try {
-      completion = await providerCompletion(provider, messages, maxTokens, request.temperature);
+      completion = await providerCompletion(provider, messages, maxTokens, request.temperature, structuredOutputSchema(request));
     } catch (error) {
       if (!(error instanceof ProviderRequestError)) throw error;
       const diagnostic = error.diagnostics[0] ?? { kind: 'provider_request' as const, classification: 'provider_unavailable' as const, recoveryAction: 'human' as const, message: error.message };

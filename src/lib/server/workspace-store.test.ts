@@ -19,6 +19,7 @@ describe('WorkspaceRepository', () => {
 
     expect(first.projects).toHaveLength(1);
     expect(first.projects[0].extensions.review_settings).toEqual({ enabled: false });
+    expect(first.projects[0].extensions.action_settings).toEqual({ enabled: true });
     expect(first.documents).toEqual([
       expect.objectContaining({ id: 'spine_default', title: 'Spine', role: 'spine', content: '' }),
       expect.objectContaining({ id: 'todos_default', title: 'Todos', role: 'todos', content: '' })
@@ -27,12 +28,13 @@ describe('WorkspaceRepository', () => {
     expect(second).toEqual(first);
   });
 
-  it('creates additional projects with reviews disabled', () => {
+  it('creates additional projects with reviews disabled and actions enabled', () => {
     repository.workspace();
 
     const project = repository.createProject('Fresh story');
 
     expect(project.extensions.review_settings).toEqual({ enabled: false });
+    expect(project.extensions.action_settings).toEqual({ enabled: true });
   });
 
   it('stores immutable document revisions and restores by creating a new revision', () => {

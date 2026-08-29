@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Branch, LedgerEvent, WritingBrief, TaskPrompt, JudgmentPair } from '$lib/domain';
 import { buildReviewQueue } from '$lib/review-queue';
-import { trackedProviderSpend, type SpendEvent } from '$lib/server/provider-usage';
+import { trackedCodexTokens, trackedProviderSpend, type SpendEvent } from '$lib/server/provider-usage';
 
 const databasePath = process.env.LEDGER_PATH ?? resolve('data/writing-ledger.sqlite');
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -161,6 +161,8 @@ export function ledgerStats() {
     SELECT type, payload FROM events
     WHERE type IN ('provider_usage_recorded', 'suggestion_generated', 'generated_hidden')
   `).all() as Array<{ type: SpendEvent['type']; payload: string }>;
-  const costUsd = trackedProviderSpend(rows.map((row) => ({ type: row.type, payload: JSON.parse(row.payload) as Record<string, unknown> })));
-  return { events, costUsd };
+  const usageEvents = rows.map((row) => ({ type: row.type, payload: JSON.parse(row.payload) as Record<string, unknown> }));
+  const costUsd = trackedProviderSpend(usageEvents);
+  const codexTokens = trackedCodexTokens(usageEvents);
+  return { events, costUsd, codexTokens };
 }

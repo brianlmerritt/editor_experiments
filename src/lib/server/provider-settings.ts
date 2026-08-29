@@ -52,7 +52,7 @@ export function readStoredProviderProfiles(): StoredProviderProfile[] {
   const settings = readSettings();
   const profiles = Array.isArray(settings.profiles) ? settings.profiles : legacyOpenRouter(settings);
   return profiles.filter((profile) => profile && typeof profile.id === 'string' && typeof profile.name === 'string'
-    && (profile.protocol === 'openai_compatible' || profile.protocol === 'anthropic')
+    && (profile.protocol === 'openai_compatible' || profile.protocol === 'anthropic' || profile.protocol === 'codex_app_server')
     && typeof profile.baseUrl === 'string' && typeof profile.model === 'string');
 }
 
@@ -77,7 +77,7 @@ export function upsertStoredProviderProfile(input: ProviderProfileInput): Stored
     key: input.key?.trim() || existing?.key
   };
   if (!profile.name || !profile.baseUrl || !profile.model) throw new Error('Provider name, base URL, and model are required.');
-  if (!profile.key && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/.test(profile.baseUrl)) {
+  if (profile.protocol !== 'codex_app_server' && !profile.key && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/.test(profile.baseUrl)) {
     throw new Error('A remote provider requires an API key.');
   }
   writeStoredProviderProfiles([...profiles.filter((item) => item.id !== id), profile]);

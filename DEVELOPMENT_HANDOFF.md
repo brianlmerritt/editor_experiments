@@ -92,7 +92,9 @@ project boundary. Do not use the forensic archive for ordinary transfer.
 
 Provider profiles live in ignored `data/provider-settings.json` and are deliberately
 excluded from Git and native project export. Recreate OpenRouter, OpenAI, Anthropic,
-Ollama, or compatible-provider profiles on Windows and enable **Use** explicitly.
+Ollama, Codex / ChatGPT, or compatible-provider profiles on Windows and enable **Use**
+explicitly. The Codex profile contains no secret; install the Codex CLI and complete
+its local ChatGPT sign-in separately on that computer.
 Project-owned action definitions do travel in `.mnote.zip`; credentials and device
 participation state do not.
 

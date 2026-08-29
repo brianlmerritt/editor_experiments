@@ -100,6 +100,14 @@ The browser does not call a provider directly. Raw credentials remain behind the
 server/settings boundary. Provider adapters receive a fully bounded request; they do
 not query the workspace, Navigator, database, or editor for additional context.
 
+The local Codex adapter follows the same rule. A server-owned JSONL client starts the
+official `codex app-server`, which in turn owns ChatGPT authentication and protocol
+state. Svelte sees only connection status and the normal provider profile through the
+facade. Turns are ephemeral, approval-free, read-only, and run in an isolated empty
+working directory with instructions forbidding tools and file inspection. The adapter
+receives only the frozen request envelope; it is not a route for Codex to inspect or
+edit the Margin Note project.
+
 The existing `WorkspaceFacade.requestInputs` may transport requests during the POC,
 but callers should depend conceptually on a narrow `AIInteractionService`. Generation
 transport must not expand the persistence facade into a second workspace domain.
@@ -275,6 +283,8 @@ The AI interaction service may:
 - enforce token budgets while reporting final inclusions and omissions;
 - call one or more configured source adapters;
 - apply provider capability differences;
+- use app-server output schemas for JSON contracts while leaving commentary and full
+  alternative drafts as natural text;
 - repair common malformed structured output;
 - make bounded corrective retries for output-only validation failures;
 - return normalised proposals, usage, cost, raw-output diagnostics, and the final
@@ -557,9 +567,13 @@ The first boundary slice is now represented in code:
   content-bearing Material can be selected from the project Navigator data;
 - Review Instructions are writer-adjustable in the Inputs preflight and captured as
   the versioned action for the run; they are not part of the project Spine;
-- each enabled source is dispatched as its own passage/provider check inside the
-  shared activity. Completed checks publish Inputs progressively while retaining the
-  same frozen context and independent recovery provenance;
+- document review dispatches one whole-document request per remote provider and one
+  combined deterministic local-check request inside the shared activity. This keeps
+  frozen project context from being repeated once per paragraph, while completed
+  providers still publish Inputs progressively with independent recovery provenance;
+- whole-document provider offsets are translated through a captured character-to-editor
+  position map before Svelte creates an Input. Block boundaries and inline atoms cannot
+  cause later findings to drift;
 - review context choices are remembered per project and action. The chosen stable
   source IDs are resolved into exact immutable per-passage revisions at dispatch;
   every run retains included and writer-omitted manifest entries;
@@ -570,11 +584,15 @@ The first boundary slice is now represented in code:
   identities, and omitted required items;
 - invalid or unpermitted proposal kinds are rejected before they can become Inputs;
 - resulting Inputs retain activity, run, action, and context-manifest provenance;
+- review and action activity are tracked independently, and a card revision is
+  dispatched from that Input's canonical Svelte target rather than waiting for a
+  browser selection event;
 - deterministic tests exercise required/optional context, hostile context changes,
   proposal permissions, transport translation, delayed targets, and the rule that a
   proposal never edits manuscript text.
-- named local provider profiles support OpenAI-compatible and Anthropic Messages
-  protocols; settings expose presets for OpenRouter, OpenAI, Anthropic, and Ollama;
+- named local provider profiles support OpenAI-compatible, Anthropic Messages, and
+  Codex app-server protocols; settings expose presets for OpenRouter, OpenAI,
+  Anthropic, Ollama, and Codex / ChatGPT;
 - provider recovery classifies malformed output, truncation, transient transport,
   rate limits, authentication, and configuration, with at most three attempts;
 - the provider and run managers expose provider health state, participating sources,

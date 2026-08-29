@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { LedgerEvent } from '$lib/domain';
-  let { events = [], costUsd = 0 }: { events?: Required<LedgerEvent>[]; costUsd?: number } = $props();
+  let { events = [], costUsd = 0, codexTokens = 0 }: { events?: Required<LedgerEvent>[]; costUsd?: number; codexTokens?: number } = $props();
 </script>
 
 <section class="ledger">
-  <header><span>Ledger tail</span><span>{events.length} shown · ${costUsd.toFixed(4)}</span></header>
+  <header><span>Ledger tail</span><span>{events.length} shown · ${costUsd.toFixed(4)} · {(codexTokens / 1_000_000).toFixed(3)}M Codex tokens</span></header>
   <div class="rows">
     {#if !events.length}<p>No events yet.</p>{/if}
     {#each events as event}

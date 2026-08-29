@@ -6,6 +6,7 @@ import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
 import { richDocumentFromProseMirror, richDocumentText } from '$lib/workspace/rich-document';
 import type { AIInteractionRequest, AIInteractionService } from '$lib/ai/contracts';
+import type { SettingsState } from '$lib/state/settings.svelte';
 import { WorkspaceState } from './workspace.svelte';
 
 const beforeDocument: EditorDocumentSnapshot = {
@@ -93,7 +94,7 @@ function fakeFacade(requestInputs?: WorkspaceFacade['requestInputs']): Workspace
       timestamp: '2026-08-18T00:00:00Z',
       suggestionId: event.suggestionId ?? ''
     })),
-    events: vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } })),
+    events: vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } })),
     commit: vi.fn(async (transaction) => ({
       transactionId: transaction.transactionId,
       documentId: transaction.documentId,
@@ -104,6 +105,26 @@ function fakeFacade(requestInputs?: WorkspaceFacade['requestInputs']): Workspace
       id, title, extensions, revision: 2, updatedAt: '2026-08-18T00:00:01Z'
     }))
   } as unknown as WorkspaceFacade;
+}
+
+function settingsWithProvider(id = 'codex-chatgpt'): SettingsState {
+  const sources = [
+    { id: 'local-craft', number: 1, kind: 'local' as const, label: 'Local craft checks' },
+    { id: 'fake-sentinel', number: 2, kind: 'ai' as const, label: 'Replay sentinel' },
+    { id, number: 3, kind: 'ai' as const, label: 'Codex — ChatGPT' }
+  ];
+  return {
+    sources,
+    sourceAvailability: {
+      'local-craft': { available: true },
+      'fake-sentinel': { available: true },
+      [id]: { available: true, protocol: 'codex_app_server', model: 'gpt-5.6-terra' }
+    },
+    sourceAvailable: (sourceId: string) => sources.some((source) => source.id === sourceId),
+    availability: (sourceId: string) => sources.some((source) => source.id === sourceId)
+      ? { available: true }
+      : { available: false }
+  } as unknown as SettingsState;
 }
 
 const selectionPrompt: TaskPrompt = {
@@ -273,7 +294,7 @@ describe('semantic workspace history', () => {
     expect(richDocumentText(workspace.richDocument)).toBe('Target text');
     await switching;
 
-    releaseHistory({ events: [], stats: { events: 0, costUsd: 0 } });
+    releaseHistory({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } });
     await vi.waitFor(() => expect(facade.suggestionHistory).toHaveBeenCalledWith('target'));
   });
 
@@ -281,7 +302,7 @@ describe('semantic workspace history', () => {
     let releaseCommit!: (value: Awaited<ReturnType<WorkspaceFacade['commit']>>) => void;
     const facade = fakeFacade();
     facade.commit = vi.fn(() => new Promise<CommitReceipt>((resolve) => { releaseCommit = resolve; }));
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     const workspace = new WorkspaceState(facade);
     workspace.branchId = 'main';
     workspace.documents = [document('noticed'), { ...document('Target text'), id: 'target', title: 'Target' }];
@@ -461,14 +482,16 @@ describe('semantic workspace history', () => {
     expect(snapshot.documents[0].extensions.margin_note).toMatchObject({ revision: 1, document: workspace.richDocument });
   });
 
-  it('pauses AI dispatch while continuing to accept human editor transactions', async () => {
+  it('pauses Actions while continuing to accept human editor transactions', async () => {
     const requestInputs = vi.fn(async () => ({ proposals: [], errors: [] }));
     const workspace = new WorkspaceState(fakeFacade(requestInputs));
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
     workspace.branchId = 'main';
     workspace.documents = [document()];
     workspace.setEditorReady(beforeDocument);
 
-    await workspace.togglePause();
+    await workspace.toggleActions();
     workspace.recordEditorTransaction({
       before: beforeDocument,
       after: afterDocument,
@@ -477,11 +500,71 @@ describe('semantic workspace history', () => {
     });
     const proposals = await workspace.runSelectionPass({ from: 1, to: 4, text: 'saw' }, selectionPrompt);
 
-    expect(workspace.paused).toBe(true);
+    expect(workspace.actionsEnabled).toBe(false);
+    expect(workspace.reviewsEnabled).toBe(true);
     expect(workspace.currentDocument?.content).toBe('saw');
     expect(workspace.documentSnapshot?.text).toBe('saw');
     expect(proposals).toEqual([]);
     expect(requestInputs).not.toHaveBeenCalled();
+  });
+
+  it('keeps Reviews and Actions independently dispatchable', async () => {
+    const requestInputs = vi.fn(async () => ({ proposals: [], errors: [] }));
+    const workspace = new WorkspaceState(fakeFacade(requestInputs));
+    workspace.projectId = 'project';
+    workspace.projects = [project()];
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.setEditorReady(beforeDocument);
+
+    await workspace.toggleReviews();
+    await workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt);
+
+    expect(workspace.reviewsEnabled).toBe(false);
+    expect(workspace.actionsEnabled).toBe(true);
+    expect(workspace.currentProject?.extensions).toMatchObject({
+      review_settings: { enabled: false },
+      action_settings: { enabled: true }
+    });
+    expect(requestInputs).toHaveBeenCalled();
+
+    requestInputs.mockClear();
+    await workspace.toggleReviews();
+    await workspace.toggleActions();
+    await workspace.runCraftPass({ id: 'sentinel', name: 'Review', version: 1, instruction: 'Review it.' });
+
+    expect(workspace.reviewsEnabled).toBe(true);
+    expect(workspace.actionsEnabled).toBe(false);
+    expect(requestInputs).toHaveBeenCalled();
+  });
+
+  it('tracks review and action activity independently', async () => {
+    const pending: Array<{
+      request: AIInteractionRequest;
+      resolve: (result: Awaited<ReturnType<AIInteractionService['execute']>>) => void;
+    }> = [];
+    const execute = vi.fn<AIInteractionService['execute']>((request) => new Promise((resolve) => pending.push({ request, resolve })));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off' };
+    workspace.setEditorReady(beforeDocument);
+
+    const review = workspace.runCraftPass({ id: 'sentinel', name: 'Review', version: 1, instruction: 'Review it.' });
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    expect(workspace).toMatchObject({ generating: true, reviewsGenerating: true, actionsGenerating: false });
+
+    const action = workspace.runSelectionPass({ from: 1, to: 8, text: 'noticed' }, selectionPrompt);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(workspace).toMatchObject({ generating: true, reviewsGenerating: true, actionsGenerating: true });
+
+    pending[1].resolve({ proposals: [], diagnostics: [], context: pending[1].request.context });
+    await action;
+    expect(workspace).toMatchObject({ generating: true, reviewsGenerating: true, actionsGenerating: false });
+
+    pending[0].resolve({ proposals: [], diagnostics: [], context: pending[0].request.context });
+    await review;
+    expect(workspace).toMatchObject({ generating: false, reviewsGenerating: false, actionsGenerating: false });
   });
 
   it('moves an in-flight run through an edit before its target and adopts the proposal at the new range', async () => {
@@ -636,11 +719,10 @@ describe('semantic workspace history', () => {
     expect(workspace.currentDocument?.content).toBe('noticed');
   });
 
-  it('publishes each provider check as it completes without waiting for the review activity', async () => {
-    const releases = new Map<string, (result: Awaited<ReturnType<AIInteractionService['execute']>>) => void>();
+  it('groups local document checks into one run and publishes their inputs together', async () => {
+    let release!: (result: Awaited<ReturnType<AIInteractionService['execute']>>) => void;
     const execute = vi.fn<AIInteractionService['execute']>((request) => {
-      const source = request.sources.find((item) => item.participation !== 'off')?.sourceId ?? 'unknown';
-      return new Promise((resolve) => releases.set(source, resolve));
+      return new Promise((resolve) => { release = resolve; });
     });
     const workspace = new WorkspaceState(fakeFacade(), { execute });
     workspace.branchId = 'main';
@@ -651,30 +733,105 @@ describe('semantic workspace history', () => {
     const prompt = { id: 'sentinel', name: 'Review Instructions', version: 1, instruction: 'Review this passage.' };
 
     const review = workspace.runCraftPass(prompt, undefined, (inputs) => arrivals.push(inputs.map((item) => item.source)));
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
     expect(workspace.runs.map((run) => Object.entries(run.sourceStates).filter(([, state]) => state !== 'off').map(([source]) => source))).toEqual([
-      ['local-craft'], ['fake-sentinel']
+      ['local-craft', 'fake-sentinel']
     ]);
 
-    releases.get('fake-sentinel')?.({
-      proposals: [{ kind: 'craft_input', payload: { ...proposal(), proposalId: 'sentinel-proposal', source: 'fake-sentinel', sourceNumber: 2, category: 'cadence', comment: 'Vary the sentence rhythm.' } }],
-      diagnostics: [],
-      context: execute.mock.calls[1][0].context
-    });
-    await vi.waitFor(() => expect(arrivals).toEqual([['fake-sentinel']]));
-    expect(workspace.inputs.map((item) => item.source)).toEqual(['fake-sentinel']);
-    expect(workspace.activities.at(-1)?.state).toBe('running');
-
-    releases.get('local-craft')?.({
-      proposals: [{ kind: 'craft_input', payload: { ...proposal(), proposalId: 'local-proposal', source: 'local-craft', sourceNumber: 1, sourceKind: 'local', comment: 'Use a direct perception verb.' } }],
+    release({
+      proposals: [
+        { kind: 'craft_input', payload: { ...proposal(), proposalId: 'local-proposal', source: 'local-craft', sourceNumber: 1, sourceKind: 'local', comment: 'Use a direct perception verb.' } },
+        { kind: 'craft_input', payload: { ...proposal(), proposalId: 'sentinel-proposal', source: 'fake-sentinel', sourceNumber: 2, category: 'cadence', comment: 'Vary the sentence rhythm.' } }
+      ],
       diagnostics: [],
       context: execute.mock.calls[0][0].context
     });
     await review;
 
-    expect(arrivals).toEqual([['fake-sentinel'], ['local-craft']]);
+    expect(arrivals).toEqual([['local-craft', 'fake-sentinel']]);
     expect(workspace.inputs.map((item) => item.source).sort()).toEqual(['fake-sentinel', 'local-craft']);
     expect(workspace.activities.at(-1)?.state).toBe('completed');
+  });
+
+  it('dispatches one whole-document run per remote provider instead of one call per paragraph', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({ proposals: [], diagnostics: [], context: request.context }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document('One\n\nTwo')];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'visible', 'codex-chatgpt': 'visible' };
+    workspace.setEditorReady({
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'One' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Two' }] }
+        ]
+      },
+      text: 'One\n\nTwo',
+      selection: { from: 1, to: 1 }
+    });
+
+    await workspace.runCraftPass({ id: 'sentinel', name: 'Review', version: 1, instruction: 'Review it.' });
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    const activeSources = execute.mock.calls.map(([request]) => request.sources
+      .filter((source) => source.participation !== 'off')
+      .map((source) => source.sourceId));
+    expect(activeSources).toEqual([
+      ['local-craft', 'fake-sentinel'],
+      ['codex-chatgpt']
+    ]);
+    expect(execute.mock.calls.every(([request]) => request.target.exactText === 'One\nTwo')).toBe(true);
+  });
+
+  it('maps remote whole-document findings back to exact editor positions', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [{
+        kind: 'craft_input',
+        payload: { ...proposal(), from: 4, to: 7, sourceText: 'Two', variants: ['Second'] }
+      }],
+      diagnostics: [],
+      context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document('One\n\nTwo')];
+    workspace.sourceStates = { 'local-craft': 'off', 'fake-sentinel': 'off', 'codex-chatgpt': 'visible' };
+    workspace.setEditorReady({
+      doc: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'One' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Two' }] }
+        ]
+      },
+      text: 'One\n\nTwo',
+      selection: { from: 1, to: 1 }
+    });
+
+    const adopted = await workspace.runCraftPass({ id: 'sentinel', name: 'Review', version: 1, instruction: 'Review it.' });
+
+    expect(adopted[0]).toMatchObject({
+      anchor: { from: 6, to: 9, text: 'Two' },
+      target: { targets: [expect.objectContaining({ start: 6, end: 9 })] }
+    });
+  });
+
+  it('runs a card revision against its canonical target rather than the browser selection', async () => {
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({ proposals: [], diagnostics: [], context: request.context }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute });
+    workspace.branchId = 'main';
+    workspace.documents = [document()];
+    workspace.inputs = [input()];
+    workspace.setEditorReady(beforeDocument);
+
+    await workspace.runInputRevisionPass('input-1', selectionPrompt);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0].target).toMatchObject({
+      exactText: 'noticed',
+      target: { targets: [expect.objectContaining({ start: 1, end: 8 })] }
+    });
   });
 
   it('freezes writer context choices while retaining omitted evidence in the manifest', async () => {
@@ -865,7 +1022,7 @@ describe('Navigator workspace transactions', () => {
     facade.persistentWorkspace = vi.fn(async () => ({
       projects: [freshProject], documents: [], contextBuckets: []
     }));
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'main';
@@ -879,19 +1036,21 @@ describe('Navigator workspace transactions', () => {
     expect(workspace.navigatorMemory.mode).toBe('traditional');
     expect(workspace.navigatorMemory.traditional.selectedKey).toBe('node:spine-fresh');
     expect(workspace.navigatorFocusNode?.id).toBe('spine-fresh');
-    expect(workspace.paused).toBe(true);
+    expect(workspace.reviewsEnabled).toBe(false);
+    expect(workspace.actionsEnabled).toBe(true);
     expect(workspace.currentProject?.extensions.review_settings).toEqual({ enabled: false });
+    expect(workspace.currentProject?.extensions.action_settings).toEqual({ enabled: true });
   });
 
-  it('restores each project review preference when switching projects', async () => {
+  it('restores each project Review and Action preference when switching projects', async () => {
     const facade = fakeFacade();
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'main';
     workspace.projects = [
       project(),
-      { ...project(), id: 'paused-project', extensions: { review_settings: { enabled: false } } }
+      { ...project(), id: 'paused-project', extensions: { review_settings: { enabled: false }, action_settings: { enabled: true } } }
     ];
     workspace.documents = [
       document(),
@@ -902,10 +1061,12 @@ describe('Navigator workspace transactions', () => {
     ];
 
     await workspace.switchProject('paused-project');
-    expect(workspace.paused).toBe(true);
+    expect(workspace.reviewsEnabled).toBe(false);
+    expect(workspace.actionsEnabled).toBe(true);
 
     await workspace.switchProject('project');
-    expect(workspace.paused).toBe(false);
+    expect(workspace.reviewsEnabled).toBe(true);
+    expect(workspace.actionsEnabled).toBe(true);
   });
 
   it('disables reviews when importing a project that previously had them enabled', async () => {
@@ -932,7 +1093,7 @@ describe('Navigator workspace transactions', () => {
         contextBuckets: 0, assets: 0, activeRuns: 0, archiveBytes: 1, expandedBytes: 1, warnings: []
       }
     }));
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'main';
@@ -941,10 +1102,12 @@ describe('Navigator workspace transactions', () => {
 
     await workspace.importProject({} as File);
 
-    expect(workspace.paused).toBe(true);
+    expect(workspace.reviewsEnabled).toBe(false);
+    expect(workspace.actionsEnabled).toBe(true);
     expect(workspace.currentProject?.extensions.review_settings).toEqual({ enabled: false });
+    expect(workspace.currentProject?.extensions.action_settings).toEqual({ enabled: true });
     expect(facade.saveProject).toHaveBeenCalledWith('imported', importedProject.title, {
-      ai_actions: [], review_settings: { enabled: false }
+      ai_actions: [], review_settings: { enabled: false }, action_settings: { enabled: true }
     });
   });
 
@@ -971,7 +1134,7 @@ describe('Navigator workspace transactions', () => {
       title: input.title, order: 1, revision: 1, role: input.role, extensions: input.extensions ?? {},
       kind: 'document' as const, content: '', updatedAt: '2026-08-18T00:00:00Z'
     }));
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     const workspace = new WorkspaceState(facade);
     workspace.projectId = 'project';
     workspace.branchId = 'main';
@@ -1244,7 +1407,7 @@ describe('Navigator workspace transactions', () => {
 
   it('keeps Navigator focus history separate from the active document projection', async () => {
     const facade = fakeFacade();
-    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0, codexTokens: 0 } }));
     facade.createDocument = vi.fn(async (input) => ({
       id: input.id!, projectId: input.projectId, parentId: input.parentId ?? null, title: input.title,
       order: 3, revision: 1, role: input.role, extensions: input.extensions ?? {}, kind: 'document' as const,

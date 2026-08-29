@@ -7,6 +7,15 @@ export interface DocumentRange {
   text: string;
 }
 
+export interface DocumentTextMap {
+  starts: number[];
+  ends: number[];
+}
+
+export interface MappedDocumentRange extends DocumentRange {
+  textMap: DocumentTextMap;
+}
+
 export function documentTextBetween(snapshot: EditorDocumentSnapshot, from: number, to: number): string {
   const document = schema.nodeFromJSON(snapshot.doc);
   if (from < 0 || to < from || to > document.content.size) return '';
@@ -16,6 +25,54 @@ export function documentTextBetween(snapshot: EditorDocumentSnapshot, from: numb
 export function completeDocumentRange(snapshot: EditorDocumentSnapshot): DocumentRange {
   const document = schema.nodeFromJSON(snapshot.doc);
   return { from: 0, to: document.content.size, text: document.textBetween(0, document.content.size, '\n') };
+}
+
+/**
+ * Capture the provider-facing document text together with the exact editor
+ * position occupied by every visible character. ProseMirror positions include
+ * block boundaries and inline atoms, so plain string offsets cannot safely be
+ * added to the start of a whole document.
+ */
+export function completeDocumentMappedRange(snapshot: EditorDocumentSnapshot): MappedDocumentRange {
+  const document = schema.nodeFromJSON(snapshot.doc);
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let text = '';
+  let firstBlock = true;
+
+  document.nodesBetween(0, document.content.size, (node, position) => {
+    if (node.isBlock && (node.isTextblock || node.isLeaf)) {
+      if (firstBlock) firstBlock = false;
+      else {
+        text += '\n';
+        starts.push(ends.at(-1) ?? position);
+        ends.push(node.isTextblock ? position + 1 : position + node.nodeSize);
+      }
+    }
+
+    if (node.isText) {
+      const value = node.text ?? '';
+      text += value;
+      for (let offset = 0; offset < value.length; offset += 1) {
+        starts.push(position + offset);
+        ends.push(position + offset + 1);
+      }
+    } else if (node.isLeaf) {
+      const value = node.type.spec.leafText?.(node) ?? '';
+      text += value;
+      for (let offset = 0; offset < value.length; offset += 1) {
+        starts.push(position);
+        ends.push(position + node.nodeSize);
+      }
+    }
+  });
+
+  return {
+    from: 0,
+    to: document.content.size,
+    text,
+    textMap: { starts, ends }
+  };
 }
 
 export function documentParagraphs(snapshot: EditorDocumentSnapshot): DocumentRange[] {

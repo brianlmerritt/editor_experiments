@@ -12,6 +12,7 @@ describe('Svelte settings state', () => {
     expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1' })).toBe('openai');
     expect(providerPresetFor({ protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1' })).toBe('anthropic');
     expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'http://localhost:11434/v1' })).toBe('ollama');
+    expect(providerPresetFor({ protocol: 'codex_app_server', baseUrl: 'local://codex-app-server' })).toBe('codex');
     expect(providerPresetFor({ protocol: 'openai_compatible', baseUrl: 'https://example.test/v1' })).toBeNull();
   });
 
@@ -118,5 +119,42 @@ describe('Svelte settings state', () => {
       baseUrl: 'https://openrouter.ai/api/v1', key: '', model: 'anthropic/claude-fable-5'
     });
     expect(state.sourceAvailability.openrouter.credentialHint).toBe('sk-or******123');
+  });
+
+  it('checks the local Codex ChatGPT session without requesting an API key', async () => {
+    const fetcher = vi.fn<FetchLike>(async (input, init) => {
+      if (String(input) === '/api/codex') return json({
+        status: { available: true, connected: true, accountType: 'chatgpt', email: 'writer@example.test', planType: 'plus' }
+      });
+      expect(JSON.parse(String(init?.body))).toEqual({
+        kind: 'provider_profile',
+        profile: {
+          id: 'codex-chatgpt', name: 'Codex — ChatGPT', protocol: 'codex_app_server',
+          baseUrl: 'local://codex-app-server', model: 'gpt-5.6-terra'
+        }
+      });
+      return json({
+        profileId: 'codex-chatgpt',
+        sourceAvailability: {
+          'codex-chatgpt': {
+            available: true, name: 'Codex — ChatGPT', protocol: 'codex_app_server',
+            baseUrl: 'local://codex-app-server', model: 'gpt-5.6-terra', sourceNumber: 3,
+            credentialHint: 'ChatGPT session', persistence: 'chatgpt_session'
+          }
+        }
+      });
+    });
+    const state = createSettingsState(new WorkspaceFacade(fetcher));
+    state.openProviders();
+    state.usePreset('codex');
+    await state.refreshCodex();
+
+    expect(state.codexStatus).toMatchObject({ connected: true, accountType: 'chatgpt' });
+    expect(state.providerForm).toMatchObject({ protocol: 'codex_app_server', model: 'gpt-5.6-terra', key: '' });
+    const configured = await state.saveProvider({
+      id: 'codex-chatgpt', name: 'Codex — ChatGPT', protocol: 'codex_app_server',
+      baseUrl: 'local://codex-app-server', model: 'gpt-5.6-terra'
+    });
+    expect(configured.availability.credentialHint).toBe('ChatGPT session');
   });
 });

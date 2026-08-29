@@ -47,12 +47,14 @@
   let duplicateInputsCombined = $state(0);
   let inputsBeyondLimit = $state(0);
   let displayableInputCount = $state(0);
-  let isPaused = $derived(workspace.paused);
+  let reviewsEnabled = $derived(workspace.reviewsEnabled);
+  let actionsEnabled = $derived(workspace.actionsEnabled);
   let contextDrafts = $state<Record<string, ContextDraft>>({});
   let newContextTitle = $state('');
   let newContextRole = $state('');
   let newContextScope = $state<ContextScope>('project');
   let revisionSuggestionId = $state<string | null>(null);
+  let revisionBusyInputId = $state<string | null>(null);
   let customRequestOpen = $state(false);
   let customRequest = $state('');
   let projectDialogKind = $state<'create' | 'rename' | 'reset' | 'delete' | null>(null);
@@ -349,12 +351,21 @@
 
   async function toggleRunSource(sourceId: string): Promise<void> {
     if (providerSettings.sourceAvailability[sourceId]?.available !== true) providerSettings.openProviders(sourceId);
-    else await workspace.toggleRunSource(sourceId);
+    else {
+      const enabling = workspace.sourceStates[sourceId] === 'off';
+      await workspace.toggleRunSource(sourceId);
+      if (enabling && !workspace.reviewsEnabled) {
+        const name = providerSettings.sourceAvailability[sourceId]?.name ?? sourceId;
+        workspace.notice = `${name} is selected for future reviews, but Reviews are paused. Enable Reviews, then use Document review for existing text.`;
+      }
+    }
   }
 
   async function toggleInputSource(sourceId: string): Promise<void> {
-    await workspace.toggleInputSourceVisibility(sourceId);
+    const saving = workspace.toggleInputSourceVisibility(sourceId);
     refreshLiveSuggestions();
+    await tick();
+    await saving;
   }
 
   async function saveProvider(event: SubmitEvent): Promise<void> {
@@ -377,6 +388,25 @@
     } catch (error) {
       workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'Provider configuration failed');
     }
+  }
+
+  async function startCodexLogin(): Promise<void> {
+    const loginWindow = window.open('about:blank', 'margin-note-codex-login');
+    try {
+      const login = await providerSettings.startCodexLogin();
+      if (loginWindow) loginWindow.location.href = login.authUrl;
+      else workspace.notice = 'ChatGPT sign-in is ready. Use the Continue sign-in link in Providers.';
+    } catch (error) {
+      loginWindow?.close();
+      workspace.lastError = providerSettings.error ?? (error instanceof Error ? error.message : 'Could not start ChatGPT sign-in');
+    }
+  }
+
+  async function refreshCodexStatus(): Promise<void> {
+    const status = await providerSettings.refreshCodex();
+    workspace.notice = status.connected
+      ? `ChatGPT connected${status.email ? ` as ${status.email}` : ''}${status.planType ? ` (${status.planType})` : ''}.`
+      : status.reason ?? 'ChatGPT is not connected.';
   }
 
   async function deleteProvider(sourceId: string): Promise<void> {
@@ -524,8 +554,14 @@
     for (const run of interruptedRuns) await workspace.completeInterruptedRun(run.id);
   }
 
-  async function changePause(): Promise<void> {
-    await workspace.togglePause();
+  async function changeReviews(): Promise<void> {
+    const enabling = !workspace.reviewsEnabled;
+    await workspace.toggleReviews();
+    if (enabling) workspace.notice = 'Reviews enabled. Use Document review to review existing text; automatic reviews run after the next edit.';
+  }
+
+  async function changeActions(): Promise<void> {
+    await workspace.toggleActions();
   }
 
   function textChanged(detail: { text: string; characters: number; origin?: unknown }): void {
@@ -554,7 +590,7 @@
       editSession = { started: 0, characters: 0, text: '' };
     }, 1600);
     if (scanTimer) clearTimeout(scanTimer);
-    if (!workspace.paused) scanTimer = setTimeout(() => void runSentinels(), 5000);
+    if (workspace.reviewsEnabled) scanTimer = setTimeout(() => void runSentinels(), 5000);
   }
 
   function undoWorkspace(): void {
@@ -594,8 +630,10 @@
   }
 
   async function setManagedInputState(input: Suggestion, state: 'pending' | 'rejected'): Promise<void> {
-    await workspace.setInputState(input.id, state, state === 'pending' ? 'Reopen input' : 'Dismiss input');
+    const saving = workspace.setInputState(input.id, state, state === 'pending' ? 'Reopen input' : 'Dismiss input');
     refreshLiveSuggestions();
+    await tick();
+    await saving;
   }
 
   async function clearPendingInputs(): Promise<void> {
@@ -622,7 +660,7 @@
   }
 
   async function runSentinels(contextSelection?: AIContextSelection, prompt: TaskPrompt | null = selectedPrompt): Promise<void> {
-    if (!prompt || workspace.paused) return;
+    if (!prompt || !workspace.reviewsEnabled) return;
     workspace.notice = null;
     const incoming = await workspace.runCraftPass(prompt, contextSelection, () => refreshLiveSuggestions());
     if (!workspace.notice) showNotice(incoming.length
@@ -667,16 +705,26 @@
     }
     const label = categoryMeta[suggestion.category].label.toLowerCase();
     const pendingMessage = `Requesting ${label} revisions…`;
-    const incoming = await runSelectionPrompt({
-      id: `address-${suggestion.category}`,
-      name: `Address ${categoryMeta[suggestion.category].label} note`,
-      version: 1,
-      instruction: `Offer two or three distinct replacement revisions for the selected passage that address this ${label} note: ${suggestion.payload.comment} Preserve established facts, voice, tense, and intended point of view. Return practical alternatives rather than repeating the diagnosis.`
-    }, pendingMessage);
-    if (workspace.notice === pendingMessage) {
-      showNotice(incoming.length
-        ? `${incoming.length} revision ${incoming.length === 1 ? 'option' : 'options'} returned.`
-        : 'The provider returned no usable revision alternatives.');
+    revisionBusyInputId = suggestion.id;
+    workspace.notice = null;
+    showNotice(pendingMessage);
+    try {
+      const incoming = await workspace.runInputRevisionPass(suggestion.id, {
+        id: `address-${suggestion.category}`,
+        name: `Address ${categoryMeta[suggestion.category].label} note`,
+        version: 1,
+        instruction: `Offer two or three distinct replacement revisions for the selected passage that address this ${label} note: ${suggestion.payload.comment} Preserve established facts, voice, tense, and intended point of view. Return practical alternatives rather than repeating the diagnosis.`
+      });
+      refreshLiveSuggestions();
+      await tick();
+      if (incoming[0]) void activateCard(incoming[0].id);
+      if (workspace.notice === pendingMessage) {
+        showNotice(incoming.length
+          ? `${incoming.length} revision ${incoming.length === 1 ? 'option' : 'options'} returned.`
+          : 'The provider returned no usable revision alternatives.');
+      }
+    } finally {
+      if (revisionBusyInputId === suggestion.id) revisionBusyInputId = null;
     }
   }
 
@@ -777,13 +825,16 @@
   }
 
   async function reject(suggestion: Suggestion, viaDrag: boolean): Promise<void> {
+    let resolution: Promise<void>;
     if (viaDrag) {
-      await workspace.resolveSuggestion(suggestion.id, 'rejected', 'dismissed_via_drag', { gestureDistance: 40 });
+      resolution = workspace.resolveSuggestion(suggestion.id, 'rejected', 'dismissed_via_drag', { gestureDistance: 40 });
       if (undoDismiss) clearTimeout(undoDismiss.timer);
       const timer = setTimeout(() => { undoDismiss = null; }, 5000);
       undoDismiss = { suggestion, timer };
-    } else await workspace.resolveSuggestion(suggestion.id, 'rejected', 'rejected');
+    } else resolution = workspace.resolveSuggestion(suggestion.id, 'rejected', 'rejected');
     refreshLiveSuggestions();
+    await tick();
+    await resolution;
   }
 
   async function undoDragDismiss(): Promise<void> {
@@ -1168,7 +1219,8 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
     <div class="top-actions">
-      <button class:paused={isPaused} onclick={changePause} title={isPaused ? 'Enable reviews and AI review requests' : 'Pause reviews, AI review requests, and provider spend'}>{isPaused ? '▶ Enable Review' : 'Ⅱ Pause Reviews'}</button>
+      <button class:paused={!reviewsEnabled} onclick={changeReviews} title={reviewsEnabled ? 'Pause automatic and document reviews' : 'Enable automatic and document reviews'}>{reviewsEnabled ? 'Ⅱ Pause Reviews' : '▶ Enable Reviews'}</button>
+      <button class:paused={!actionsEnabled} onclick={changeActions} title={actionsEnabled ? 'Pause selection and document actions' : 'Enable selection and document actions'}>{actionsEnabled ? 'Ⅱ Pause Actions' : '▶ Enable Actions'}</button>
       <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
       <a href="/review">Compare</a>
       <button onclick={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
@@ -1266,7 +1318,7 @@
           {#if selection.text}
             <div class="selection-menu">
               <span>{selection.text.split(/\s+/).length}w selected</span>
-              {#if !workspace.paused}
+              {#if workspace.actionsEnabled}
                 {#if revisionSuggestion}
                   <button class="contextual-revision" type="button" onmousedown={preventDefault} onclick={() => suggestNoteRevisions(revisionSuggestion!)}>Suggest more for {categoryMeta[revisionSuggestion.category].label}</button>
                 {/if}
@@ -1277,7 +1329,7 @@
                 <button type="button" onmousedown={preventDefault} onclick={() => runSelection('synonyms')}>Synonyms</button>
               {/if}
               <button type="button" onmousedown={preventDefault} onclick={strikeSelection}>{workspace.selectionHasStrikethrough(selection.from, selection.to) ? 'Remove strikethrough' : 'Strikethrough'}</button>
-              {#if !workspace.paused}
+              {#if workspace.actionsEnabled}
                 <button type="button" onmousedown={preventDefault} onclick={() => customRequestOpen = !customRequestOpen}>Custom request…</button>
                 {#if customRequestOpen}
                   <form class="custom-request" onsubmit={suggestCustomRevision}>
@@ -1328,14 +1380,14 @@
               </div>
               <div class="inputs-execution-actions">
                 <span>Perform</span>
-                <button type="button" aria-label="Perform action…" title={workspace.paused ? 'Enable Review to perform an action' : !enabledRunSourceCount ? 'Enable at least one configured AI provider to perform an action' : selection.text.trim() ? 'Perform a project action on the current selection' : 'Perform a project action on the current document'} disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Action…</button>
+                <button type="button" aria-label="Perform action…" title={!workspace.actionsEnabled ? 'Enable Actions to perform an action' : !enabledRunSourceCount ? 'Enable at least one configured AI provider to perform an action' : selection.text.trim() ? 'Perform a project action on the current selection' : 'Perform a project action on the current document'} disabled={workspace.actionsGenerating || !workspace.actionsEnabled || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Action…</button>
                 <button
                   type="button"
                   class="review-document"
                   aria-label="Review document"
-                  disabled={workspace.generating || workspace.paused || !enabledRunSourceCount}
+                  disabled={workspace.reviewsGenerating || !workspace.reviewsEnabled || !enabledRunSourceCount}
                   onclick={openReviewPreflight}
-                >{workspace.generating ? 'Reviewing…' : 'Document review'}</button>
+                >{workspace.reviewsGenerating ? 'Reviewing…' : 'Document review'}</button>
               </div>
             </div>
           </header>
@@ -1384,8 +1436,8 @@
               {#if latestCraftActivity.firstError}<small>{latestCraftActivity.firstError}</small>{/if}
               {#if interruptedRuns.length}
                 <div class="interrupted-actions">
-                  <button type="button" disabled={workspace.generating} onclick={() => void retryInterrupted()}>Retry {interruptedRuns.length} interrupted {interruptedRuns.length === 1 ? 'passage' : 'passages'}</button>
-                  <button type="button" disabled={workspace.generating} onclick={() => void completeInterrupted()}>Complete without {interruptedRuns.length === 1 ? 'it' : 'them'}</button>
+                  <button type="button" disabled={workspace.reviewsGenerating} onclick={() => void retryInterrupted()}>Retry {interruptedRuns.length} interrupted {interruptedRuns.length === 1 ? 'passage' : 'passages'}</button>
+                  <button type="button" disabled={workspace.reviewsGenerating} onclick={() => void completeInterrupted()}>Complete without {interruptedRuns.length === 1 ? 'it' : 'them'}</button>
                 </div>
               {/if}
             </section>
@@ -1413,7 +1465,7 @@
 
               <div class="control-group">
                 <header><strong>Sources</strong><small>Future reviews / existing Inputs</small></header>
-                <p class="control-explanation"><b>Use</b> controls future reviews. <b>Show</b> only filters Inputs already returned.</p>
+                <p class="control-explanation"><b>Use</b> chooses sources for future reviews; it does not start one. <b>Show</b> only filters Inputs already returned.</p>
                 <div class="source-controls">
                   {#each providerSettings.sources as source}
                     {@const availability = providerSettings.sourceAvailability[source.id]}
@@ -1467,7 +1519,7 @@
                   label={inputCardLabel(suggestion)}
                   active={workspace.activeSuggestionId === suggestion.id}
                   selectedVariant={selectedVariants[suggestion.id] ?? 0}
-                  revisionBusy={workspace.generating && revisionSuggestionId === suggestion.id}
+                  revisionBusy={revisionBusyInputId === suggestion.id}
                   revisionAvailable={hasRevisionProvider}
                   canBindSelection={Boolean(selection.text.trim())}
                   onActivate={() => void activateCard(suggestion.id)}
@@ -1495,6 +1547,7 @@
           <footer class="inputs-panel-footer">
             <div>
               <strong>≈${workspace.costUsd.toFixed(4)}</strong><span>tracked provider spend</span>
+              <small>{(workspace.codexTokens / 1_000_000).toFixed(3)}M Codex tokens</small>
               <small>{providerSettings.sources.filter((source) => source.number >= 3).length} configured provider {providerSettings.sources.filter((source) => source.number >= 3).length === 1 ? 'profile' : 'profiles'}</small>
             </div>
             <button type="button" onclick={() => providerSettings.openProviders()}>Providers</button>
@@ -1504,11 +1557,21 @@
         </aside>{/if}
     </section>
 
-    {#if ledgerOpen}<div class="ledger-panel"><LedgerTail events={workspace.ledger} costUsd={workspace.costUsd} /></div>{/if}
+    {#if ledgerOpen}<div class="ledger-panel"><LedgerTail events={workspace.ledger} costUsd={workspace.costUsd} codexTokens={workspace.codexTokens} /></div>{/if}
     </main>
   </div>
 
-  <div class="pause-banner" class:mode-hidden={!isPaused}><b>Reviews paused</b> — review requests, automatic reviews, and provider spend are suspended. Writing remains available.</div>
+  {#if !reviewsEnabled || !actionsEnabled}
+    <div class="pause-banner">
+      {#if !reviewsEnabled && !actionsEnabled}
+        <b>Reviews and Actions paused</b> — automatic reviews and requested AI actions are suspended. Writing remains available.
+      {:else if !reviewsEnabled}
+        <b>Reviews paused</b> — automatic and document reviews are suspended. Actions and writing remain available.
+      {:else}
+        <b>Actions paused</b> — selection and document actions are suspended. Reviews and writing remain available.
+      {/if}
+    </div>
+  {/if}
   {#if providerConfigurationIssue}
     <section class="provider-alert" role="alert" aria-live="assertive">
       <div>
@@ -1593,17 +1656,38 @@
           <button type="button" class:active={activeProviderPreset === 'openai'} aria-pressed={activeProviderPreset === 'openai'} onclick={() => providerSettings.usePreset('openai')}>OpenAI</button>
           <button type="button" class:active={activeProviderPreset === 'anthropic'} aria-pressed={activeProviderPreset === 'anthropic'} onclick={() => providerSettings.usePreset('anthropic')}>Anthropic</button>
           <button type="button" class:active={activeProviderPreset === 'ollama'} aria-pressed={activeProviderPreset === 'ollama'} onclick={() => providerSettings.usePreset('ollama')}>Ollama/local</button>
+          <button type="button" class:active={activeProviderPreset === 'codex'} aria-pressed={activeProviderPreset === 'codex'} onclick={() => providerSettings.usePreset('codex')}>Codex / ChatGPT</button>
           {#if !activeProviderPreset}<small>Custom endpoint</small>{/if}
         </div>
         <form onsubmit={saveProvider}>
-          <p class="provider-intro">Profiles and keys are saved in the local server's ignored provider-settings file. Keys are never written to the project, browser storage, run history, or event ledger.</p>
+          <p class="provider-intro">Provider profiles are saved in the local server's ignored settings file. API keys stay there; Codex uses the local Codex app-server's ChatGPT session instead. Neither is written to the project, browser storage, run history, or event ledger.</p>
           <input name="provider-id" type="hidden" value={providerSettings.providerForm.id} />
           <div class="form-grid">
             <label>Profile name<input name="provider-name" required value={providerSettings.providerForm.name} oninput={(event) => providerSettings.setProviderField('name', event.currentTarget.value)} /></label>
-            <label>Protocol<select name="provider-protocol" value={providerSettings.providerForm.protocol} onchange={(event) => providerSettings.setProviderField('protocol', event.currentTarget.value as ProviderProtocol)}><option value="openai_compatible">OpenAI compatible</option><option value="anthropic">Anthropic Messages</option></select></label>
+            {#if activeProviderPreset === 'codex'}
+              <label>Protocol<input value="Codex app-server (ChatGPT)" disabled /><input name="provider-protocol" type="hidden" value="codex_app_server" /></label>
+            {:else}
+              <label>Protocol<select name="provider-protocol" value={providerSettings.providerForm.protocol} onchange={(event) => providerSettings.setProviderField('protocol', event.currentTarget.value as ProviderProtocol)}><option value="openai_compatible">OpenAI compatible</option><option value="anthropic">Anthropic Messages</option><option value="codex_app_server">Codex app-server</option></select></label>
+            {/if}
           </div>
-          <label>Base URL<input name="provider-base-url" required value={providerSettings.providerForm.baseUrl} oninput={(event) => providerSettings.setProviderField('baseUrl', event.currentTarget.value)} /></label>
-          <label>API key {#if editingProviderAvailability?.credentialHint}<small>Saved as {editingProviderAvailability.credentialHint}; leave blank to keep it</small>{:else if activeProviderPreset === 'openrouter'}<small>Use an OpenRouter key, normally beginning sk-or-</small>{:else if activeProviderPreset === 'openai'}<small>Use an OpenAI project key</small>{:else if activeProviderPreset === 'anthropic'}<small>Use an Anthropic API key</small>{/if}<input name="provider-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={editingProviderAvailability?.credentialHint ?? 'Provider API key; optional for localhost'} /></label>
+          {#if activeProviderPreset === 'codex'}
+            <input name="provider-base-url" type="hidden" value="local://codex-app-server" />
+            <input name="provider-key" type="hidden" value="" />
+            <section class="codex-connection" class:connected={providerSettings.codexStatus?.connected}>
+              <div>
+                <strong>{providerSettings.codexStatus?.connected ? 'ChatGPT connected' : providerSettings.checkingCodex ? 'Checking Codex…' : 'ChatGPT connection'}</strong>
+                <small>{providerSettings.codexStatus?.connected
+                  ? [providerSettings.codexStatus.email, providerSettings.codexStatus.planType].filter(Boolean).join(' · ') || 'Local Codex session'
+                  : providerSettings.codexStatus?.reason ?? 'Uses your local Codex sign-in; no API key is stored by Margin Note.'}</small>
+              </div>
+              {#if !providerSettings.codexStatus?.connected}<button type="button" onclick={() => void startCodexLogin()} disabled={providerSettings.checkingCodex}>Sign in with ChatGPT</button>{/if}
+              <button type="button" onclick={() => void refreshCodexStatus()} disabled={providerSettings.checkingCodex}>Refresh</button>
+              {#if providerSettings.codexLoginUrl}<a href={providerSettings.codexLoginUrl} target="_blank" rel="noreferrer">Continue sign-in</a>{/if}
+            </section>
+          {:else}
+            <label>Base URL<input name="provider-base-url" required value={providerSettings.providerForm.baseUrl} oninput={(event) => providerSettings.setProviderField('baseUrl', event.currentTarget.value)} /></label>
+            <label>API key {#if editingProviderAvailability?.credentialHint}<small>Saved as {editingProviderAvailability.credentialHint}; leave blank to keep it</small>{:else if activeProviderPreset === 'openrouter'}<small>Use an OpenRouter key, normally beginning sk-or-</small>{:else if activeProviderPreset === 'openai'}<small>Use an OpenAI project key</small>{:else if activeProviderPreset === 'anthropic'}<small>Use an Anthropic API key</small>{/if}<input name="provider-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={editingProviderAvailability?.credentialHint ?? 'Provider API key; optional for localhost'} /></label>
+          {/if}
           <label>Model ID<small>{activeProviderPreset === 'openrouter' ? 'Use the complete namespaced ID, for example openai/gpt-5.6-terra' : 'Exact model identifier accepted by this provider'}</small><input name="provider-model" required value={providerSettings.providerForm.model} oninput={(event) => providerSettings.setProviderField('model', event.currentTarget.value)} /></label>
           {#if providerSettings.error}<p class="provider-error" role="alert">{providerSettings.error}</p>{/if}
           <footer><p>Saving a profile enables it for the next request; <b>Use</b> can turn participation off independently.</p><button type="button" onclick={() => providerSettings.closeProviders()}>Close</button><button type="submit" value="add-another" disabled={providerSettings.savingProvider}>Save and add another</button><button type="submit" class="primary" value="close" disabled={providerSettings.savingProvider}>{providerSettings.savingProvider ? 'Saving…' : 'Save provider'}</button></footer>
@@ -2107,6 +2191,13 @@
   .provider-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 16px; color: var(--muted); font: 700 8px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .04em; }
   .provider-presets button.active { border-color: var(--accent); background: var(--accent); color: white; box-shadow: 0 0 0 2px var(--accent-soft); }
   .provider-presets > small { color: var(--reject); font: 700 8px/1 var(--font-ui); }
+  .codex-connection { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--canvas); padding: 10px; }
+  .codex-connection.connected { border-color: #9dc7b2; background: #edf7f1; }
+  .codex-connection > div { min-width: 0; display: grid; gap: 3px; }
+  .codex-connection strong { color: var(--ink-soft); font: 700 10px/1.2 var(--font-ui); }
+  .codex-connection small { overflow: hidden; color: var(--muted); font: 8px/1.35 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+  .codex-connection button, .codex-connection a { border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--accent); padding: 7px 8px; font: 700 8px/1 var(--font-ui); text-decoration: none; cursor: pointer; }
+  .codex-connection a { grid-column: 2 / -1; justify-self: end; }
   .run-manager { width: min(860px, 100%); }
   .run-list { display: grid; gap: 8px; }
   .run-list > article { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; padding: 10px; }

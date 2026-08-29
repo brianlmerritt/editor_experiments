@@ -102,7 +102,7 @@ export interface AIServiceDiagnostic {
   status?: number;
   maxAttempts?: number;
   model?: string;
-  protocol?: 'openai_compatible' | 'anthropic';
+  protocol?: 'openai_compatible' | 'anthropic' | 'codex_app_server';
   latencyMs?: number;
   localReplay?: boolean;
 }

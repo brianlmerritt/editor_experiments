@@ -54,4 +54,17 @@ describe('provider settings', () => {
   it('returns only a masked credential hint for display', () => {
     expect(maskCredential('sk-or-secret-456')).toBe('sk-or******456');
   });
+
+  it('stores a Codex app-server profile without storing a credential', () => {
+    temporaryPath();
+    upsertStoredProviderProfile({
+      id: 'codex-chatgpt', name: 'Codex — ChatGPT', protocol: 'codex_app_server',
+      baseUrl: 'local://codex-app-server', model: 'gpt-5.6-terra'
+    });
+
+    expect(readStoredProviderProfiles()).toEqual([{
+      id: 'codex-chatgpt', name: 'Codex — ChatGPT', protocol: 'codex_app_server',
+      baseUrl: 'local://codex-app-server', model: 'gpt-5.6-terra'
+    }]);
+  });
 });

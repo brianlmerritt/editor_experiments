@@ -8,6 +8,8 @@ import type {
   LedgerEvent,
   SourceAvailability,
   ProviderProfileInput,
+  CodexConnectionStatus,
+  CodexLoginStart,
   TaskPrompt,
   WritingBrief
 } from '$lib/domain';
@@ -29,6 +31,7 @@ import { defaultDocumentDriver, type DocumentDriver, type WorkspaceCommit } from
 export interface LedgerStats {
   events: number;
   costUsd: number;
+  codexTokens: number;
 }
 
 export interface WorkspaceBootstrap {
@@ -344,6 +347,16 @@ export class WorkspaceFacade {
 
   configureProvider(profile: ProviderProfileInput): Promise<{ profileId: string; sourceAvailability: Record<string, SourceAvailability> }> {
     return this.post('/api/settings', { kind: 'provider_profile', profile });
+  }
+
+  async codexStatus(): Promise<CodexConnectionStatus> {
+    const result = await this.get<{ status: CodexConnectionStatus }>('/api/codex');
+    return result.status;
+  }
+
+  async startCodexLogin(): Promise<CodexLoginStart> {
+    const result = await this.post<{ login: CodexLoginStart }>('/api/codex', { kind: 'login' });
+    return result.login;
   }
 
   async deleteProvider(id: string): Promise<Record<string, SourceAvailability>> {

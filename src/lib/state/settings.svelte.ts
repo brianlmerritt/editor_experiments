@@ -1,4 +1,4 @@
-import { sourceCatalog, type ProviderProfileInput, type ProviderProtocol, type SourceAvailability } from '$lib/domain';
+import { sourceCatalog, type CodexConnectionStatus, type CodexLoginStart, type ProviderProfileInput, type ProviderProtocol, type SourceAvailability } from '$lib/domain';
 import { workspaceFacade, type WorkspaceFacade } from '$lib/workspace/facade';
 
 export interface ProviderForm {
@@ -10,7 +10,7 @@ export interface ProviderForm {
   model: string;
 }
 
-export type ProviderPreset = 'openrouter' | 'openai' | 'anthropic' | 'ollama';
+export type ProviderPreset = 'openrouter' | 'openai' | 'anthropic' | 'ollama' | 'codex';
 const providerPresetStorageKey = 'margin-note:last-provider-service';
 
 function rememberProviderPreset(preset: ProviderPreset): void {
@@ -22,7 +22,7 @@ function rememberedProviderPreset(): ProviderPreset {
   if (typeof localStorage === 'undefined') return 'openrouter';
   try {
     const stored = localStorage.getItem(providerPresetStorageKey);
-    return stored === 'openrouter' || stored === 'openai' || stored === 'anthropic' || stored === 'ollama'
+    return stored === 'openrouter' || stored === 'openai' || stored === 'anthropic' || stored === 'ollama' || stored === 'codex'
       ? stored
       : 'openrouter';
   } catch {
@@ -32,6 +32,7 @@ function rememberedProviderPreset(): ProviderPreset {
 
 export function providerPresetFor(form: Pick<ProviderForm, 'protocol' | 'baseUrl'>): ProviderPreset | null {
   const baseUrl = form.baseUrl.trim().replace(/\/$/, '').toLowerCase();
+  if (form.protocol === 'codex_app_server') return 'codex';
   if (form.protocol === 'openai_compatible' && baseUrl === 'https://openrouter.ai/api/v1') return 'openrouter';
   if (form.protocol === 'openai_compatible' && baseUrl === 'https://api.openai.com/v1') return 'openai';
   if (form.protocol === 'anthropic' && baseUrl === 'https://api.anthropic.com/v1') return 'anthropic';
@@ -52,6 +53,9 @@ export interface SettingsSnapshot {
   providerForm: ProviderForm;
   savingProvider: boolean;
   error: string | null;
+  codexStatus: CodexConnectionStatus | null;
+  checkingCodex: boolean;
+  codexLoginUrl: string | null;
 }
 
 function unavailableSources(): Record<string, SourceAvailability> {
@@ -63,7 +67,8 @@ function blankProvider(preset: ProviderPreset = rememberedProviderPreset()): Pro
     openrouter: { id: '', name: 'OpenRouter', protocol: 'openai_compatible', baseUrl: 'https://openrouter.ai/api/v1', key: '', model: '' },
     openai: { id: '', name: 'OpenAI', protocol: 'openai_compatible', baseUrl: 'https://api.openai.com/v1', key: '', model: '' },
     anthropic: { id: '', name: 'Anthropic', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', key: '', model: '' },
-    ollama: { id: '', name: 'Ollama', protocol: 'openai_compatible', baseUrl: 'http://127.0.0.1:11434/v1', key: '', model: '' }
+    ollama: { id: '', name: 'Ollama', protocol: 'openai_compatible', baseUrl: 'http://127.0.0.1:11434/v1', key: '', model: '' },
+    codex: { id: '', name: 'Codex — ChatGPT', protocol: 'codex_app_server', baseUrl: 'local://codex-app-server', key: '', model: 'gpt-5.6-terra' }
   };
   return { ...presets[preset] };
 }
@@ -74,7 +79,10 @@ function initialSettings(): SettingsSnapshot {
     providerDialogOpen: false,
     providerForm: blankProvider(),
     savingProvider: false,
-    error: null
+    error: null,
+    codexStatus: null,
+    checkingCodex: false,
+    codexLoginUrl: null
   };
 }
 
@@ -105,6 +113,9 @@ export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
     get providerForm() { return state.providerForm; },
     get savingProvider() { return state.savingProvider; },
     get error() { return state.error; },
+    get codexStatus() { return state.codexStatus; },
+    get checkingCodex() { return state.checkingCodex; },
+    get codexLoginUrl() { return state.codexLoginUrl; },
     load(sourceAvailability: Record<string, SourceAvailability>) {
       applyAvailability(sourceAvailability);
     },
@@ -123,12 +134,15 @@ export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
         };
         const preset = providerPresetFor(state.providerForm);
         if (preset) rememberProviderPreset(preset);
+        if (preset === 'codex') void refreshCodex();
       } else state.providerForm = blankProvider();
     },
     usePreset(preset: ProviderPreset) {
       rememberProviderPreset(preset);
       state.providerForm = { ...blankProvider(preset), id: state.providerForm.id };
       state.error = null;
+      state.codexLoginUrl = null;
+      if (preset === 'codex') void refreshCodex();
     },
     setProviderField<K extends keyof ProviderForm>(field: K, value: ProviderForm[K]) {
       state.providerForm = { ...state.providerForm, [field]: value };
@@ -187,8 +201,41 @@ export function createSettingsState(facade: WorkspaceFacade = workspaceFacade) {
     sourceAvailable(sourceId: string): boolean {
       return availability(sourceId).available !== false;
     },
+    async refreshCodex(): Promise<CodexConnectionStatus> {
+      return refreshCodex();
+    },
+    async startCodexLogin(): Promise<CodexLoginStart> {
+      state.checkingCodex = true;
+      state.error = null;
+      try {
+        const login = await facade.startCodexLogin();
+        state.codexLoginUrl = login.authUrl;
+        return login;
+      } catch (error) {
+        state.error = error instanceof Error ? error.message : 'Could not start ChatGPT sign-in.';
+        throw error;
+      } finally {
+        state.checkingCodex = false;
+      }
+    },
     availability
   };
+
+  async function refreshCodex(): Promise<CodexConnectionStatus> {
+    state.checkingCodex = true;
+    try {
+      state.codexStatus = await facade.codexStatus();
+      return state.codexStatus;
+    } catch (error) {
+      state.codexStatus = {
+        available: false, connected: false, accountType: 'none',
+        reason: error instanceof Error ? error.message : 'Codex app-server is unavailable.'
+      };
+      return state.codexStatus;
+    } finally {
+      state.checkingCodex = false;
+    }
+  }
 }
 
 export type SettingsState = ReturnType<typeof createSettingsState>;

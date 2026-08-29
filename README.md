@@ -106,8 +106,9 @@ For a quick tour:
 The implemented architecture slice provides:
 
 - one continuous writing-and-editing surface rather than separate drafting/reviewing
-  modes; Pause, source participation, Input visibility filters, density, and the Input surface control
-  interruption instead;
+  modes; AI interruption is controlled through independent per-project Reviews and
+  Actions switches, source participation, Input visibility filters, and density
+  controls. New projects begin with Actions enabled and Reviews disabled;
 - Svelte-owned canonical document, transaction, run, input, format, behaviour,
   revision, and undo/redo state;
 - neutral structured document persistence for headings, paragraphs, bullet and numbered
@@ -163,9 +164,15 @@ The implemented architecture slice provides:
   with numeric title ordering and selected/available counts;
 - Review Instructions live in that Inputs preflight rather than in a separate Brief
   screen. The Spine owns the story brief and overall writing direction;
-- enabled providers run as independent passage/provider checks within one review
-  activity, so successful Inputs become visible immediately and one slow or failed
-  provider does not hold back another provider's result;
+- enabled remote providers each receive one whole-document request within a review
+  activity; deterministic local sources share one local request. Successful Inputs
+  become visible as each source completes, without repeating the full selected Writing
+  Context for every paragraph;
+- whole-document findings are mapped from provider text offsets back to exact editor
+  positions, including content after block boundaries and inline images;
+- Reviews and Actions have independent activity state. Suggesting revisions from an
+  Input uses that card's canonical Svelte target, while Show filters and dismissal
+  update immediately before their durable logging completes;
 - provider spend is recorded once per completed provider call rather than once per
   resulting Input. OpenRouter-reported charges are retained directly; known direct
   Anthropic/OpenAI models use token-based estimates, including bounded corrective
@@ -201,16 +208,27 @@ rejects legacy reactive syntax.
 
 Open **Providers** at the bottom of the Inputs panel. Named profiles can use the
 OpenAI-compatible protocol (including OpenRouter, OpenAI, Ollama, and compatible local
-or hosted services) or Anthropic Messages. Presets fill the usual endpoint and
-protocol; enter the exact model ID accepted by that provider and an API key for remote
-services. More than one profile may be enabled for the same review.
+or hosted services), Anthropic Messages, or the official local Codex app-server.
+Presets fill the usual endpoint and protocol; enter the exact model ID accepted by
+that provider. More than one profile may be enabled for the same review.
+
+**Codex / ChatGPT** is the no-API-key path for a local personal installation. It
+requires the `codex` CLI to be installed and uses that installation's ChatGPT-managed
+sign-in through `codex app-server`; it does not route through this development chat or
+copy a ChatGPT token into Svelte. Choose the preset, check or start ChatGPT sign-in,
+save the profile, and then enable its **Use** control. Each request runs as an
+ephemeral, read-only Codex thread with approvals disabled and an isolated empty
+working directory. JSON-based actions also pass a response schema to app-server;
+Margin Note still validates, repairs, and anchors the returned proposal before Svelte
+can create an Input. See the official [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
 The server stores profiles in `data/provider-settings.json`, an ignored
 owner-readable file (`0600`), rather than in the document, browser storage, database,
 or event ledger. The Inputs panel displays only a masked credential hint such as
 `sk-or******456`. This POC local file is not encrypted; an OS keychain adapter remains
 the appropriate production replacement. Existing single-profile OpenRouter settings
-are migrated automatically.
+are migrated automatically. A Codex profile stores only its name, model, and local
+adapter kind; ChatGPT authentication remains owned by the local Codex installation.
 
 After saving, open **Filters**, then use the profile's **Use** control to include or
 exclude it from future work. **Show** only filters Inputs that already exist. Open
@@ -261,6 +279,10 @@ called only from SvelteKit server routes.
   not a dollar charge. Older successful calls are reconstructed from their run-level
   token evidence without multiplying calls that returned several Inputs; historical
   failed calls recorded before usage accounting cannot be reconstructed.
+- Codex app-server runs retain token usage but show no API-dollar estimate: ChatGPT
+  plan limits and usage do not have the same per-call price contract as API billing.
+  The Inputs footer and Ledger show the aggregate Margin Note Codex usage in millions
+  of input-plus-output tokens beneath tracked provider spend.
 - Change the ledger location with `LEDGER_PATH`.
 - Markdown export is available from the document toolbar.
 
