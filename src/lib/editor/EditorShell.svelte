@@ -13,6 +13,7 @@
   import { editorSchema as schema } from './schema';
   import { clipboardImageStrategy, mapPastedImageNodes, pastedImageSources, removeUnusablePastedImages } from './image-paste';
   import { normalizeListSlice, normalizeSelectedList } from './list-normalization';
+  import { collapseDuplicateEmptyParagraphs, isMarkdownClipboard, markdownPasteSlice } from './markdown-paste';
   import { multilineReplacementSlice } from './plain-text-replacement';
   import { richDocumentFromProseMirror, richDocumentFromText, richDocumentToProseMirror, type RichDocument } from '$lib/workspace/rich-document';
   import { liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
@@ -236,6 +237,30 @@
     return true;
   }
 
+  function pasteMarkdown(event: ClipboardEvent): boolean {
+    if (!view || !event.clipboardData) return false;
+    const text = event.clipboardData.getData('text/plain');
+    const html = event.clipboardData.getData('text/html');
+    if (!isMarkdownClipboard(text, html)) return false;
+    event.preventDefault();
+    const transaction = view.state.tr.replaceSelection(markdownPasteSlice(text, schema)).scrollIntoView();
+    transaction.setMeta('workspaceOrigin', { kind: 'human', source: 'clipboard' } satisfies EditorTransactionOrigin);
+    view.dispatch(transaction);
+    return true;
+  }
+
+  function normalizeExternalPasteSpacing(event: ClipboardEvent, pastedSlice: Slice): boolean {
+    if (!view || !event.clipboardData) return false;
+    if (event.clipboardData.getData('text/html').includes('data-pm-slice')) return false;
+    const normalized = collapseDuplicateEmptyParagraphs(pastedSlice);
+    if (!normalized.changed) return false;
+    event.preventDefault();
+    const transaction = view.state.tr.replaceSelection(normalized.slice).scrollIntoView();
+    transaction.setMeta('workspaceOrigin', { kind: 'human', source: 'clipboard' } satisfies EditorTransactionOrigin);
+    view.dispatch(transaction);
+    return true;
+  }
+
   function transactionOrigin(transaction: Transaction): EditorTransactionOrigin {
     const explicit = transaction.getMeta('workspaceOrigin') as EditorTransactionOrigin | undefined;
     if (explicit) return explicit;
@@ -290,7 +315,7 @@
     view = new EditorView(mount, {
       state,
       transformPasted: (slice) => normalizeListSlice(slice, schema),
-      handlePaste: (_view, event, slice) => pasteImages(event, slice),
+      handlePaste: (_view, event, slice) => pasteImages(event, slice) || pasteMarkdown(event) || normalizeExternalPasteSpacing(event, slice),
       dispatchTransaction(transaction) {
         if (!view) return;
         const before = snapshot(view.state);
@@ -476,7 +501,7 @@
   .editor-frame { position: relative; min-height: 68vh; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 18px 60px rgb(38 31 22 / .08); overflow: hidden; }
   .editor { min-height: 68vh; }
   :global(.ProseMirror) { box-sizing: border-box; min-height: 68vh; padding: 48px clamp(24px, 3vw, 52px) 100px; outline: none; color: var(--ink); font-family: var(--font-reading); font-size: calc(20px * var(--editor-zoom, 1)); line-height: 1.82; caret-color: var(--accent); }
-  :global(.ProseMirror p) { position: relative; margin: 0 0 1.2em; }
+  :global(.ProseMirror p) { position: relative; margin: 0; }
   :global(.ProseMirror h1), :global(.ProseMirror h2), :global(.ProseMirror h3), :global(.ProseMirror h4), :global(.ProseMirror h5), :global(.ProseMirror h6) { margin: 1.2em 0 .55em; font-family: var(--font-reading); line-height: 1.25; }
   :global(.ProseMirror blockquote) { margin: 1.2em 0; padding-left: 1.1em; border-left: 3px solid var(--line-strong); color: var(--ink-soft); }
   :global(.ProseMirror ul), :global(.ProseMirror ol) { margin: 1em 0 1.3em; padding-left: 1.8em; }

@@ -835,6 +835,23 @@ describe('semantic workspace history', () => {
 });
 
 describe('Navigator workspace transactions', () => {
+  it('adopts the open Spine when Context mode has no remembered focus', () => {
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.projectId = 'project';
+    workspace.branchId = 'spine';
+    workspace.projects = [project()];
+    workspace.documents = [
+      { ...document(), id: 'spine', title: 'Spine', role: 'spine' },
+      { ...document(), id: 'todos', title: 'Todos', role: 'todos' }
+    ];
+
+    workspace.setNavigatorMode('context');
+
+    expect(workspace.navigatorMemory.mode).toBe('context');
+    expect(workspace.navigatorFocusNode?.id).toBe('spine');
+    expect(workspace.navigatorMemory.context.selectedKey).toBe('node:spine');
+  });
+
   it('opens a new project on its protected Spine with a valid Navigator projection', async () => {
     const facade = fakeFacade();
     const freshProject = { ...project(), id: 'fresh', title: 'Fresh story' };
@@ -862,6 +879,73 @@ describe('Navigator workspace transactions', () => {
     expect(workspace.navigatorMemory.mode).toBe('traditional');
     expect(workspace.navigatorMemory.traditional.selectedKey).toBe('node:spine-fresh');
     expect(workspace.navigatorFocusNode?.id).toBe('spine-fresh');
+    expect(workspace.paused).toBe(true);
+    expect(workspace.currentProject?.extensions.review_settings).toEqual({ enabled: false });
+  });
+
+  it('restores each project review preference when switching projects', async () => {
+    const facade = fakeFacade();
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [
+      project(),
+      { ...project(), id: 'paused-project', extensions: { review_settings: { enabled: false } } }
+    ];
+    workspace.documents = [
+      document(),
+      { ...document(), id: 'spine', role: 'spine', title: 'Spine' },
+      { ...document(), id: 'todos', role: 'todos', title: 'Todos' },
+      { ...document(), id: 'paused-spine', projectId: 'paused-project', role: 'spine', title: 'Spine' },
+      { ...document(), id: 'paused-todos', projectId: 'paused-project', role: 'todos', title: 'Todos' }
+    ];
+
+    await workspace.switchProject('paused-project');
+    expect(workspace.paused).toBe(true);
+
+    await workspace.switchProject('project');
+    expect(workspace.paused).toBe(false);
+  });
+
+  it('disables reviews when importing a project that previously had them enabled', async () => {
+    const facade = fakeFacade();
+    const importedProject: WorkspaceProject = {
+      ...project(),
+      id: 'imported',
+      extensions: { ai_actions: [], review_settings: { enabled: true } }
+    };
+    const importedDocuments = [
+      { ...document(), id: 'imported-spine', projectId: 'imported', role: 'spine', title: 'Spine' },
+      { ...document(), id: 'imported-todos', projectId: 'imported', role: 'todos', title: 'Todos' }
+    ];
+    facade.importProject = vi.fn(async () => ({
+      workspace: {
+        projects: [project(), importedProject],
+        documents: [document(), ...importedDocuments],
+        contextBuckets: []
+      },
+      projectId: 'imported',
+      documentIds: importedDocuments.map((item) => item.id),
+      preview: {
+        title: 'Imported story', formatVersion: 1, exportMode: 'compact' as const, documents: 2,
+        contextBuckets: 0, assets: 0, activeRuns: 0, archiveBytes: 1, expandedBytes: 1, warnings: []
+      }
+    }));
+    facade.suggestionHistory = vi.fn(async () => ({ events: [], stats: { events: 0, costUsd: 0 } }));
+    const workspace = new WorkspaceState(facade);
+    workspace.projectId = 'project';
+    workspace.branchId = 'main';
+    workspace.projects = [project()];
+    workspace.documents = [document()];
+
+    await workspace.importProject({} as File);
+
+    expect(workspace.paused).toBe(true);
+    expect(workspace.currentProject?.extensions.review_settings).toEqual({ enabled: false });
+    expect(facade.saveProject).toHaveBeenCalledWith('imported', importedProject.title, {
+      ai_actions: [], review_settings: { enabled: false }
+    });
   });
 
   it('repairs protected project content and materializes legacy Collections when switching projects', async () => {

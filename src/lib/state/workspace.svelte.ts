@@ -270,6 +270,33 @@ export class WorkspaceState {
     this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
   }
 
+  private projectReviewsEnabled(project: WorkspaceProject | null): boolean {
+    const stored = project?.extensions.review_settings;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return true;
+    return stored.enabled !== false;
+  }
+
+  private stopActiveReviewRequests(): void {
+    for (const controller of this.dispatches.values()) controller.abort();
+    this.dispatches.clear();
+  }
+
+  private applyProjectReviewPreference(): void {
+    this.paused = !this.projectReviewsEnabled(this.currentProject);
+    if (this.paused) this.stopActiveReviewRequests();
+  }
+
+  private async setProjectReviewsEnabled(projectId: string, enabled: boolean): Promise<void> {
+    const project = this.projects.find((item) => item.id === projectId);
+    if (!project) return;
+    const saved = await this.facade.saveProject(project.id, project.title, {
+      ...project.extensions,
+      review_settings: { enabled }
+    });
+    this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
+    if (projectId === this.projectId) this.applyProjectReviewPreference();
+  }
+
   async saveAIAction(input: AIActionDefinition): Promise<AIActionDefinition> {
     const current = this.actions.find((action) => action.id === input.id);
     const [normalized] = normalizedAIActions([{ ...input, version: (current?.version ?? 0) + 1 }]);
@@ -439,6 +466,7 @@ export class WorkspaceState {
       this.contextBuckets = loaded.persistent.contextBuckets;
       this.projectId = loaded.activeProjectId;
       this.branchId = loaded.activeDocumentId;
+      this.applyProjectReviewPreference();
       this.navigator = readNavigatorState(this.currentProject);
       this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
       this.loadNavigatorMemory();
@@ -724,11 +752,10 @@ export class WorkspaceState {
   }
 
   async togglePause(): Promise<void> {
-    this.paused = !this.paused;
-    if (this.paused) {
-      for (const controller of this.dispatches.values()) controller.abort();
-      this.dispatches.clear();
-    }
+    const enabled = this.paused;
+    this.paused = !enabled;
+    if (this.paused) this.stopActiveReviewRequests();
+    await this.setProjectReviewsEnabled(this.projectId, enabled);
     await this.log(this.paused ? 'paused' : 'resumed', { mode: this.mode });
   }
 
@@ -1704,6 +1731,7 @@ export class WorkspaceState {
   async switchProject(id: string): Promise<void> {
     if (id === this.projectId) return;
     this.projectId = id;
+    this.applyProjectReviewPreference();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
@@ -1734,11 +1762,15 @@ export class WorkspaceState {
       createdBy: this.sessionId,
       reason: 'Initial project Todos'
     });
-    this.projects = [...this.projects, project];
+    this.projects = [...this.projects, {
+      ...project,
+      extensions: { ...project.extensions, review_settings: { enabled: false } }
+    }];
     this.documents = [...this.documents, document, todos];
     const persistent = await this.facade.persistentWorkspace();
     this.contextBuckets = persistent.contextBuckets;
     this.projectId = project.id;
+    this.applyProjectReviewPreference();
     this.actions = cloneDefaultAIActions();
     this.navigator = emptyNavigatorState();
     this.navigatorMemory = emptyNavigatorMemory();
@@ -1760,6 +1792,7 @@ export class WorkspaceState {
     this.projects = result.workspace.projects;
     this.documents = result.workspace.documents;
     this.contextBuckets = result.workspace.contextBuckets;
+    await this.setProjectReviewsEnabled(result.projectId, false);
     await this.activatePersistedProject(result.projectId);
     return result.preview;
   }
@@ -1780,6 +1813,7 @@ export class WorkspaceState {
 
   private async activatePersistedProject(projectId: string): Promise<void> {
     this.projectId = projectId;
+    this.applyProjectReviewPreference();
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
@@ -2363,7 +2397,30 @@ export class WorkspaceState {
   }
 
   setNavigatorMode(mode: NavigatorMemory['mode']): void {
-    this.navigatorMemory = { ...this.navigatorMemory, mode };
+    let context = this.navigatorMemory.context;
+    if (mode === 'context' && !this.navigatorFocusNode) {
+      const current = this.currentDocument;
+      const target = current && ['spine', 'navigator_collection', 'navigator_node'].includes(current.role ?? '')
+        ? current
+        : this.spineNode;
+      if (target) {
+        const targetKey = `node:${target.id}`;
+        const historyKeys = context.historyKeys.filter((key) => {
+          const nodeId = key.startsWith('node:') ? key.slice(5) : '';
+          return this.projectNodes.some((node) => node.id === nodeId);
+        });
+        if (historyKeys.at(-1) !== targetKey) historyKeys.push(targetKey);
+        context = {
+          ...context,
+          focusKey: targetKey,
+          selectedKey: targetKey,
+          historyKeys,
+          historyIndex: historyKeys.length - 1,
+          recentContextKeys: [targetKey, ...context.recentContextKeys.filter((key) => key !== targetKey)].slice(0, 8)
+        };
+      }
+    }
+    this.navigatorMemory = { ...this.navigatorMemory, mode, context };
     this.saveNavigatorMemory();
   }
 

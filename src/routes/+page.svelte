@@ -47,7 +47,7 @@
   let duplicateInputsCombined = $state(0);
   let inputsBeyondLimit = $state(0);
   let displayableInputCount = $state(0);
-  let isPaused = $state(false);
+  let isPaused = $derived(workspace.paused);
   let contextDrafts = $state<Record<string, ContextDraft>>({});
   let newContextTitle = $state('');
   let newContextRole = $state('');
@@ -525,9 +525,7 @@
   }
 
   async function changePause(): Promise<void> {
-    const change = workspace.togglePause();
-    isPaused = workspace.paused;
-    await change;
+    await workspace.togglePause();
   }
 
   function textChanged(detail: { text: string; characters: number; origin?: unknown }): void {
@@ -1170,7 +1168,7 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="Margin Note home"><span>¶</span><strong>Margin Note</strong><small>writing workbench</small></a>
     <div class="top-actions">
-      <button class:paused={isPaused} onclick={changePause} title="Pause AI requests, automatic reviews, and provider spend">{isPaused ? '▶ Resume AI' : 'Ⅱ Pause AI'}</button>
+      <button class:paused={isPaused} onclick={changePause} title={isPaused ? 'Enable reviews and AI review requests' : 'Pause reviews, AI review requests, and provider spend'}>{isPaused ? '▶ Enable Review' : 'Ⅱ Pause Reviews'}</button>
       <button onclick={openContext}>Context <span>{workspace.currentContext.length}</span></button>
       <a href="/review">Compare</a>
       <button onclick={() => { ledgerOpen = !ledgerOpen; void workspace.refreshLedger(); }}>Ledger</button>
@@ -1330,7 +1328,7 @@
               </div>
               <div class="inputs-execution-actions">
                 <span>Perform</span>
-                <button type="button" aria-label="Perform action…" title={workspace.paused ? 'Resume AI to perform an action' : !enabledRunSourceCount ? 'Enable at least one configured AI provider to perform an action' : selection.text.trim() ? 'Perform a project action on the current selection' : 'Perform a project action on the current document'} disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Action…</button>
+                <button type="button" aria-label="Perform action…" title={workspace.paused ? 'Enable Review to perform an action' : !enabledRunSourceCount ? 'Enable at least one configured AI provider to perform an action' : selection.text.trim() ? 'Perform a project action on the current selection' : 'Perform a project action on the current document'} disabled={workspace.generating || workspace.paused || !enabledRunSourceCount} onclick={() => openActionRunner(selection.text.trim() ? 'selection' : 'document')}>Action…</button>
                 <button
                   type="button"
                   class="review-document"
@@ -1510,7 +1508,7 @@
     </main>
   </div>
 
-  <div class="pause-banner" class:mode-hidden={!isPaused}><b>AI paused</b> — requests, automatic reviews, and provider spend are suspended. Writing remains available.</div>
+  <div class="pause-banner" class:mode-hidden={!isPaused}><b>Reviews paused</b> — review requests, automatic reviews, and provider spend are suspended. Writing remains available.</div>
   {#if providerConfigurationIssue}
     <section class="provider-alert" role="alert" aria-live="assertive">
       <div>

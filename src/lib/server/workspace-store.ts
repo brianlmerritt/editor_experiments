@@ -362,8 +362,8 @@ export class WorkspaceRepository {
       const projectCount = (this.database.prepare('SELECT COUNT(*) count FROM workspace_projects').get() as { count: number }).count;
       if (!projectCount) {
         this.database.prepare(`
-          INSERT INTO workspace_projects (id, title) VALUES (?, ?)
-        `).run(defaultProjectId, 'My writing project');
+          INSERT INTO workspace_projects (id, title, extensions) VALUES (?, ?, ?)
+        `).run(defaultProjectId, 'My writing project', JSON.stringify({ review_settings: { enabled: false } }));
       }
 
       const hasDefault = this.database.prepare('SELECT 1 FROM workspace_projects WHERE id = ?').get(defaultProjectId);
@@ -402,7 +402,8 @@ export class WorkspaceRepository {
   createProject(title: string): WorkspaceProject {
     if (!title.trim()) throw new Error('Project title is required');
     const projectId = id('project');
-    this.database.prepare('INSERT INTO workspace_projects (id, title) VALUES (?, ?)').run(projectId, title.trim());
+    this.database.prepare('INSERT INTO workspace_projects (id, title, extensions) VALUES (?, ?, ?)')
+      .run(projectId, title.trim(), JSON.stringify({ review_settings: { enabled: false } }));
     return projectFromRow(this.database.prepare('SELECT * FROM workspace_projects WHERE id = ?').get(projectId) as ProjectRow);
   }
 
