@@ -241,6 +241,13 @@ workspace layout. The next Navigator proof of concept is specified in
   through the editor schema and the neutral Svelte document. If Word supplies only an
   inaccessible `file:` image reference, the prose is preserved and the image must be
   pasted separately rather than guessed.
+- **Open browser verification:** the supplied Google Docs *The Wasila* reproduction
+  exposed 114 HTML paragraphs and 126 plain-text line feeds, but its single `***`
+  separator caused the entire rich selection to be misclassified as Markdown. The
+  source parser then joined single-newline paragraphs into four large blocks. Markdown
+  detection now defers to Google Docs metadata and meaningful rich HTML block markup.
+  Browser verification must confirm that every Google Docs paragraph survives, dense
+  prose gains no invented blank paragraphs, and VS Code/Markdown spacing remains fixed.
 - Formatting-only editor transactions now enter Svelte history and persistence even
   when their plain text is unchanged. Console QA found and removed the final basic-
   schema deserialisation path; rich reload produced no new browser errors.
@@ -303,6 +310,9 @@ the architecture as production-ready:
    context-only changes trigger their respective typed cascades.
 10. [ ] Reload with queued or persisted transactions and verify current input states and
     targets are reconstructed without duplicate notes.
+11. [ ] Paste the Google Docs *The Wasila* reproduction and verify every source paragraph
+    remains a separate editor paragraph, with no added blank paragraphs and no regression
+    to VS Code/Markdown paste spacing.
 
 ## Svelte source-of-truth regression evidence
 

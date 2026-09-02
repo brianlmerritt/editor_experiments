@@ -14,7 +14,7 @@
   import { selectDisplayedInputs, summarizeLatestCraftActivity, type CraftActivityState } from '$lib/workspace/input-panel';
   import { latestProviderReconfigurationIssue, summarizeProviderHealth } from '$lib/workspace/run-management';
   import type { AIContextSelection } from '$lib/ai/contracts';
-  import type { AIActionDefinition, AIActionTargetScope } from '$lib/ai/actions';
+  import { prosePatternAuditActionId, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
   import type { ProjectExportMode, ProjectImportPreview } from '$lib/workspace/project-transfer';
   import type { StorageAnalysis } from '$lib/workspace/retention';
   import { groupAIContextMaterials, type AIContextMaterialGroup } from '$lib/workspace/context-materials';
@@ -95,6 +95,9 @@
   let actionRunnerContext = $state<AIContextSelection>({ includeMaterial: true, includeRelationships: true, includeTodos: true, addedSourceIds: [] });
   let actionRunnerLocked = $state(false);
   let actionContextPickerOpen = $state(false);
+  let manualReviewActive = $state(false);
+  let manualActionLabel = $state<string | null>(null);
+  let aiWaitDismissed = $state(false);
 
   const layoutStorageKey = 'margin-note:workbench-layout';
 
@@ -154,6 +157,7 @@
     workspace.navigator.collections,
     workspace.branchId
   ));
+  let aiWaitLabel = $derived(manualActionLabel ?? (manualReviewActive ? 'Reviewing document…' : null));
 
   const activityLabels: Record<CraftActivityState, string> = {
     running: 'Running',
@@ -452,6 +456,8 @@
   async function runReviewFromPreflight(): Promise<void> {
     if (!selectedPrompt || contextPreflightTargetId !== workspace.branchId) return;
     contextPreflightLocked = true;
+    manualReviewActive = true;
+    aiWaitDismissed = false;
     try {
       let prompt = selectedPrompt;
       const instruction = sentinelInstruction.trim();
@@ -465,6 +471,7 @@
       contextPreflightOpen = false;
       await running;
     } finally {
+      manualReviewActive = false;
       contextPreflightLocked = false;
     }
   }
@@ -489,10 +496,14 @@
     const action = workspace.actions.find((item) => item.id === id);
     if (!action) return;
     actionRunnerId = id;
-    if (!action.allowedTargets.includes(actionRunnerScope)) {
-      actionRunnerScope = action.defaultTarget;
-      actionRunnerRange = actionRunnerScope === 'selection' ? { ...selection } : null;
-    }
+    const defaultAvailable = action.allowedTargets.includes(action.defaultTarget)
+      && (action.defaultTarget !== 'selection' || Boolean(selection.text.trim()));
+    const scope = defaultAvailable
+      ? action.defaultTarget
+      : action.allowedTargets.includes('document') && !action.requiresSelection
+        ? 'document'
+        : 'selection';
+    changeActionScope(scope);
     actionRunnerContext = workspace.actionContextSelection(action);
   }
 
@@ -515,17 +526,33 @@
     const action = selectedAction;
     if (!action || !actionContextManifest) return;
     actionRunnerLocked = true;
+    manualActionLabel = `Performing ${action.name}…`;
+    aiWaitDismissed = false;
     try {
       await workspace.saveContextSelection(action.id, actionRunnerContext);
-      const running = workspace.runAIAction(action, actionRunnerScope, actionRunnerRange, actionRunnerContext);
+      const activityIdsBefore = new Set(workspace.activities.map((activity) => activity.id));
+      const running = workspace.runAIAction(action, actionRunnerScope, actionRunnerRange, actionRunnerContext, () => refreshLiveSuggestions());
+      const actionActivityId = workspace.activities.find((activity) => !activityIdsBefore.has(activity.id))?.id;
       actionRunnerOpen = false;
       const incoming = await running;
+      const activity = workspace.activities.find((candidate) => candidate.id === actionActivityId);
+      const proposalCount = activity?.runIds.reduce((total, runId) =>
+        total + (workspace.runs.find((run) => run.id === runId)?.proposalIds.length ?? 0), 0) ?? 0;
       refreshLiveSuggestions();
       if (incoming[0]) void activateCard(incoming[0].id);
-      if (!workspace.notice) showNotice(incoming.length
-        ? `${action.name}: ${incoming.length} new ${incoming.length === 1 ? 'Input' : 'Inputs'}.`
-        : `${action.name} completed without a usable Input.`);
+      if (!workspace.notice) {
+        if (incoming.length) {
+          showNotice(`${action.name}: ${incoming.length} new ${incoming.length === 1 ? 'Input' : 'Inputs'}.`);
+        } else if (activity?.state === 'completed' && action.id === prosePatternAuditActionId) {
+          showNotice(proposalCount ? 'No new prose pattern issues found.' : 'No prose pattern issues found.');
+        } else if (activity && activity.state !== 'completed') {
+          showNotice(`${action.name} ${activity.state === 'partial' ? 'completed only partially' : `ended ${activity.state}`}; check History for details.`);
+        } else {
+          showNotice(`${action.name} completed without a usable Input.`);
+        }
+      }
     } finally {
+      manualActionLabel = null;
       actionRunnerLocked = false;
     }
   }
@@ -1583,6 +1610,16 @@
       <button type="button" onclick={() => dismissedProviderIssueKey = providerConfigurationIssue?.key ?? null}>Dismiss</button>
     </section>
   {/if}
+  {#if aiWaitLabel && !aiWaitDismissed}
+    <section class="ai-wait-indicator" role="status" aria-live="polite">
+      <svg viewBox="0 0 30 20" aria-hidden="true">
+        <path class="save-book" d="M2 4.5c4.2-1.5 8.2-.8 13 2v10c-4.8-2.8-8.8-3.5-13-2zM28 4.5c-4.2-1.5-8.2-.8-13 2v10c4.8-2.8 8.8-3.5 13-2z" />
+        <g class="save-pen"><path d="M9 11.5l8.5-8.5 2 2-8.5 8.5-3 .9z" /><path d="M17.5 3l2 2" /></g>
+      </svg>
+      <div><strong>{aiWaitLabel}</strong><span>You can continue writing while this runs.</span></div>
+      <button type="button" aria-label="Hide AI activity; the work will continue" title="Hide; work continues" onclick={() => aiWaitDismissed = true}>×</button>
+    </section>
+  {/if}
   {#if workspace.notice}<button class="notice" onclick={dismissNotice}>{workspace.notice}<span>×</span></button>{/if}
   {#if workspace.lastError}<button class="error" onclick={() => workspace.lastError = null}>{workspace.lastError}<span>×</span></button>{/if}
   {#if undoDismiss}<div class="undo-toast"><span>Suggestion dismissed</span><button onclick={undoDragDismiss}>Undo</button></div>{/if}
@@ -1593,7 +1630,8 @@
         <header><div><small>Project AI action</small><h2 id="action-runner-title">Perform action</h2></div><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>×</button></header>
         <label>Action<select value={selectedAction.id} disabled={actionRunnerLocked} onchange={(event) => chooseAction(event.currentTarget.value)}>{#each workspace.actions as action}<option value={action.id}>{action.name}</option>{/each}</select></label>
         <p class="provider-intro"><strong>{selectedAction.description || selectedAction.name}</strong><br />{selectedAction.instruction}</p>
-        <fieldset class="action-targets"><legend>One target</legend>{#if selectedAction.allowedTargets.includes('selection')}<label><input type="radio" name="action-target" value="selection" checked={actionRunnerScope === 'selection'} disabled={actionRunnerLocked || !selection.text.trim()} onchange={() => changeActionScope('selection')} />Selection{actionRunnerRange ? ` · ${actionRunnerRange.text.trim().split(/\s+/).length} words` : ''}</label>{/if}{#if selectedAction.allowedTargets.includes('document')}<label><input type="radio" name="action-target" value="document" checked={actionRunnerScope === 'document'} disabled={actionRunnerLocked || selectedAction.requiresSelection} onchange={() => changeActionScope('document')} />Current document</label>{/if}</fieldset>
+        <fieldset class="action-targets"><legend>Target — choose carefully</legend>{#if selectedAction.allowedTargets.includes('selection')}<label><input type="radio" name="action-target" value="selection" checked={actionRunnerScope === 'selection'} disabled={actionRunnerLocked || !selection.text.trim()} onchange={() => changeActionScope('selection')} />Selection only{actionRunnerRange ? ` · ${actionRunnerRange.text.trim().split(/\s+/).length} words` : ''}</label>{/if}{#if selectedAction.allowedTargets.includes('document')}<label><input type="radio" name="action-target" value="document" checked={actionRunnerScope === 'document'} disabled={actionRunnerLocked || selectedAction.requiresSelection} onchange={() => changeActionScope('document')} />Entire current document</label>{/if}</fieldset>
+        <p class="action-target-summary">{actionRunnerScope === 'document' ? `This run will inspect the entire current document (${currentDocumentText.trim() ? currentDocumentText.trim().split(/\s+/).length : 0} words).` : `This run will inspect only the captured ${actionRunnerRange?.text.trim().split(/\s+/).length ?? 0}-word selection.`}</p>
         <div class="action-contract"><span>Response</span><strong>{selectedAction.responseContract.replaceAll('_', ' ')}</strong><span>Maximum</span><strong>{selectedAction.maxOutputTokens.toLocaleString()} tokens</strong></div>
         {#if actionContextManifest}
           <section class="context-preflight embedded" aria-label="Action Writing Context">
@@ -1605,7 +1643,7 @@
             <div class="context-manifest-summary"><span>{actionContextManifest.items.filter((item) => item.sent).length} included</span><span>{actionContextManifest.items.filter((item) => !item.sent).length} omitted</span></div>
           </section>
         {:else}<p class="reset-warning">The selected target is empty or no longer matches the editor.</p>{/if}
-        <footer><p>Only the target can receive a proposed change. Included Material, relationships and Todos are read-only.</p><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>Cancel</button><button type="button" class="primary" disabled={actionRunnerLocked || !actionContextManifest} onclick={() => void runConfiguredAction()}>{actionRunnerLocked ? 'Running…' : `Run ${selectedAction.name}`}</button></footer>
+        <footer><p>Only the target can receive a proposed change. Included Material, relationships and Todos are read-only.</p><button type="button" disabled={actionRunnerLocked} onclick={() => actionRunnerOpen = false}>Cancel</button><button type="button" class="primary" disabled={actionRunnerLocked || !actionContextManifest} onclick={() => void runConfiguredAction()}>{actionRunnerLocked ? 'Running…' : `Run ${selectedAction.name} on ${actionRunnerScope === 'document' ? 'entire document' : 'selection only'}`}</button></footer>
       </div>
     </div>
   {/if}
@@ -1621,7 +1659,7 @@
           const action = workspace.actions.find((item) => item.id === id);
           if (!action) return;
           actionManagerOpen = false;
-          const scope = selection.text.trim() && action.allowedTargets.includes('selection')
+          const scope = action.defaultTarget === 'selection' && selection.text.trim() && action.allowedTargets.includes('selection')
             ? 'selection'
             : action.allowedTargets.includes('document') && !action.requiresSelection
               ? 'document'
@@ -2097,6 +2135,17 @@
   .provider-alert p { margin: 2px 0 0; font: 10px/1.35 var(--font-ui); }
   .provider-alert button { border: 1px solid rgb(255 255 255 / .45); border-radius: 3px; background: transparent; color: inherit; padding: 7px 9px; font: 700 8px/1 var(--font-ui); cursor: pointer; }
   .provider-alert button.primary { border-color: #fff8f4; background: #fff8f4; color: #6c2c26; }
+  .ai-wait-indicator { position: fixed; z-index: 55; top: 76px; left: 50%; display: grid; grid-template-columns: auto minmax(230px, auto) auto; align-items: center; gap: 14px; transform: translateX(-50%); border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--paper) 95%, var(--accent)); color: var(--accent); padding: 13px 14px 13px 16px; box-shadow: 0 12px 34px rgb(35 30 22 / .18); }
+  .ai-wait-indicator svg { width: 56px; height: 38px; overflow: visible; }
+  .ai-wait-indicator .save-pen { animation: write-save 1.05s ease-in-out infinite; }
+  .ai-wait-indicator div { display: grid; gap: 4px; }
+  .ai-wait-indicator strong { color: var(--ink); font: 700 13px/1.15 var(--font-ui); }
+  .ai-wait-indicator span { color: var(--muted); font: 10px/1.25 var(--font-ui); }
+  .ai-wait-indicator button { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font: 19px/1 var(--font-ui); cursor: pointer; }
+  .ai-wait-indicator button:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) {
+    .ai-wait-indicator .save-pen { animation: none; }
+  }
   .notice, .error { position: fixed; z-index: 60; right: 18px; bottom: 18px; display: flex; gap: 16px; align-items: center; max-width: 420px; border: 1px solid #27433a; border-radius: 3px; background: #1f302a; color: #edf5f1; padding: 11px 13px; box-shadow: 0 12px 30px rgb(0 0 0 / .18); font-size: 10px; cursor: pointer; }
   .error { background: #5c2925; border-color: #743731; }
   .notice span, .error span { opacity: .6; }
@@ -2172,6 +2221,7 @@
   .action-targets { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; border: 1px solid var(--line); }
   .action-targets label { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; }
   .action-targets input { width: auto; }
+  .action-target-summary { margin: -4px 0 12px; border-left: 3px solid var(--accent); border-radius: 2px; background: var(--accent-soft); color: var(--ink-soft); padding: 8px 10px; font: 600 10px/1.4 var(--font-ui); }
   .action-contract { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 9px; align-items: baseline; margin: 8px 0 12px; padding: 8px 10px; border-radius: 3px; background: var(--canvas); font: 9px/1.3 var(--font-ui); }
   .action-contract span { color: var(--muted); text-transform: uppercase; }
   .context-preflight.embedded { margin: 0; }

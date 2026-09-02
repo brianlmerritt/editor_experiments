@@ -2,7 +2,7 @@ import { textTarget, type TargetSet } from '$lib/workspace/attachments';
 import type { AIContextManifest, AIInteractionIntent, AIInteractionRequest } from '$lib/ai/contracts';
 import type { AIResponseContract } from '$lib/ai/actions';
 
-export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] as const;
+export const categories = ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance', 'ai_tell', 'prose_pattern'] as const;
 export type Category = (typeof categories)[number];
 
 export const suggestionStates = ['pending', 'accepted', 'rejected', 'cleared', 'superseded', 'stale', 'hidden', 'target_changed', 'target_removed'] as const;
@@ -75,6 +75,7 @@ export interface InputProposal {
   from: number;
   to: number;
   sourceText: string;
+  evidenceAnchors?: RelativeAnchor[];
   anchorStatus?: InputAnchorStatus;
   type: SuggestionType;
   category: Category;
@@ -155,6 +156,7 @@ export interface InputRecord {
   behaviourId: string;
   events: InputEvent[];
   anchor: RelativeAnchor;
+  evidenceAnchors?: RelativeAnchor[];
   anchorStatus?: InputAnchorStatus;
   type: SuggestionType;
   payload: { text?: string; comment: string };
@@ -229,6 +231,7 @@ export interface Branch {
 
 export interface GenerationRequest {
   text: string;
+  formattedText?: string;
   from: number;
   to: number;
   branchId: string;
@@ -298,7 +301,9 @@ export const categoryMeta: Record<Category, { label: string; icon: string; inten
   canon: { label: 'Canon', icon: '⌘', intent: 'correctness' },
   cadence: { label: 'Cadence', icon: '≋', intent: 'enhancement' },
   diction: { label: 'Diction', icon: 'Aa', intent: 'enhancement' },
-  distance: { label: 'Distance', icon: '↔', intent: 'enhancement' }
+  distance: { label: 'Distance', icon: '↔', intent: 'enhancement' },
+  ai_tell: { label: 'AI pattern', icon: '◇', intent: 'diagnostic' },
+  prose_pattern: { label: 'Prose pattern', icon: '≈', intent: 'diagnostic' }
 };
 
 export const sourceCatalog = [
@@ -359,8 +364,6 @@ export function isExactTextSpan(passage: string, from: number, to: number, sourc
 export function suggestionFingerprint(suggestion: Suggestion): string {
   const variantTexts = suggestion.variants.map((variant) => normalizedSuggestionText(variant.text)).sort();
   return JSON.stringify([
-    suggestion.source,
-    suggestion.category,
     suggestion.type,
     suggestion.anchor.from,
     suggestion.anchor.to,
@@ -377,22 +380,61 @@ export interface SuppressedDuplicate {
   reason: 'exact' | 'semantic';
 }
 
-/** Conservative semantic equivalence for repeated AI annotations at the same locus. */
+function suggestionTextRanges(suggestion: Suggestion): Array<{ from: number; to: number }> {
+  return (suggestion.evidenceAnchors ?? [suggestion.anchor]).map(({ from, to }) => ({ from, to }));
+}
+
+function strongestRangeOverlap(left: Suggestion, right: Suggestion): number {
+  let strongest = 0;
+  for (const leftRange of suggestionTextRanges(left)) {
+    for (const rightRange of suggestionTextRanges(right)) {
+      const overlap = Math.max(0, Math.min(leftRange.to, rightRange.to) - Math.max(leftRange.from, rightRange.from));
+      const shorterRange = Math.min(leftRange.to - leftRange.from, rightRange.to - rightRange.from);
+      if (shorterRange > 0) strongest = Math.max(strongest, overlap / shorterRange);
+    }
+  }
+  return strongest;
+}
+
+/** Conservative semantic equivalence for repeated annotations at the same locus. */
 export function suggestionsDescribeSameIssue(left: Suggestion, right: Suggestion): boolean {
-  if (left.sourceKind !== 'ai' || right.sourceKind !== 'ai') return false;
-  if (left.source !== right.source || left.category !== right.category) return false;
-  if (left.type !== 'annotation' || right.type !== 'annotation') return false;
-  const overlap = Math.max(0, Math.min(left.anchor.to, right.anchor.to) - Math.max(left.anchor.from, right.anchor.from));
-  const shorterRange = Math.min(left.anchor.to - left.anchor.from, right.anchor.to - right.anchor.from);
-  if (shorterRange <= 0 || overlap / shorterRange < 0.6) return false;
+  if (left.type === 'insertion' || right.type === 'insertion') return false;
+  if ((left.type !== 'annotation' || right.type !== 'annotation')
+    && (left.anchor.from !== right.anchor.from || left.anchor.to !== right.anchor.to
+      || normalizedSuggestionText(left.anchor.text) !== normalizedSuggestionText(right.anchor.text))) return false;
+  if (strongestRangeOverlap(left, right) < 0.6) return false;
   const leftTokens = semanticTokens(left.payload.comment);
   const rightTokens = semanticTokens(right.payload.comment);
-  if (Math.min(leftTokens.size, rightTokens.size) < 4) return false;
+  if (Math.min(leftTokens.size, rightTokens.size) < 3) return false;
   const leftStance = stance(leftTokens);
   const rightStance = stance(rightTokens);
   if ((leftStance === 'positive' && rightStance === 'critical') || (leftStance === 'critical' && rightStance === 'positive')) return false;
   const shared = [...leftTokens].filter((token) => rightTokens.has(token)).length;
-  return shared / Math.min(leftTokens.size, rightTokens.size) >= 0.25;
+  const requiredSimilarity = left.category === right.category ? 0.25 : 0.34;
+  return shared / Math.min(leftTokens.size, rightTokens.size) >= requiredSimilarity;
+}
+
+function liveSuggestionPriority(suggestion: Suggestion): number {
+  const hasRevision = suggestion.variants.length > 0 || suggestion.payload.text !== undefined;
+  return (suggestion.category === 'ai_tell' || suggestion.category === 'prose_pattern' ? 0 : 2)
+    + (hasRevision ? 4 : 0)
+    + (suggestion.anchorStatus === 'exact' || suggestion.anchorStatus === undefined ? 1 : 0);
+}
+
+function mergeSafeVariants(canonical: Suggestion, duplicate: Suggestion): Suggestion {
+  if (canonical.anchor.from !== duplicate.anchor.from || canonical.anchor.to !== duplicate.anchor.to
+    || normalizedSuggestionText(canonical.anchor.text) !== normalizedSuggestionText(duplicate.anchor.text)) return canonical;
+  const variants = [...canonical.variants];
+  const seen = new Set(variants.map((variant) => normalizedSuggestionText(variant.text)));
+  for (const variant of duplicate.variants) {
+    if (!seen.has(normalizedSuggestionText(variant.text))) variants.push(variant);
+  }
+  return {
+    ...canonical,
+    type: variants.length ? 'replacement' : canonical.type,
+    variants,
+    payload: { ...canonical.payload, text: canonical.payload.text ?? variants[0]?.text }
+  };
 }
 
 /**
@@ -428,13 +470,16 @@ export function coalesceDuplicateSuggestions(items: Suggestion[]): { suggestions
 
     const canonical = suggestions[canonicalIndex];
     const reason = exactIndex === undefined ? 'semantic' as const : 'exact' as const;
-    if (isResolved(current.state) && isLive(canonical.state)) {
+    if (isResolved(current.state) && isLive(canonical.state)
+      || isLive(current.state) && isLive(canonical.state) && liveSuggestionPriority(current) > liveSuggestionPriority(canonical)) {
       suggestions[canonicalIndex] = { ...canonical, state: 'superseded' };
-      suppressed.push({ duplicate: canonical, canonical: current, reason });
+      suggestions[index] = mergeSafeVariants(current, canonical);
+      suppressed.push({ duplicate: canonical, canonical: suggestions[index], reason });
       canonicalByFingerprint.set(fingerprint, index);
     } else if (isLive(current.state)) {
+      suggestions[canonicalIndex] = mergeSafeVariants(canonical, current);
       suggestions[index] = { ...current, state: 'superseded' };
-      suppressed.push({ duplicate: current, canonical, reason });
+      suppressed.push({ duplicate: current, canonical: suggestions[canonicalIndex], reason });
     }
   }
 

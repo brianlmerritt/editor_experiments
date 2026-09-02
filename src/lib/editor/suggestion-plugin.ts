@@ -28,11 +28,24 @@ export function suggestionRange(suggestion: Suggestion): { from: number; to: num
   };
 }
 
+export function suggestionRanges(suggestion: Suggestion): Array<{ from: number; to: number }> {
+  const ranges = suggestion.target.targets
+    .filter((target) => target.type === 'text')
+    .map((target) => ({ from: target.start, to: target.end }));
+  return ranges.length ? ranges : [suggestionRange(suggestion)];
+}
+
 function resolvedRange(state: EditorState, suggestion: Suggestion): { from: number; to: number } | null {
-  const { from, to } = suggestionRange(suggestion);
+  const primary = suggestionRange(suggestion);
+  return resolvedRanges(state, suggestion)
+    .find((range) => range.from === primary.from && range.to === primary.to) ?? null;
+}
+
+function resolvedRanges(state: EditorState, suggestion: Suggestion): Array<{ from: number; to: number }> {
   const max = state.doc.content.size;
-  if (from < 0 || from > max || to < from || to > max) return null;
-  return { from, to };
+  const expected = suggestion.evidenceAnchors ?? [suggestion.anchor];
+  return suggestionRanges(suggestion).filter(({ from, to }, index) => from >= 0 && from <= max && to > from && to <= max
+    && (!expected[index]?.text || state.doc.textBetween(from, to, '\n') === expected[index].text));
 }
 
 interface FormatRange { from: number; to: number }
@@ -100,6 +113,7 @@ function buildDecorations(state: EditorState, pluginState: SuggestionPluginState
   for (const suggestion of pluginState.suggestions) {
     const range = resolvedRange(state, suggestion);
     if (!range) continue;
+    const ranges = resolvedRanges(state, suggestion);
     const active = pluginState.activeId === suggestion.id;
     const preview = pluginState.preview?.suggestionId === suggestion.id ? pluginState.preview : null;
     const deletionPreview = preview?.text === '' ? planDocumentDeletion(state.doc, range.from, range.to) : null;
@@ -109,12 +123,19 @@ function buildDecorations(state: EditorState, pluginState: SuggestionPluginState
       'data-suggestion-id': suggestion.id,
       'data-category': suggestion.category
     };
-    if (renderedRange.from < renderedRange.to) decorations.push(Decoration.inline(renderedRange.from, renderedRange.to, attrs, { suggestionId: suggestion.id }));
+    for (const evidenceRange of ranges) {
+      const renderedEvidence = evidenceRange.from === range.from && evidenceRange.to === range.to ? renderedRange : evidenceRange;
+      if (renderedEvidence.from < renderedEvidence.to) decorations.push(Decoration.inline(renderedEvidence.from, renderedEvidence.to, attrs, { suggestionId: suggestion.id }));
+    }
     if (suggestion.type === 'annotation') {
-      const $pos = state.doc.resolve(Math.min(range.from, state.doc.content.size));
-      const paragraphStart = $pos.before(Math.max(1, $pos.depth));
-      if (paragraphStart >= 0 && paragraphStart < state.doc.content.size) {
-        decorations.push(Decoration.node(paragraphStart, paragraphStart + $pos.parent.nodeSize, { class: `mn-paragraph-note mn-paragraph-${suggestion.category}` }, { suggestionId: suggestion.id }));
+      const decoratedParagraphs = new Set<number>();
+      for (const evidenceRange of ranges) {
+        const $pos = state.doc.resolve(Math.min(evidenceRange.from, state.doc.content.size));
+        const paragraphStart = $pos.before(Math.max(1, $pos.depth));
+        if (paragraphStart >= 0 && paragraphStart < state.doc.content.size && !decoratedParagraphs.has(paragraphStart)) {
+          decoratedParagraphs.add(paragraphStart);
+          decorations.push(Decoration.node(paragraphStart, paragraphStart + $pos.parent.nodeSize, { class: `mn-paragraph-note mn-paragraph-${suggestion.category}` }, { suggestionId: suggestion.id }));
+        }
       }
     }
     if (preview) {
@@ -151,8 +172,8 @@ export function suggestionPlugin(options: SuggestionPluginOptions): Plugin<Sugge
         const explicit = target.closest<HTMLElement>('[data-suggestion-id]')?.dataset.suggestionId;
         const state = suggestionPluginKey.getState(view.state);
         const hit = explicit ?? state?.suggestions.find((suggestion) => {
-          const range = resolvedRange(view.state, suggestion);
-          return range && position >= range.from && position <= range.to;
+          const ranges = resolvedRanges(view.state, suggestion);
+          return ranges.some((range) => position >= range.from && position <= range.to);
         })?.id;
         if (!hit) return false;
         options.onActivate(hit);

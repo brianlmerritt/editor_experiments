@@ -14,12 +14,50 @@ export interface DocumentTextMap {
 
 export interface MappedDocumentRange extends DocumentRange {
   textMap: DocumentTextMap;
+  formattedText?: string;
 }
 
 export function documentTextBetween(snapshot: EditorDocumentSnapshot, from: number, to: number): string {
   const document = schema.nodeFromJSON(snapshot.doc);
   if (from < 0 || to < from || to > document.content.size) return '';
   return document.textBetween(from, to, '\n');
+}
+
+/**
+ * Build a provider-only view of a captured range. The canonical passage remains
+ * plain text for exact offsets; this parallel reference makes emphasis visible to
+ * an AI without inserting Markdown markers into the editor or its anchors.
+ */
+export function documentMarkdownBetween(snapshot: EditorDocumentSnapshot, from: number, to: number): string {
+  const document = schema.nodeFromJSON(snapshot.doc);
+  if (from < 0 || to < from || to > document.content.size) return '';
+  const parts: Array<{ text: string; italic: boolean }> = [];
+  let firstBlock = true;
+  const append = (text: string, italic = false) => {
+    if (!text) return;
+    const previous = parts.at(-1);
+    if (previous?.italic === italic) previous.text += text;
+    else parts.push({ text, italic });
+  };
+
+  document.nodesBetween(from, to, (node, position) => {
+    if (node.isBlock && (node.isTextblock || node.isLeaf)) {
+      if (firstBlock) firstBlock = false;
+      else append('\n');
+    }
+    if (node.isText) {
+      const start = Math.max(from, position);
+      const end = Math.min(to, position + node.nodeSize);
+      if (start < end) {
+        append((node.text ?? '').slice(start - position, end - position), node.marks.some((mark) => mark.type.name === 'em'));
+      }
+    } else if (node.isLeaf && position >= from && position < to) {
+      append(node.type.spec.leafText?.(node) ?? '');
+    }
+    return true;
+  });
+
+  return parts.map((part) => part.italic ? `*${part.text}*` : part.text).join('');
 }
 
 export function completeDocumentRange(snapshot: EditorDocumentSnapshot): DocumentRange {
@@ -71,6 +109,7 @@ export function completeDocumentMappedRange(snapshot: EditorDocumentSnapshot): M
     from: 0,
     to: document.content.size,
     text,
+    formattedText: documentMarkdownBetween(snapshot, 0, document.content.size),
     textMap: { starts, ends }
   };
 }
@@ -80,6 +119,7 @@ export function mappedDocumentRangeMatches(snapshot: EditorDocumentSnapshot, cap
   return current.from === captured.from
     && current.to === captured.to
     && current.text === captured.text
+    && (captured.formattedText === undefined || current.formattedText === captured.formattedText)
     && current.textMap.starts.length === captured.textMap.starts.length
     && current.textMap.ends.length === captured.textMap.ends.length
     && current.textMap.starts.every((position, index) => position === captured.textMap.starts[index])

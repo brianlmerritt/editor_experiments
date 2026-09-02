@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorDocumentSnapshot } from './transactions';
-import { completeDocumentMappedRange, completeDocumentRange, documentCraftParagraphs, documentParagraphs, documentTextBetween, mappedDocumentRangeMatches } from './document';
+import { completeDocumentMappedRange, completeDocumentRange, documentCraftParagraphs, documentMarkdownBetween, documentParagraphs, documentTextBetween, mappedDocumentRangeMatches } from './document';
 
 const snapshot: EditorDocumentSnapshot = {
   doc: {
@@ -24,6 +24,35 @@ describe('canonical document ranges', () => {
 
   it('reads selected text from the canonical snapshot', () => {
     expect(documentTextBetween(snapshot, 19, 25)).toBe('Second');
+  });
+
+  it('gives providers a Markdown emphasis reference without changing canonical text', () => {
+    const formatted: EditorDocumentSnapshot = {
+      doc: {
+        type: 'doc',
+        content: [{
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'The Shard said, ' },
+            { type: 'text', text: 'We remember.', marks: [{ type: 'em' }] },
+            { type: 'text', text: ' Marcus listened.' }
+          ]
+        }]
+      },
+      text: 'The Shard said, We remember. Marcus listened.',
+      selection: { from: 1, to: 1 }
+    };
+
+    expect(documentTextBetween(formatted, 1, 46)).toBe('The Shard said, We remember. Marcus listened.');
+    expect(documentMarkdownBetween(formatted, 1, 46)).toBe('The Shard said, *We remember.* Marcus listened.');
+    const captured = completeDocumentMappedRange(formatted);
+    expect(mappedDocumentRangeMatches({
+      ...formatted,
+      doc: {
+        type: 'doc',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: 'The Shard said, We remember. Marcus listened.' }] }]
+      }
+    }, captured)).toBe(false);
   });
 
   it('captures one exact rich-document range for a whole-document action', () => {

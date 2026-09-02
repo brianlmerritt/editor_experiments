@@ -33,6 +33,7 @@ function legacyGenerationRequest(request: AIInteractionRequest): GenerationReque
   const sourceStates = Object.fromEntries(request.sources.map((source) => [source.sourceId, source.participation])) as Record<string, SourceState>;
   return {
     text: request.target.exactText,
+    formattedText: request.target.formattedText,
     from: target.start,
     to: target.end,
     branchId: request.documentId,

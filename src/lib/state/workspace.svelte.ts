@@ -1,7 +1,7 @@
 import { categories, sourceCatalog, makeId, coalesceDuplicateSuggestions, isExactTextSpan, normalizeInputRecord, type AIRequestChannel, type Branch, type Category, type CraftRun, type GenerationRequest, type InputError, type InputProposal, type LedgerEvent, type SourceState, type Suggestion, type SuggestionState, type TaskPrompt, type WritingBrief, type WritingMode } from '$lib/domain';
 import { validReturnedContext, type AIActionSnapshot, type AIActivityRecord, type AIContextItem, type AIContextManifest, type AIContextSelection, type AIInteractionIntent, type AIInteractionRequest, type AIInteractionService, type AIServiceDiagnostic } from '$lib/ai/contracts';
 import { FacadeAIInteractionService } from '$lib/ai/service';
-import { cloneDefaultAIActions, normalizedAIActions, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
+import { aiActionDefaultsVersion, aiTellAuditActionId, cloneDefaultAIActions, migrateAIActions, normalizedAIActions, prosePatternAuditActionId, type AIActionDefinition, type AIActionTargetScope } from '$lib/ai/actions';
 import { workspaceFacade, type MarkdownExport, type UploadedAsset, type WorkspaceFacade } from '$lib/workspace/facade';
 import type { ContextBucket, ContextScope, WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { ProjectArchiveExport, ProjectExportMode, ProjectExportSnapshot, ProjectImportPreview } from '$lib/workspace/project-transfer';
@@ -9,7 +9,7 @@ import type { StorageAnalysis } from '$lib/workspace/retention';
 import { defaultAttachmentBehaviours, firstTextTarget, sameTarget, selectionHasStrikethrough, textTarget, transformTargetSet, type AttachmentBehaviour, type FormatAttachment, type TargetSet } from '$lib/workspace/attachments';
 import { applyAttachmentChanges } from '$lib/workspace/mutations';
 import { cloneHistorySnapshot, type EditorDocumentSnapshot, type EditorTransactionDetail, type WorkspaceHistoryEntry, type WorkspaceHistorySnapshot } from '$lib/workspace/transactions';
-import { completeDocumentMappedRange, completeDocumentRange, documentTextBetween, mappedDocumentRangeMatches, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
+import { completeDocumentMappedRange, documentMarkdownBetween, documentTextBetween, mappedDocumentRangeMatches, type DocumentRange, type DocumentTextMap } from '$lib/workspace/document';
 import { compactRunHistory, resolveRunContext, resolveRunRequest, storeContextSnapshot, type AIContextSnapshots } from '$lib/workspace/run-retention';
 import { isRichDocument, richDocumentFromProseMirror, richDocumentFromText, type RichDocument } from '$lib/workspace/rich-document';
 import { settings, type SettingsState } from '$lib/state/settings.svelte';
@@ -63,6 +63,8 @@ function isInputProposalPayload(value: unknown): value is InputProposal {
     && Number.isInteger(proposal.from)
     && Number.isInteger(proposal.to)
     && typeof proposal.sourceText === 'string'
+    && (proposal.evidenceAnchors === undefined || (Array.isArray(proposal.evidenceAnchors)
+      && proposal.evidenceAnchors.every((anchor) => Number.isInteger(anchor.from) && Number.isInteger(anchor.to) && typeof anchor.text === 'string')))
     && (proposal.anchorStatus === undefined || proposal.anchorStatus === 'exact' || proposal.anchorStatus === 'request_scope' || proposal.anchorStatus === 'unanchored')
     && (proposal.type === 'replacement' || proposal.type === 'insertion' || proposal.type === 'annotation')
     && categories.includes(proposal.category as Category)
@@ -90,6 +92,7 @@ interface NavigatorHistoryEntry {
 interface DocumentDomainLoadResult {
   archivedLegacyInputs: number;
   realignedCapturedInputs: number;
+  retiredMisalignedActionInputs: number;
 }
 
 export type DocumentSaveState = 'saved' | 'pending' | 'saving' | 'failed';
@@ -271,7 +274,8 @@ export class WorkspaceState {
     if (!project) return;
     const saved = await this.facade.saveProject(project.id, project.title, {
       ...project.extensions,
-      ai_actions: JSON.parse(JSON.stringify(this.actions))
+      ai_actions: JSON.parse(JSON.stringify(this.actions)),
+      ai_action_defaults_version: aiActionDefaultsVersion
     });
     this.projects = this.projects.map((item) => item.id === saved.id ? saved : item);
   }
@@ -500,10 +504,14 @@ export class WorkspaceState {
       this.branchId = loaded.activeDocumentId;
       this.applyProjectParticipationPreferences();
       this.navigator = readNavigatorState(this.currentProject);
-      this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
+      const actionMigration = migrateAIActions(
+        this.currentProject?.extensions.ai_actions,
+        this.currentProject?.extensions.ai_action_defaults_version
+      );
+      this.actions = actionMigration.actions;
       this.loadNavigatorMemory();
       await this.ensureProjectStructure();
-      if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
+      if (!Array.isArray(this.currentProject?.extensions.ai_actions) || actionMigration.migrated) await this.persistProjectActions();
       this.branches = loaded.branches;
       this.ledger = loaded.events;
       this.settingsState.load(loaded.sourceAvailability);
@@ -515,13 +523,17 @@ export class WorkspaceState {
       const interruptedRuns = this.reconcileInterruptedRuns();
       if (domainLoad.archivedLegacyInputs) {
         this.notice = `${domainLoad.archivedLegacyInputs} legacy live inputs were archived because their pre-Svelte targets cannot be trusted.`;
+      } else if (domainLoad.retiredMisalignedActionInputs) {
+        this.notice = `${domainLoad.retiredMisalignedActionInputs} earlier whole-document action ${domainLoad.retiredMisalignedActionInputs === 1 ? 'Input was' : 'Inputs were'} moved to History because their editor positions cannot be trusted. Rerun the action to regenerate exact targets.`;
       } else if (domainLoad.realignedCapturedInputs) {
         this.notice = `${domainLoad.realignedCapturedInputs} saved AI ${domainLoad.realignedCapturedInputs === 1 ? 'input was' : 'inputs were'} realigned to the writer's captured selection.`;
       }
       if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
-      if (domainLoad.archivedLegacyInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
+      if (domainLoad.archivedLegacyInputs || domainLoad.retiredMisalignedActionInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
         const reason = interruptedRuns
           ? 'Reconcile interrupted AI runs'
+          : domainLoad.retiredMisalignedActionInputs
+            ? 'Retire misaligned whole-document action inputs'
           : domainLoad.realignedCapturedInputs
             ? 'Realign captured AI input targets'
             : 'Archive legacy input targets';
@@ -999,7 +1011,7 @@ export class WorkspaceState {
         sourceRevision: target.sourceRevision,
         role: 'target',
         title: this.currentDocument?.role === 'spine' ? 'Spine (including story brief)' : this.currentDocument?.title ?? 'Current passage',
-        content: target.exactText,
+        content: target.formattedText ?? target.exactText,
         reason: 'Exact captured request target',
         inclusion: 'required',
         sent: true
@@ -1101,12 +1113,14 @@ export class WorkspaceState {
   reviewContextPreview(prompt: TaskPrompt, selection: AIContextSelection): AIContextManifest | null {
     const document = this.currentDocument;
     if (!document) return null;
-    const text = document.content;
+    const mapped = this.documentSnapshot ? completeDocumentMappedRange(this.documentSnapshot) : null;
+    const text = mapped?.text ?? document.content;
     return this.contextManifest(this.actionSnapshot(prompt, 'review'), {
       documentId: document.id,
       sourceRevision: this.workspaceRevision,
-      target: textTarget(document.id, 0, text.length, text),
-      exactText: text
+      target: textTarget(document.id, mapped?.from ?? 0, mapped?.to ?? text.length, text),
+      exactText: text,
+      ...(mapped?.formattedText && mapped.formattedText !== text ? { formattedText: mapped.formattedText } : {})
     }, selection);
   }
 
@@ -1144,14 +1158,13 @@ export class WorkspaceState {
     };
     const results = await Promise.all(groups.map(async (group) => {
       const inputs = await this.requestInputRun(
-        { from: range.from, to: range.to, text: range.text, prompt },
+        { from: range.from, to: range.to, text: range.text, formattedText: range.formattedText, prompt },
         `${this.branchId}:${group.key}:document:${range.from}:${range.to}`,
         activity,
         isolatedSourceStates(group.sourceIds),
         contextSelection,
-        { channel: 'reviews', textMap: range.textMap }
+        { channel: 'reviews', textMap: range.textMap, onProgress }
       );
-      onProgress?.(inputs);
       return inputs;
     }));
     return results.flat();
@@ -1182,8 +1195,9 @@ export class WorkspaceState {
       return [];
     }
     const activity = this.beginAIActivity(prompt, 'selection');
+    const formattedText = documentMarkdownBetween(this.documentSnapshot, range.from, range.to);
     return this.requestInputRun(
-      { ...range, prompt },
+      { ...range, formattedText, prompt },
       `${this.branchId}:selection:${range.from}:${range.to}`,
       activity
     );
@@ -1192,13 +1206,17 @@ export class WorkspaceState {
   actionContextPreview(action: AIActionDefinition, scope: AIActionTargetScope, range: DocumentRange | null, selection: AIContextSelection): AIContextManifest | null {
     const document = this.currentDocument;
     if (!document) return null;
-    const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentRange(this.documentSnapshot) : null;
+    const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentMappedRange(this.documentSnapshot) : null;
     if (!targetRange?.text.trim()) return null;
+    const formattedText = this.documentSnapshot
+      ? documentMarkdownBetween(this.documentSnapshot, targetRange.from, targetRange.to)
+      : targetRange.text;
     return this.contextManifest(this.definitionSnapshot(action, scope), {
       documentId: document.id,
       sourceRevision: this.workspaceRevision,
       target: textTarget(document.id, targetRange.from, targetRange.to, targetRange.text),
-      exactText: targetRange.text
+      exactText: targetRange.text,
+      ...(formattedText !== targetRange.text ? { formattedText } : {})
     }, selection);
   }
 
@@ -1206,47 +1224,80 @@ export class WorkspaceState {
     action: AIActionDefinition,
     scope: AIActionTargetScope,
     range: DocumentRange | null,
-    contextSelection: AIContextSelection = this.actionContextSelection(action)
+    contextSelection: AIContextSelection = this.actionContextSelection(action),
+    onProgress?: (inputs: Suggestion[]) => void
   ): Promise<Suggestion[]> {
     const document = this.currentDocument;
     if (!this.actionsEnabled || !document || !action.allowedTargets.includes(scope)) return [];
-    const targetRange = scope === 'selection' ? range : this.documentSnapshot ? completeDocumentRange(this.documentSnapshot) : null;
+    const mappedDocument = scope === 'document' && this.documentSnapshot
+      ? completeDocumentMappedRange(this.documentSnapshot)
+      : null;
+    const targetRange = scope === 'selection' ? range : mappedDocument;
     if (!targetRange?.text.trim() || (action.requiresSelection && scope !== 'selection')) {
       this.notice = action.requiresSelection ? 'This action requires a text selection.' : 'The selected target is empty.';
       return [];
     }
-    const canonicalText = this.documentSnapshot ? documentTextBetween(this.documentSnapshot, targetRange.from, targetRange.to) : null;
-    if (canonicalText !== targetRange.text) {
+    const canonicalTargetMatches = this.documentSnapshot && mappedDocument
+      ? mappedDocumentRangeMatches(this.documentSnapshot, mappedDocument)
+      : this.documentSnapshot
+        ? documentTextBetween(this.documentSnapshot, targetRange.from, targetRange.to) === targetRange.text
+        : false;
+    if (!canonicalTargetMatches) {
       this.notice = 'The target changed before the action began. Select it again.';
       return [];
     }
-    const availableAI = this.settingsState.sources.filter((source) => source.number >= 3
+    const supportsLocalAudit = action.id === aiTellAuditActionId || action.id === prosePatternAuditActionId;
+    const availableAI = this.settingsState.sources.filter((source) => (source.number >= 3 || (supportsLocalAudit && source.id === 'local-craft'))
       && this.sourceStates[source.id] !== 'off'
       && this.settingsState.sourceAvailable(source.id));
     const selected = action.preferredSourceId
-      ? availableAI.filter((source) => source.id === action.preferredSourceId)
+      ? availableAI.filter((source) => source.id === action.preferredSourceId
+        || (supportsLocalAudit && source.id === 'local-craft'))
       : availableAI;
     if (!selected.length) {
       this.notice = action.preferredSourceId
         ? 'The provider assigned to this action is unavailable or not enabled.'
-        : 'Enable at least one configured AI provider before running this action.';
+        : supportsLocalAudit
+          ? 'Enable Local craft checks or at least one configured AI provider before running this action.'
+          : 'Enable at least one configured AI provider before running this action.';
       return [];
     }
-    const sourceIds = new Set(selected.map((source) => source.id));
-    const sourceStates = Object.fromEntries(this.settingsState.sources.map((source) => [
-      source.id,
-      sourceIds.has(source.id) ? 'visible' : 'off'
-    ])) as Record<string, SourceState>;
     const prompt: TaskPrompt = { id: action.id, name: action.name, version: action.version, instruction: action.instruction };
     const activity = this.beginAIActivity(prompt, scope, action.intent);
-    return this.requestInputRun(
-      { ...targetRange, prompt },
-      `${this.branchId}:action:${action.id}:${targetRange.from}:${targetRange.to}`,
-      activity,
-      sourceStates,
-      contextSelection,
-      { action: this.definitionSnapshot(action, scope), channel: 'actions' }
-    );
+    const formattedText = scope === 'selection' && this.documentSnapshot
+      ? documentMarkdownBetween(this.documentSnapshot, targetRange.from, targetRange.to)
+      : mappedDocument?.formattedText;
+    const results = await Promise.all(selected.map((source) => {
+      const sourceStates = Object.fromEntries(this.settingsState.sources.map((candidate) => [
+        candidate.id,
+        candidate.id === source.id ? 'visible' : 'off'
+      ])) as Record<string, SourceState>;
+      return this.requestInputRun(
+        { ...targetRange, formattedText, prompt },
+        `${this.branchId}:action:${action.id}:${source.id}:${targetRange.from}:${targetRange.to}`,
+        activity,
+        sourceStates,
+        contextSelection,
+        { action: this.definitionSnapshot(action, scope), channel: 'actions', textMap: mappedDocument?.textMap, onProgress }
+      );
+    }));
+    const currentInputIds = new Set(this.suggestions
+      .filter((input) => input.state === 'pending' || input.state === 'hidden')
+      .map((input) => input.id));
+    return results.flat().filter((input) => currentInputIds.has(input.id));
+  }
+
+  private currentRunTarget(run: CraftRun): { text: string; formattedText: string; textMap?: DocumentTextMap } | null {
+    const target = firstTextTarget(run.target);
+    if (!target || !this.documentSnapshot || target.nodeId !== this.branchId) return null;
+    if (run.scope === 'document' && target.start === 0) {
+      const mapped = completeDocumentMappedRange(this.documentSnapshot);
+      if (target.end === mapped.to) return { text: mapped.text, formattedText: mapped.formattedText ?? mapped.text, textMap: mapped.textMap };
+    }
+    return {
+      text: documentTextBetween(this.documentSnapshot, target.start, target.end),
+      formattedText: documentMarkdownBetween(this.documentSnapshot, target.start, target.end)
+    };
   }
 
   canRecoverRun(runId: string): boolean {
@@ -1263,10 +1314,9 @@ export class WorkspaceState {
     const request = resolveRunRequest(run, this.contextSnapshots);
     if (!request) return [];
     const target = firstTextTarget(run.target);
-    const currentText = target && this.documentSnapshot
-      ? documentTextBetween(this.documentSnapshot, target.start, target.end)
-      : null;
-    if (!target || currentText !== run.originalText) {
+    const currentTarget = this.currentRunTarget(run);
+    if (!target || currentTarget?.text !== run.originalText
+      || (run.request?.target.formattedText !== undefined && currentTarget.formattedText !== run.request.target.formattedText)) {
       this.notice = 'That retained response no longer matches its captured passage and cannot be recovered.';
       return [];
     }
@@ -1278,7 +1328,7 @@ export class WorkspaceState {
     const proposals = response.proposals.filter((proposal) =>
       run.permittedProposalKinds?.includes(proposal.kind) && isInputProposalPayload(proposal.payload));
     const adopted = proposals.flatMap((proposal) => {
-      const input = this.adoptProposal(proposal.payload as InputProposal, run, target.start, proposal.kind);
+      const input = this.adoptProposal(proposal.payload as InputProposal, run, target.start, proposal.kind, currentTarget.textMap);
       return input ? [input] : [];
     });
     const returnedProposalSources = new Set(response.proposals.flatMap((proposal) => {
@@ -1338,10 +1388,9 @@ export class WorkspaceState {
     const channel = previous.channel ?? (previous.promptId === 'sentinel' ? 'reviews' : 'actions');
     if ((channel === 'reviews' && !this.reviewsEnabled) || (channel === 'actions' && !this.actionsEnabled)) return [];
     const target = firstTextTarget(previous.target);
-    const currentText = target && this.documentSnapshot
-      ? documentTextBetween(this.documentSnapshot, target.start, target.end)
-      : null;
-    if (!target || currentText !== previous.originalText) {
+    const currentTarget = this.currentRunTarget(previous);
+    if (!target || currentTarget?.text !== previous.originalText
+      || (previous.request?.target.formattedText !== undefined && currentTarget.formattedText !== previous.request.target.formattedText)) {
       this.notice = 'That failed run no longer matches the current passage and cannot be retried.';
       return [];
     }
@@ -1369,12 +1418,12 @@ export class WorkspaceState {
       failedSources.has(source.id) ? 'visible' : 'off'
     ])) as Record<string, SourceState>;
     const result = await this.requestInputRun(
-      { from: target.start, to: target.end, text: previous.originalText, prompt },
+      { from: target.start, to: target.end, text: previous.originalText, formattedText: currentTarget.formattedText, prompt },
       `${this.branchId}:retry:${previous.id}`,
       activity,
       retrySourceStates,
       defaultAIContextSelection,
-      { action: capturedAction, channel }
+      { action: capturedAction, channel, textMap: currentTarget.textMap }
     );
     const retry = this.runs.find((run) => run.activityId === activity.id);
     if (retry && (retry.state === 'completed' || retry.state === 'partial')) {
@@ -1396,7 +1445,7 @@ export class WorkspaceState {
     activity: AIActivityRecord,
     requestedSourceStates: Record<string, SourceState> = this.sourceStates,
     contextSelection: AIContextSelection = defaultAIContextSelection,
-    configuration: { action?: AIActionSnapshot; channel?: AIRequestChannel; textMap?: DocumentTextMap } = {}
+    configuration: { action?: AIActionSnapshot; channel?: AIRequestChannel; textMap?: DocumentTextMap; onProgress?: (inputs: Suggestion[]) => void } = {}
   ): Promise<Suggestion[]> {
     const channel = configuration.channel ?? 'actions';
     if ((channel === 'reviews' && !this.reviewsEnabled) || (channel === 'actions' && !this.actionsEnabled)) return [];
@@ -1417,7 +1466,8 @@ export class WorkspaceState {
       documentId: this.branchId,
       sourceRevision: this.workspaceRevision,
       target: textTarget(this.branchId, input.from, input.to, input.text),
-      exactText: input.text
+      exactText: input.text,
+      ...(input.formattedText && input.formattedText !== input.text ? { formattedText: input.formattedText } : {})
     };
     const context = this.contextManifest(action, capturedTarget, contextSelection);
     const storedContext = storeContextSnapshot(this.contextSnapshots, context);
@@ -1533,9 +1583,12 @@ export class WorkspaceState {
               from: target.start,
               to: target.end,
               text: currentRun.originalText,
+              formattedText: currentRun.request?.target.formattedText,
               textMap: configuration.textMap
             })
           : documentTextBetween(this.documentSnapshot, target.start, target.end) === currentRun.originalText
+            && (currentRun.request?.target.formattedText === undefined
+              || documentMarkdownBetween(this.documentSnapshot, target.start, target.end) === currentRun.request.target.formattedText)
         : false;
       if (!currentRun || currentRun.state !== 'running' || !target || !currentTargetMatches) {
         this.runs = this.runs.map((item) => item.id === run.id
@@ -1553,16 +1606,18 @@ export class WorkspaceState {
         const inputRecord = this.adoptProposal(proposal.payload, adoptionRun, target.start, proposal.kind, configuration.textMap);
         return inputRecord ? [inputRecord] : [];
       });
+      const finalState = diagnostics.some((error) => !error.recovered) ? (adopted.length ? 'partial' : 'failed') : 'completed';
       this.runs = this.runs.map((item) => item.id === run.id ? {
         ...item,
-        state: diagnostics.some((error) => !error.recovered) ? (adopted.length ? 'partial' : 'failed') : 'completed',
+        state: 'running',
         proposalIds: adopted.map((item) => item.id),
         errors: diagnostics,
-        contextSnapshotId: returnedContext?.id ?? item.contextSnapshotId,
-        completedAt: new Date().toISOString()
+        contextSnapshotId: returnedContext?.id ?? item.contextSnapshotId
       } : item);
-      this.refreshAIActivity(activity.id);
-      await this.coalesceSuggestions([...this.suggestions, ...adopted]);
+      await this.coalesceSuggestions([...this.suggestions, ...adopted], {
+        persist: false,
+        onApplied: () => configuration.onProgress?.(adopted)
+      });
       for (const suggestion of adopted) {
         await this.log(suggestion.state === 'hidden' ? 'generated_hidden' : 'suggestion_generated', {
           runId: run.id,
@@ -1570,6 +1625,13 @@ export class WorkspaceState {
         }, suggestion.id);
       }
       await this.refreshLedger();
+      this.runs = this.runs.map((item) => item.id === run.id ? {
+        ...item,
+        state: finalState,
+        completedAt: new Date().toISOString()
+      } : item);
+      this.refreshAIActivity(activity.id);
+      await this.persistDomainState('Complete AI input run');
       return adopted.filter((suggestion) => this.suggestions.some((item) => item.id === suggestion.id && (item.state === 'pending' || item.state === 'hidden')));
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -1612,6 +1674,18 @@ export class WorkspaceState {
     if (textMap && !capturedTarget && (mappedFrom === undefined || mappedTo === undefined)) return null;
     const from = capturedTarget?.start ?? mappedFrom ?? currentStart + proposal.from;
     const to = capturedTarget?.end ?? mappedTo ?? currentStart + proposal.to;
+    const proposalEvidence = capturedRequestTarget ? [] : (proposal.evidenceAnchors ?? [])
+      .filter((anchor) => isExactTextSpan(run.originalText, anchor.from, anchor.to, anchor.text));
+    const mappedEvidence = proposalEvidence.flatMap((anchor) => {
+      const evidenceFrom = textMap?.starts[anchor.from] ?? currentStart + anchor.from;
+      const evidenceTo = textMap?.ends[anchor.to - 1] ?? currentStart + anchor.to;
+      if (textMap && (textMap.starts[anchor.from] === undefined || textMap.ends[anchor.to - 1] === undefined)) return [];
+      return [{ from: evidenceFrom, to: evidenceTo, text: anchor.text }];
+    });
+    const evidenceAnchors = [
+      { from, to, text: proposal.sourceText },
+      ...mappedEvidence
+    ].filter((anchor, index, all) => all.findIndex((candidate) => candidate.from === anchor.from && candidate.to === anchor.to) === index);
     const variants = proposal.variants
       .filter((text) => text !== proposal.sourceText)
       .map((text, index) => ({ id: `${id}_v${index + 1}`, text, confidence: Math.max(0.45, proposal.confidence - index * 0.04) }));
@@ -1622,10 +1696,14 @@ export class WorkspaceState {
       source: proposal.source,
       sourceNumber: proposal.sourceNumber,
       sourceKind: proposal.sourceKind,
-      target: textTarget(this.branchId, from, to, proposal.sourceText),
+      target: {
+        ...textTarget(this.branchId, from, to, proposal.sourceText),
+        targets: evidenceAnchors.map((anchor) => ({ type: 'text' as const, nodeId: this.branchId, start: anchor.from, end: anchor.to }))
+      },
       behaviourId: 'craft-input',
       events: [],
       anchor: { from, to, text: proposal.sourceText },
+      ...(evidenceAnchors.length > 1 ? { evidenceAnchors } : {}),
       anchorStatus: proposal.anchorStatus ?? 'exact',
       type,
       payload: { text: variants[0]?.text, comment: proposal.comment },
@@ -1808,12 +1886,16 @@ export class WorkspaceState {
       localStorage.setItem('margin-note:branch', id);
     }
     if (interruptedRuns) this.notice = `${interruptedRuns} interrupted AI ${interruptedRuns === 1 ? 'passage needs' : 'passages need'} a retry or completion decision.`;
-    if (domainLoad.realignedCapturedInputs) {
+    if (domainLoad.retiredMisalignedActionInputs) {
+      this.notice = `${domainLoad.retiredMisalignedActionInputs} earlier whole-document action ${domainLoad.retiredMisalignedActionInputs === 1 ? 'Input was' : 'Inputs were'} moved to History because their editor positions cannot be trusted. Rerun the action to regenerate exact targets.`;
+    } else if (domainLoad.realignedCapturedInputs) {
       this.notice = `${domainLoad.realignedCapturedInputs} saved AI ${domainLoad.realignedCapturedInputs === 1 ? 'input was' : 'inputs were'} realigned to the writer's captured selection.`;
     }
-    if (domainLoad.archivedLegacyInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
+    if (domainLoad.archivedLegacyInputs || domainLoad.retiredMisalignedActionInputs || domainLoad.realignedCapturedInputs || interruptedRuns) {
       const reason = interruptedRuns
         ? 'Reconcile interrupted AI runs'
+        : domainLoad.retiredMisalignedActionInputs
+          ? 'Retire misaligned whole-document action inputs'
         : domainLoad.realignedCapturedInputs
           ? 'Realign captured AI input targets'
           : 'Archive legacy input targets';
@@ -1837,10 +1919,14 @@ export class WorkspaceState {
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
-    this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
+    const actionMigration = migrateAIActions(
+      this.currentProject?.extensions.ai_actions,
+      this.currentProject?.extensions.ai_action_defaults_version
+    );
+    this.actions = actionMigration.actions;
     this.loadNavigatorMemory();
     await this.ensureProjectStructure();
-    if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
+    if (!Array.isArray(this.currentProject?.extensions.ai_actions) || actionMigration.migrated) await this.persistProjectActions();
     const document = this.projectNodes.find((item) => item.role === 'manuscript') ?? this.spineNode ?? this.todosNode;
     if (!document) throw new Error('Project has no document');
     if (typeof localStorage !== 'undefined') localStorage.setItem('margin-note:project', id);
@@ -1923,10 +2009,14 @@ export class WorkspaceState {
     this.navigatorUndoStack = [];
     this.navigatorRedoStack = [];
     this.navigator = readNavigatorState(this.currentProject);
-    this.actions = normalizedAIActions(this.currentProject?.extensions.ai_actions);
+    const actionMigration = migrateAIActions(
+      this.currentProject?.extensions.ai_actions,
+      this.currentProject?.extensions.ai_action_defaults_version
+    );
+    this.actions = actionMigration.actions;
     this.loadNavigatorMemory();
     await this.ensureProjectStructure();
-    if (!Array.isArray(this.currentProject?.extensions.ai_actions)) await this.persistProjectActions();
+    if (!Array.isArray(this.currentProject?.extensions.ai_actions) || actionMigration.migrated) await this.persistProjectActions();
     const document = this.projectNodes.find((item) => item.role === 'manuscript') ?? this.spineNode ?? this.todosNode;
     if (!document) throw new Error('Project has no document');
     this.refreshBranches();
@@ -2884,6 +2974,17 @@ export class WorkspaceState {
     this.runs = compactedRunHistory.runs;
     this.contextSnapshots = compactedRunHistory.contextSnapshots;
     const runsById = new Map(this.runs.map((run) => [run.id, run]));
+    let retiredMisalignedActionInputs = 0;
+    this.inputs = this.inputs.map((input) => {
+      if ((input.state !== 'pending' && input.state !== 'hidden')
+        || input.category !== 'ai_tell'
+        || input.provenance.actionId !== aiTellAuditActionId
+        || (input.provenance.actionVersion ?? 1) >= 2
+        || !input.provenance.runId
+        || runsById.get(input.provenance.runId)?.scope !== 'document') return input;
+      retiredMisalignedActionInputs += 1;
+      return { ...input, state: 'stale' as const };
+    });
     let realignedCapturedInputs = 0;
     this.inputs = this.inputs.map((input) => {
       if ((input.anchorStatus !== 'request_scope' && input.anchorStatus !== 'unanchored')
@@ -2920,7 +3021,7 @@ export class WorkspaceState {
       this.behaviours['format-default'] = { ...defaultAttachmentBehaviours['format-default'] };
     }
     this.workspaceRevision = typeof value?.revision === 'number' ? value.revision : document?.revision ?? 0;
-    return { archivedLegacyInputs: migratedLegacyInputs, realignedCapturedInputs };
+    return { archivedLegacyInputs: migratedLegacyInputs, realignedCapturedInputs, retiredMisalignedActionInputs };
   }
 
   private domainExtensions(): WorkspaceDocument['extensions'] {
@@ -3006,9 +3107,13 @@ export class WorkspaceState {
     await save;
   }
 
-  private async coalesceSuggestions(items: Suggestion[]): Promise<void> {
+  private async coalesceSuggestions(
+    items: Suggestion[],
+    options: { persist?: boolean; onApplied?: () => void } = {}
+  ): Promise<void> {
     const coalesced = coalesceDuplicateSuggestions(items.map((item) => normalizeInputRecord(item, this.branchId)));
     this.suggestions = coalesced.suggestions;
+    options.onApplied?.();
     for (const { duplicate, canonical, reason } of coalesced.suppressed) {
       await this.log('duplicate_suppressed', {
         duplicateOf: canonical.id,
@@ -3018,7 +3123,7 @@ export class WorkspaceState {
         anchor: [duplicate.anchor.from, duplicate.anchor.to]
       }, duplicate.id);
     }
-    await this.persistDomainState('Update inputs');
+    if (options.persist !== false) await this.persistDomainState('Update inputs');
   }
 
   private setCanonicalDocument(snapshot: EditorDocumentSnapshot): void {

@@ -131,4 +131,63 @@ describe('domain contracts', () => {
       .toEqual(['pending', 'pending', 'pending']);
   });
 
+  it('coalesces the same overlapping issue across local, AI Tell, distance, and diction sources', () => {
+    const localDistance = suggestion({
+      id: 'local-distance',
+      source: 'local-craft',
+      sourceKind: 'local',
+      category: 'distance',
+      payload: { comment: 'This filter verb creates narrative distance by reporting perception. Present the image directly.' }
+    });
+    const aiTell = suggestion({
+      id: 'ai-tell',
+      source: 'anthropic',
+      sourceKind: 'ai',
+      category: 'ai_tell',
+      payload: { comment: 'The filter verb creates narrative distance and reports perception instead of presenting the image directly.' }
+    });
+
+    expect(suggestionsDescribeSameIssue(localDistance, aiTell)).toBe(true);
+    expect(coalesceDuplicateSuggestions([localDistance, aiTell]).suggestions.map((item) => item.state))
+      .toEqual(['pending', 'superseded']);
+  });
+
+  it('keeps the specific exactly anchored revision when it duplicates a generic AI Tell diagnosis', () => {
+    const generic = suggestion({
+      id: 'generic-ai-tell',
+      source: 'anthropic', sourceKind: 'ai', category: 'ai_tell',
+      payload: { comment: 'The filter verb creates narrative distance by reporting perception instead of presenting the image directly.' }
+    });
+    const actionable = suggestion({
+      id: 'specific-distance',
+      source: 'openai', sourceKind: 'ai', category: 'distance', type: 'replacement',
+      payload: { comment: 'This filter verb creates narrative distance by reporting perception. Present the image directly.', text: 'saw' },
+      variants: [{ id: 'specific-v1', text: 'saw' }]
+    });
+
+    const result = coalesceDuplicateSuggestions([generic, actionable]);
+    expect(result.suggestions.map((item) => item.state)).toEqual(['superseded', 'pending']);
+    expect(result.suggestions[1]).toMatchObject({ category: 'distance', variants: [{ text: 'saw' }] });
+  });
+
+  it('does not combine revision options whose overlapping replacement spans differ', () => {
+    const first = suggestion({
+      type: 'replacement',
+      payload: { comment: 'This filter verb creates narrative distance by reporting perception.', text: 'saw' },
+      variants: [{ id: 'v1', text: 'saw' }]
+    });
+    const broader = suggestion({
+      id: 'broader',
+      type: 'replacement',
+      anchor: { from: 4, to: 18, text: 'noticed the rain' },
+      target: textTarget('main', 4, 18, 'noticed the rain'),
+      payload: { comment: 'The filter verb creates narrative distance by reporting perception.', text: 'rain silvered' },
+      variants: [{ id: 'v2', text: 'rain silvered' }]
+    });
+
+    expect(suggestionsDescribeSameIssue(first, broader)).toBe(false);
+    expect(coalesceDuplicateSuggestions([first, broader]).suggestions.map((item) => item.state))
+      .toEqual(['pending', 'pending']);
+  });
+
 });

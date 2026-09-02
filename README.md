@@ -19,6 +19,9 @@ The Phase 1 AI request, Writing Context, provider, proposal, and adoption contra
 documented in [AI_BOUNDARY.md](./AI_BOUNDARY.md). It also defines existing-work
 assimilation: using a manuscript, supplied reviews, and the current project vocabulary
 to propose human-approved Spine, Material, relationship, and Todo changes.
+The narrow local-plus-provider **AI Pattern Audit** and the authorship-neutral **Prose
+Pattern Audit** are documented in [AI_PATTERN_AUDIT.md](./AI_PATTERN_AUDIT.md) and
+[PROSE_PATTERN_AUDIT.md](./PROSE_PATTERN_AUDIT.md).
 The next major proof of concept—a graph-backed Navigator with a protected, editable
 **Spine**, fixed canonical **Todos**, configurable **Collections**, and fork-aware
 terminal-style split views—is specified in [NAVIGATION.md](./NAVIGATION.md). AI and
@@ -67,7 +70,11 @@ For a quick tour:
    document, or select text and use the same command beside the selection to target
    only that selection. Confirm the
    response contract and read-only Writing Context in the preflight before running.
-   Use **Manage actions** to edit the four project-owned defaults or add another.
+   Use **Manage actions** to edit the six project-owned defaults or add another.
+   **AI pattern audit** narrowly checks recognised generated-prose formulas without
+   claiming authorship; **Prose pattern audit** checks recurrent habits such as cadence
+   monoculture or somatic repetition regardless of authorship. Both can run locally
+   with configured providers turned off.
 2. Click **Review document** in the Inputs panel for the existing passage-by-passage
    review workflow. Edit the **Review Instructions** and start the review. Inputs
    appear progressively as each passage/provider check completes.
@@ -135,6 +142,10 @@ The implemented architecture slice provides:
 - project-owned, editable action definitions with explicit selection/document scope,
   provider preference, read-only context choices, response contract, option count,
   token ceiling, and optional temperature; compact export/import preserves them;
+- separate **AI Pattern Audit** and **Prose Pattern Audit** actions: the former combines
+  a narrow exact-offset generated-prose heuristic with enabled semantic reviewers and
+  never assigns authorship; the latter reports recurrent style habits as consolidated
+  multi-anchor **Prose pattern** Inputs regardless of authorship;
 - four initial response contracts: readable commentary, precisely anchored findings,
   multiple complete revision options, and one complete alternative. Commentary and
   alternatives avoid unnecessary JSON, while structured output uses local repair and

@@ -106,4 +106,37 @@ describe('attachment mutations', () => {
 
     expect(result.formats[0].target.targets).toEqual([{ type: 'text', nodeId: 'main', start: 10, end: 32 }]);
   });
+
+  it('moves every evidence anchor through one Svelte-owned editor transaction', () => {
+    const repeated = craftInput({
+      target: {
+        mode: 'snapshot',
+        targets: [
+          { type: 'text', nodeId: 'main', start: 30, end: 34 },
+          { type: 'text', nodeId: 'main', start: 10, end: 14 },
+          { type: 'text', nodeId: 'main', start: 20, end: 24 }
+        ]
+      },
+      anchor: { from: 30, to: 34, text: 'third' },
+      evidenceAnchors: [
+        { from: 30, to: 34, text: 'third' },
+        { from: 10, to: 14, text: 'first' },
+        { from: 20, to: 24, text: 'second' }
+      ]
+    });
+    const result = applyAttachmentChanges({
+      inputs: [repeated], formats: [],
+      changes: [{ nodeId: 'main', from: 2, to: 2, insertedLength: 5 }],
+      revision: 2, transactionId: 'tx-move-cluster'
+    });
+
+    expect(result.inputs[0].target.targets).toEqual([
+      { type: 'text', nodeId: 'main', start: 35, end: 39 },
+      { type: 'text', nodeId: 'main', start: 15, end: 19 },
+      { type: 'text', nodeId: 'main', start: 25, end: 29 }
+    ]);
+    expect(result.inputs[0].evidenceAnchors?.map(({ from, to }) => ({ from, to }))).toEqual([
+      { from: 35, to: 39 }, { from: 15, to: 19 }, { from: 25, to: 29 }
+    ]);
+  });
 });

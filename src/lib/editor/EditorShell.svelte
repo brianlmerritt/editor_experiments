@@ -241,7 +241,7 @@
     if (!view || !event.clipboardData) return false;
     const text = event.clipboardData.getData('text/plain');
     const html = event.clipboardData.getData('text/html');
-    if (!isMarkdownClipboard(text, html)) return false;
+    if (!isMarkdownClipboard(text, html, Array.from(event.clipboardData.types))) return false;
     event.preventDefault();
     const transaction = view.state.tr.replaceSelection(markdownPasteSlice(text, schema)).scrollIntoView();
     transaction.setMeta('workspaceOrigin', { kind: 'human', source: 'clipboard' } satisfies EditorTransactionOrigin);
@@ -523,6 +523,8 @@
   :global(.mn-cat-cadence) { --category-color: var(--cat-cadence); }
   :global(.mn-cat-diction) { --category-color: var(--cat-diction); }
   :global(.mn-cat-distance) { --category-color: var(--cat-distance); }
+  :global(.mn-cat-ai_tell) { --category-color: var(--cat-ai-tell); }
+  :global(.mn-cat-prose_pattern) { --category-color: var(--cat-prose-pattern); }
   :global(.mn-suggestion.is-active) { background: color-mix(in srgb, var(--category-color) 19%, transparent); text-decoration-thickness: 2px; }
   :global(.mn-suggestion.is-previewing) { color: transparent; text-decoration: none; background: color-mix(in srgb, var(--category-color) 5%, transparent); }
   :global(.mn-preview-text) { color: var(--ink); background: color-mix(in srgb, var(--category-color) 13%, var(--paper)); border-bottom: 2px solid var(--category-color); white-space: pre-wrap; overflow-wrap: anywhere; box-decoration-break: clone; -webkit-box-decoration-break: clone; }

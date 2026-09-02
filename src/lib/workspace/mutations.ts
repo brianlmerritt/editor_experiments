@@ -39,16 +39,28 @@ export function applyAttachmentChanges(input: AttachmentMutationInput): Attachme
   const inputs = input.inputs.map((record) => {
     const previousTarget = copyTarget(record.target);
     const transformed = transformTargetSet(record.target, input.changes, behaviourFor(record.behaviourId, behaviours, 'craft-input'));
+    const textTargets = transformed.target.targets.filter((target) => target.type === 'text');
     const first = firstTextTarget(transformed.target);
     const anchor = first ? { ...record.anchor, from: first.start, to: first.end } : record.anchor;
+    const previousEvidence = record.evidenceAnchors ?? [record.anchor];
+    const evidenceAnchors = textTargets.map((target, index) => ({
+      ...(previousEvidence[index] ?? record.anchor),
+      from: target.start,
+      to: target.end
+    }));
+    const withAnchors = <T extends Suggestion>(value: T): T => ({
+      ...value,
+      anchor,
+      ...(evidenceAnchors.length > 1 ? { evidenceAnchors } : { evidenceAnchors: undefined })
+    });
 
     if (record.id === input.acceptedInputId) {
-      return { ...record, target: transformed.target, anchor, state: 'accepted' as const };
+      return withAnchors({ ...record, target: transformed.target, state: 'accepted' as const });
     }
 
     const live = record.state === 'pending' || record.state === 'hidden';
     if (!live || transformed.change === 'unchanged' || transformed.change === 'moved') {
-      return { ...record, target: transformed.target, anchor };
+      return withAnchors({ ...record, target: transformed.target });
     }
 
     const behaviour = behaviourFor(record.behaviourId, behaviours, 'craft-input');
@@ -57,10 +69,9 @@ export function applyAttachmentChanges(input: AttachmentMutationInput): Attachme
       ? behaviour.deletedState ?? 'target_removed'
       : behaviour.changedState ?? 'target_changed';
     const eventType = targetRemoved ? 'target_removed' as const : 'target_changed' as const;
-    return {
+    return withAnchors({
       ...record,
       target: transformed.target,
-      anchor,
       state: state as Suggestion['state'],
       events: [
         ...record.events,
@@ -72,7 +83,7 @@ export function applyAttachmentChanges(input: AttachmentMutationInput): Attachme
           previousExcerpt: record.anchor.text
         }
       ]
-    };
+    });
   });
 
   const formats = input.formats.flatMap((format) => {

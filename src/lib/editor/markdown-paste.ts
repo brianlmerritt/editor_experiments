@@ -1,9 +1,13 @@
 import { Fragment, Slice, type Node as ProseMirrorNode, type Schema } from 'prosemirror-model';
 
 const markdownBlock = /^(?: {0,3}#{1,6}\s+| {0,3}(?:[-+*]|\d+[.)])\s+| {0,3}>\s*| {0,3}(?:`{3,}|~{3,})| {0,3}(?:-{3,}|\*{3,}|_{3,})\s*$)/m;
+const richHtmlBlock = /<(?:p|h[1-6]|blockquote|li|table|tr|td|th)\b/iu;
+const googleDocsClipboardType = 'application/x-vnd.google-docs-document-slice-clip+wrapped';
 
-export function isMarkdownClipboard(text: string, html: string): boolean {
+export function isMarkdownClipboard(text: string, html: string, types: readonly string[] = []): boolean {
   if (!text.trim() || html.includes('data-pm-slice')) return false;
+  if (types.includes(googleDocsClipboardType) || html.includes('docs-internal-guid')) return false;
+  if (richHtmlBlock.test(html)) return false;
   return markdownBlock.test(text.replace(/\r\n?/g, '\n'));
 }
 

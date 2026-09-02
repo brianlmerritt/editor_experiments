@@ -56,7 +56,7 @@ describe('Inputs panel craft activity', () => {
       target: textTarget('main', 0, 3, 'one'),
       payload: { comment: 'Comment one' }
     });
-    const categoryVisibility = { pov: false, tense: true, canon: true, cadence: true, diction: true, distance: true } satisfies Record<Category, boolean>;
+    const categoryVisibility = { pov: false, tense: true, canon: true, cadence: true, diction: true, distance: true, ai_tell: true, prose_pattern: true } satisfies Record<Category, boolean>;
     const summary = selectDisplayedInputs([
       input('one'),
       duplicate,

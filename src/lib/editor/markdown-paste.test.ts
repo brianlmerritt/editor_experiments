@@ -13,6 +13,28 @@ describe('Markdown paste', () => {
     expect(isMarkdownClipboard('One paragraph\nAnother paragraph', '')).toBe(false);
   });
 
+  it('recognises Markdown copied as source text', () => {
+    expect(isMarkdownClipboard('# Heading\n\nFirst paragraph.', '')).toBe(true);
+  });
+
+  it('prefers Google Docs HTML paragraphs even when the prose contains a Markdown separator', () => {
+    const text = ['First paragraph.', 'Second paragraph.', '***', 'Third paragraph.'].join('\n');
+    const html = '<b id="docs-internal-guid-test"><p>First paragraph.</p><p>Second paragraph.</p><hr><p>Third paragraph.</p></b>';
+
+    expect(isMarkdownClipboard(text, html, [
+      'text/plain',
+      'text/html',
+      'application/x-vnd.google-docs-document-slice-clip+wrapped'
+    ])).toBe(false);
+  });
+
+  it('prefers structured rich HTML over a coincidental Markdown marker', () => {
+    expect(isMarkdownClipboard(
+      'First paragraph.\n***\nSecond paragraph.',
+      '<p>First paragraph.</p><hr><p>Second paragraph.</p>'
+    )).toBe(false);
+  });
+
   it('groups wrapped Markdown lines and preserves one blank separator paragraph', () => {
     const slice = markdownPasteSlice([
       '# Chapter One',

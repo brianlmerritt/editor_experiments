@@ -193,7 +193,7 @@
   h1 { margin: 8px 0 0; font: 500 27px/1.2 var(--font-reading); }
   .category { --category: var(--cat-diction); display: flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--category) 35%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--category) 8%, var(--paper)); padding: 7px 10px; color: var(--ink-soft); font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .06em; }
   .category i { color: var(--category); font-style: normal; }
-  .cat-pov { --category: var(--cat-pov); } .cat-tense { --category: var(--cat-tense); } .cat-canon { --category: var(--cat-canon); } .cat-cadence { --category: var(--cat-cadence); } .cat-diction { --category: var(--cat-diction); } .cat-distance { --category: var(--cat-distance); }
+  .cat-pov { --category: var(--cat-pov); } .cat-tense { --category: var(--cat-tense); } .cat-canon { --category: var(--cat-canon); } .cat-cadence { --category: var(--cat-cadence); } .cat-diction { --category: var(--cat-diction); } .cat-distance { --category: var(--cat-distance); } .cat-ai_tell { --category: var(--cat-ai-tell); } .cat-prose_pattern { --category: var(--cat-prose-pattern); }
   .brief { margin-top: 24px; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--paper) 60%, transparent); }
   .brief header { display: flex; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
   .brief header span { font: 700 9px/1 var(--font-ui); text-transform: uppercase; letter-spacing: .09em; }

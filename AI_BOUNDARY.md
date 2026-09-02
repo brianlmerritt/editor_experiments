@@ -153,6 +153,17 @@ One immutable invocation prepared from live Svelte state. A request captures the
 writer's instruction, action version, target evidence, context candidates, source
 selection, generation settings, and output contract.
 
+The captured target has two distinct provider views when inline emphasis exists:
+
+- canonical plain text remains the sole basis for offsets, `source_text`, target
+  validation, and adoption;
+- a derived formatting reference presents italic text as `*text*` so a reviewer can
+  understand intentional emphasis without moving any canonical character offset.
+
+Both views are derived from the same Svelte-owned rich-document snapshot. A
+formatting-only edit while a request is running invalidates that captured request in
+the same way as a text edit. The provider never owns or reconstructs formatting.
+
 ### Activity and run
 
 An **activity** is the writer-visible operation, such as reviewing a document. It may
@@ -333,6 +344,24 @@ Buttons such as Heighten or Vary cadence may eventually be pinned actions, but t
 must invoke this coordinated contract rather than constructing isolated prompts.
 Free-form writer instructions use the same request envelope and context inspection.
 
+## AI and prose pattern audits
+
+Neither pattern audit is an authorship classifier. **AI Pattern Audit** narrowly asks
+whether recognised generated-prose formulas or statistical habits weaken the target.
+It excludes general plot, pacing, continuity, character and scene judgement. **Prose
+Pattern Audit** asks which recurrent habits limit cadence, lexical variety, emotional
+precision or character distinction, regardless of authorship. General structural
+effectiveness remains **Document Review** work.
+
+Both actions have independent local and configured-provider paths behind the same
+interaction boundary. Local sources emit conservative exact-span findings; providers
+evaluate only the semantic families named by that action. A repeated concern becomes
+one Input with multiple exact evidence anchors, not one card per occurrence. Svelte
+alone adopts proposals and owns their targets, lifecycle and writer-approved changes.
+Confidence is confidence in an editorial finding, never an authorship score. See
+[AI_PATTERN_AUDIT.md](./AI_PATTERN_AUDIT.md) and
+[PROSE_PATTERN_AUDIT.md](./PROSE_PATTERN_AUDIT.md).
+
 ## Existing-work assimilation
 
 Importing or opening an existing work is a first-class AI workflow. A writer may ask
@@ -490,9 +519,16 @@ Related Inputs should be projected as one **editorial concern** when conservativ
 deterministic evidence agrees that they concern the same work:
 
 - the same document and fork;
-- the same or substantially overlapping target;
-- the same category;
+- the same or substantially overlapping exact target;
+- the same substantive issue, even when one source classifies it as an AI pattern and a
+  more specific source classifies it as distance, diction, cadence, or another craft
+  category;
 - a compatible action, intent, and response kind.
+
+Current conservative coalescing keeps the more specific category over generic AI
+Tell and keeps an exactly anchored revision over a diagnosis-only duplicate. It never
+combines replacement alternatives whose primary source spans differ. Suppressed
+duplicates retain their identity, state, provenance, and ledger event.
 
 The concern is a management projection, not permission to discard underlying Inputs.
 Expanding it exposes every provider response, revision alternative, provenance record,
@@ -615,8 +651,9 @@ The first boundary slice is now represented in code:
   interrupted failure while preserving completed Inputs and offering retry or
   complete-without-this-passage actions.
 - every project now owns an editable, versioned action collection. The initial
-  actions are **Discuss passage**, **Review passage**, **Suggest revisions**, and
-  **Alternative draft**; legacy projects acquire those defaults on activation and
+  actions are **Discuss passage**, **Review passage**, **Suggest revisions**,
+  **Alternative draft**, **AI Pattern Audit**, and **Prose Pattern Audit**; legacy projects acquire new defaults
+  once through a versioned migration on activation, and
   compact project transfer preserves subsequent edits;
 - an action can target either the writer's exact selection or one exact canonical
   document range. The target is the only mutable subject of the request. The Spine,

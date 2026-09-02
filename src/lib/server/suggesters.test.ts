@@ -46,6 +46,74 @@ describe('selection suggestions', () => {
     expect(result.proposals[0].variants.every((variant) => variant !== 'noticed')).toBe(true);
   });
 
+  it('runs the AI tell audit locally with exact anchored evidence and no provider', async () => {
+    const auditRequest = request('It is worth noting that the silence served as a testament to their resolve.', {
+      id: 'ai-tell-audit', name: 'AI tell audit', version: 1, instruction: 'Audit formulaic writing.'
+    });
+    auditRequest.sourceStates['local-craft'] = 'visible';
+    auditRequest.sourceStates['fake-sentinel'] = 'off';
+    auditRequest.responseContract = 'annotated_findings';
+    auditRequest.inputCategory = 'ai_tell';
+
+    const result = await generateSuggestions(auditRequest);
+
+    expect(result.errors).toEqual([]);
+    expect(result.usage).toEqual([]);
+    expect(result.proposals).toHaveLength(2);
+    expect(result.proposals.every((proposal) => proposal.source === 'local-craft' && proposal.category === 'ai_tell')).toBe(true);
+    expect(result.proposals.map((proposal) => proposal.sourceText)).toEqual([
+      'It is worth noting that',
+      'served as a testament to'
+    ]);
+  });
+
+  it('runs the prose pattern audit locally as separate multi-anchor diagnostic Inputs', async () => {
+    const text = Array.from({ length: 30 }, (_, index) => index % 2 === 0
+      ? `Still here ${index}.`
+      : `Mara watched the rain cross the station glass and counted each breath ${index} before answering the porter at the locked door.`).join('\n');
+    const auditRequest = request(text, {
+      id: 'prose-pattern-audit', name: 'Prose pattern audit', version: 1, instruction: 'Audit recurrent prose habits.'
+    });
+    auditRequest.sourceStates['local-craft'] = 'visible';
+    auditRequest.sourceStates['fake-sentinel'] = 'off';
+    auditRequest.responseContract = 'annotated_findings';
+    auditRequest.inputCategory = 'prose_pattern';
+
+    const result = await generateSuggestions(auditRequest);
+
+    expect(result.errors).toEqual([]);
+    expect(result.proposals.map((proposal) => proposal.category)).toEqual(['prose_pattern', 'prose_pattern']);
+    expect(result.proposals.map((proposal) => proposal.comment.split(' — ')[0]))
+      .toEqual(['Cadence monoculture', 'Somatic repetition']);
+    expect(result.proposals.every((proposal) => (proposal.evidenceAnchors?.length ?? 0) > 1)).toBe(true);
+  });
+
+  it('returns one recurring-pattern proposal with every exact evidence anchor', async () => {
+    const text = [
+      'He did not answer while the station clock ticked above the empty platform and rain crossed the glass.',
+      'She did not turn when the porter carried the final case through the waiting-room door and locked it.',
+      'They did not speak after the last train departed and the signal changed from amber to red.'
+    ].join(' ');
+    const auditRequest = request(text, {
+      id: 'ai-tell-audit', name: 'AI tell audit', version: 1, instruction: 'Audit formulaic writing.'
+    });
+    auditRequest.sourceStates['local-craft'] = 'visible';
+    auditRequest.sourceStates['fake-sentinel'] = 'off';
+    auditRequest.responseContract = 'annotated_findings';
+    auditRequest.inputCategory = 'ai_tell';
+
+    const result = await generateSuggestions(auditRequest);
+    const repeated = result.proposals.find((proposal) => proposal.comment.startsWith('Negative-assertion repetition —'))!;
+
+    expect(repeated.evidenceAnchors).toHaveLength(3);
+    expect(repeated.evidenceAnchors?.map((anchor) => text.slice(anchor.from, anchor.to)))
+      .toEqual([
+        'They did not speak after the last train departed and the signal changed from amber to red.',
+        'He did not answer while the station clock ticked above the empty platform and rain crossed the glass.',
+        'She did not turn when the porter carried the final case through the waiting-room door and locked it.'
+      ]);
+  });
+
   it('does not pretend cadence can be changed in a one-word selection', async () => {
     const result = await generateSuggestions(request('noticed', {
       id: 'cadence', name: 'Vary cadence', version: 1, instruction: 'Vary it.'
@@ -113,6 +181,28 @@ describe('selection suggestions', () => {
     expect(result.proposals[0].variants).toHaveLength(2);
     expect(result.proposals[0].comment).not.toContain('no safe replay alternative');
     expect(result.usage).toEqual([expect.objectContaining({ source: 'openrouter', costUsd: 0.42, costBasis: 'provider_reported' })]);
+  });
+
+  it('sends italics as a separate Markdown reference without changing exact anchors', async () => {
+    configureSuggestionProvider({ source: 'openrouter', key: 'test-key', model: 'provider/model' }, { persist: false });
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"suggestions":[]}' }, finish_reason: 'stop' }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const providerRequest = request('The Shard said, We remember.', {
+      id: 'sentinel', name: 'Craft sentinel', version: 1, instruction: 'Review it.'
+    });
+    providerRequest.formattedText = 'The Shard said, *We remember.*';
+    providerRequest.sourceStates['fake-sentinel'] = 'off';
+    providerRequest.sourceStates.openrouter = 'visible';
+
+    await generateSuggestions(providerRequest);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as { messages: Array<{ content: string }> };
+    const prompt = body.messages[0].content;
+    expect(prompt).toContain('FORMATTING REFERENCE');
+    expect(prompt).toContain('The Shard said, *We remember.*');
+    expect(prompt).toContain('CANONICAL PASSAGE\nUse this unmarked text for every offset and source_text value.\nThe Shard said, We remember.');
   });
 
   it('retries once with a corrective request after unrecoverable provider output', async () => {
@@ -432,6 +522,31 @@ No substantive issues detected.` } }]
     const [result] = parseProviderActionOutput('```json\n{"options":[{"text":"Mara kept her eyes on the clock.","rationale":"Closer"},{"text":"The clock held Mara still.","rationale":"More figurative"},],}\n```', actionRequest);
     expect(result.variants).toEqual(['Mara kept her eyes on the clock.', 'The clock held Mara still.']);
     expect(result.comment).toContain('Closer');
+  });
+
+  it('parses exact related anchors for one repeated-pattern finding', () => {
+    const text = 'He did not answer. She did not turn. They did not speak.';
+    const actionRequest = {
+      ...request(text, { id: 'ai-tell-audit', name: 'AI Tell', version: 1, instruction: 'Audit it.' }),
+      responseContract: 'annotated_findings' as const,
+      inputCategory: 'ai_tell' as const
+    };
+    const thirdFrom = text.indexOf('They');
+    const [finding] = parseProviderActionOutput(JSON.stringify({ findings: [{
+      from: thirdFrom,
+      to: text.length,
+      source_text: 'They did not speak.',
+      related_anchors: [
+        { from: 0, to: 18, source_text: 'He did not answer.' },
+        { from: 19, to: 36, source_text: 'She did not turn.' }
+      ],
+      comment: 'This is the third nearby negative assertion.', correction: null, confidence: 0.8
+    }] }), actionRequest);
+
+    expect(finding.evidenceAnchors).toEqual([
+      { from: 0, to: 18, sourceText: 'He did not answer.' },
+      { from: 19, to: 36, sourceText: 'She did not turn.' }
+    ]);
   });
 
   it('uses the captured selection as the authoritative target for revision options', async () => {

@@ -24,6 +24,7 @@ export interface AICapturedTarget {
   sourceRevision: number;
   target: TargetSet;
   exactText: string;
+  formattedText?: string;
 }
 
 export interface AIContextItem {
@@ -138,6 +139,7 @@ function sameTarget(left: AICapturedTarget, right: AICapturedTarget): boolean {
   return left.documentId === right.documentId
     && left.sourceRevision === right.sourceRevision
     && left.exactText === right.exactText
+    && left.formattedText === right.formattedText
     && JSON.stringify(left.target) === JSON.stringify(right.target);
 }
 

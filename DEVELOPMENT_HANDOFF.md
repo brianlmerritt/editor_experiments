@@ -97,6 +97,9 @@ explicitly. The Codex profile contains no secret; install the Codex CLI and comp
 its local ChatGPT sign-in separately on that computer.
 Project-owned action definitions do travel in `.mnote.zip`; credentials and device
 participation state do not.
+This includes the editable **AI Pattern Audit** and **Prose Pattern Audit** actions and
+their migration version. Their local detectors require no credential; configured
+semantic reviewers still require their normal destination-computer provider setup.
 
 ## Source-computer checklist
 

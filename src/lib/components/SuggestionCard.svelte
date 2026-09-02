@@ -51,6 +51,7 @@
   let meta = $derived(categoryMeta[suggestion.category]);
   let displayLabel = $derived(label?.trim() || meta.label);
   let unanchored = $derived(suggestion.anchorStatus === 'unanchored');
+  let anchorCount = $derived(suggestion.target.targets.filter((target) => target.type === 'text').length);
 
   function pointerDown(event: PointerEvent): void {
     if ((event.target as HTMLElement).closest('button')) return;
@@ -100,7 +101,7 @@
 >
   <header>
     <span class="category"><span class="icon">{meta.icon}</span>{displayLabel}</span>
-    <span class="confidence">{Math.round(suggestion.confidence * 100)}%</span>
+    <span class="confidence">{#if anchorCount > 1}{anchorCount} anchors · {/if}{Math.round(suggestion.confidence * 100)}%</span>
   </header>
   <p class="observation">{suggestion.payload.comment}</p>
   {#if unanchored}
@@ -154,7 +155,7 @@
   .card.active { box-shadow: 0 12px 32px rgb(32 27 20 / .14); border-color: color-mix(in srgb, var(--category) 48%, var(--line)); }
   .card:focus-visible { outline: 2px solid color-mix(in srgb, var(--category) 70%, var(--ink)); outline-offset: 2px; }
   .card.dragging { transition: none; cursor: grabbing; }
-  .cat-pov { --category: var(--cat-pov); } .cat-tense { --category: var(--cat-tense); } .cat-canon { --category: var(--cat-canon); } .cat-cadence { --category: var(--cat-cadence); } .cat-diction { --category: var(--cat-diction); } .cat-distance { --category: var(--cat-distance); }
+  .cat-pov { --category: var(--cat-pov); } .cat-tense { --category: var(--cat-tense); } .cat-canon { --category: var(--cat-canon); } .cat-cadence { --category: var(--cat-cadence); } .cat-diction { --category: var(--cat-diction); } .cat-distance { --category: var(--cat-distance); } .cat-ai_tell { --category: var(--cat-ai-tell); } .cat-prose_pattern { --category: var(--cat-prose-pattern); }
   header, footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .category { display: flex; align-items: center; gap: 7px; color: var(--ink); font: 700 11px/1.2 var(--font-ui); letter-spacing: .035em; text-transform: uppercase; }
   .icon { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--category) 16%, transparent); color: color-mix(in srgb, var(--category) 82%, var(--ink)); font-size: 10px; }

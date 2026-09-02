@@ -8,7 +8,7 @@ import { FacadeAIInteractionService } from './service';
 const brief: WritingBrief = { version: 1, form: 'fiction', pov: 'third', tense: 'past', distance: 'close', canon: '' };
 
 function request(): AIInteractionRequest {
-  const target = { documentId: 'main', sourceRevision: 7, target: textTarget('main', 4, 11, 'noticed'), exactText: 'noticed' };
+  const target = { documentId: 'main', sourceRevision: 7, target: textTarget('main', 4, 11, 'noticed'), exactText: 'noticed', formattedText: '*noticed*' };
   return {
     activityId: 'activity-1', runId: 'run-1', sessionId: 'session', projectId: 'project', documentId: 'main',
     intent: 'revise',
@@ -50,6 +50,7 @@ describe('Facade AI interaction service', () => {
 
     expect(requestInputs).toHaveBeenCalledWith(expect.objectContaining({
       text: 'noticed',
+      formattedText: '*noticed*',
       from: 4,
       to: 11,
       prompt: { id: 'heighten', name: 'Heighten', version: 2, instruction: 'Use a stronger verb.' },

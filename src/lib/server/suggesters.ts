@@ -3,6 +3,9 @@ import type { Category, GenerationRequest, InputAnchorStatus, InputError, InputP
 import { isExactTextSpan, makeId } from '$lib/domain';
 import { providerUsage } from '$lib/server/provider-usage';
 import { codexAppServer, CodexAppServerError } from '$lib/server/codex-app-server';
+import { aiTellAuditActionId, prosePatternAuditActionId } from '$lib/ai/actions';
+import { detectAITells } from '$lib/server/ai-tell-detector';
+import { detectProsePatterns } from '$lib/server/prose-pattern-detector';
 import { deleteStoredProviderProfile, maskCredential, readStoredProviderProfiles, upsertStoredProviderProfile, type StoredProviderProfile } from '$lib/server/provider-settings';
 import { jsonrepair } from 'jsonrepair';
 
@@ -15,6 +18,7 @@ interface DraftSuggestion {
   replacement?: string;
   variants?: string[];
   sourceText?: string;
+  evidenceAnchors?: Array<{ from: number; to: number; sourceText?: string }>;
   confidence: number;
   anchorStatus?: InputAnchorStatus;
 }
@@ -202,6 +206,16 @@ function proposalFromDraft(draft: DraftSuggestion, request: GenerationRequest, s
   const effective = [...new Set(candidates)].filter((text) => text !== anchorText);
   const variants = effective;
   const type = draft.type === 'replacement' && !variants.length ? 'annotation' : draft.type;
+  const evidenceAnchors = [
+    { from: draft.from, to: draft.to, sourceText: anchorText },
+    ...(draft.evidenceAnchors ?? [])
+  ].filter((anchor, index, all) => anchor.from >= request.from && anchor.to <= request.to && anchor.to > anchor.from
+    && all.findIndex((candidate) => candidate.from === anchor.from && candidate.to === anchor.to) === index)
+    .map((anchor) => ({
+      from: anchor.from - request.from,
+      to: anchor.to - request.from,
+      text: request.text.slice(anchor.from - request.from, anchor.to - request.from)
+    }));
   return {
     proposalId,
     source,
@@ -210,6 +224,7 @@ function proposalFromDraft(draft: DraftSuggestion, request: GenerationRequest, s
     from: draft.from - request.from,
     to: draft.to - request.from,
     sourceText: anchorText,
+    ...(evidenceAnchors.length > 1 ? { evidenceAnchors } : {}),
     anchorStatus: draft.anchorStatus ?? 'exact',
     type,
     category: draft.category,
@@ -280,6 +295,36 @@ function selectionVariants(text: string, promptId: string): string[] {
 }
 
 function localChecks(request: GenerationRequest): DraftSuggestion[] {
+  if (request.prompt.id === aiTellAuditActionId) {
+    return detectAITells(request.text, 50).map((finding) => ({
+      from: request.from + finding.from,
+      to: request.from + finding.to,
+      evidenceAnchors: finding.anchors?.map((anchor) => ({
+        from: request.from + anchor.from,
+        to: request.from + anchor.to,
+        sourceText: request.text.slice(anchor.from, anchor.to)
+      })),
+      type: 'annotation',
+      category: 'ai_tell',
+      comment: finding.comment,
+      confidence: finding.confidence
+    }));
+  }
+  if (request.prompt.id === prosePatternAuditActionId) {
+    return detectProsePatterns(request.text, 50).map((finding) => ({
+      from: request.from + finding.from,
+      to: request.from + finding.to,
+      evidenceAnchors: finding.anchors.map((anchor) => ({
+        from: request.from + anchor.from,
+        to: request.from + anchor.to,
+        sourceText: request.text.slice(anchor.from, anchor.to)
+      })),
+      type: 'annotation',
+      category: 'prose_pattern',
+      comment: finding.comment,
+      confidence: finding.confidence
+    }));
+  }
   const findings: DraftSuggestion[] = [];
   const offset = request.from;
   const filterPattern = /\b(saw|felt|noticed|realized|seemed|heard|thought)\b/gi;
@@ -405,6 +450,9 @@ function assemblePrompt(request: GenerationRequest): string {
     .map((bucket) => `### ${bucket.title} (${bucket.scope}, v${bucket.revision}${bucket.role ? `, ${bucket.role}` : ''})\n${bucket.content}`)
     .join('\n\n');
   const contract = request.responseContract;
+  const formattedReference = request.formattedText && request.formattedText !== request.text
+    ? `\n\nFORMATTING REFERENCE\nThis is the same passage with Markdown-style emphasis: *text* means the writer italicised that text. The marker characters are not part of canonical PASSAGE. Use this reference to understand emphasis, but calculate offsets and copy source_text only from canonical PASSAGE without the markers.\n${request.formattedText}`
+    : '';
   const protocol = contract === 'commentary'
     ? 'Return a focused editorial response as readable Markdown. Do not return JSON and do not rewrite the passage unless the instructions explicitly request discussion of possible wording.'
     : contract === 'alternative_draft'
@@ -412,9 +460,9 @@ function assemblePrompt(request: GenerationRequest): string {
       : contract === 'revision_options'
         ? `Return JSON only: {"options":[{"text":"complete replacement for PASSAGE","rationale":"brief meaningful trade-off"}]}. Return ${Math.max(1, Math.min(5, request.optionCount ?? 3))} distinct complete alternatives. Each text must replace the entire PASSAGE and must not equal it.`
         : contract === 'annotated_findings'
-          ? `Return JSON only: {"findings":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","comment":"specific editorial finding","correction":"optional replacement","confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, sentence, or paragraph directly discussed. Never begin or end inside a word or include surrounding whitespace. Return no finding rather than inventing one.`
-          : 'Return JSON only: {"suggestions":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE and source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, or sentence that the comment directly discusses. Never begin or end source_text inside a word and never include leading or trailing whitespace. For a passage-wide annotation, use from 0, to the full passage length, and copy the full passage into source_text. Return at most one annotation for the same substantive issue at the same location. For a replacement, provide two or three distinct alternatives in variants; none may equal source_text. If there is no useful change, return no suggestion instead of guessing an anchor.';
-  return `You are a precise writing collaborator. ${protocol}\n\nWRITING CONTEXT\n${context || canon || 'No additional context supplied.'}\n\nACTION INSTRUCTIONS\n${request.prompt.instruction}\n\nPASSAGE\n${request.text}`;
+        ? `Return JSON only: {"findings":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","related_anchors":[{"from":10,"to":14,"source_text":"other exact evidence"}],"comment":"specific editorial finding","correction":"optional replacement","confidence":0.8}]}. Offsets are zero-based within PASSAGE and every source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, sentence, or paragraph directly discussed. When one finding depends on a repeated pattern, return one finding whose primary from/to identifies the occurrence that triggers the finding and whose related_anchors identify its other material occurrences; do not create duplicate findings for the occurrences. For a very frequent document-wide pattern, provide representative exact anchors distributed across the passage and state the total observed recurrence in the comment. Never begin or end inside a word or include surrounding whitespace. Return no finding rather than inventing one.`
+          : 'Return JSON only: {"suggestions":[{"from":0,"to":4,"source_text":"exact text copied from PASSAGE","related_anchors":[{"from":10,"to":14,"source_text":"other exact evidence"}],"type":"annotation|replacement|insertion","category":"pov|tense|canon|cadence|diction|distance","comment":"...","replacement":"...","variants":["..."],"confidence":0.8}]}. Offsets are zero-based within PASSAGE and every source_text must exactly equal PASSAGE.slice(from,to). Anchor the smallest complete word, phrase, or sentence that the comment directly discusses. When one suggestion depends on a repeated pattern, return one suggestion whose related_anchors identify the other exact occurrences; do not create duplicate cards for each occurrence. Never begin or end source_text inside a word and never include leading or trailing whitespace. For a passage-wide annotation, use from 0, to the full passage length, and copy the full passage into source_text. Return at most one annotation for the same substantive issue at the same location. For a replacement, provide two or three distinct alternatives in variants; none may equal source_text. If there is no useful change, return no suggestion instead of guessing an anchor.';
+  return `You are a precise writing collaborator. ${protocol}\n\nWRITING CONTEXT\n${context || canon || 'No additional context supplied.'}\n\nACTION INSTRUCTIONS\n${request.prompt.instruction}${formattedReference}\n\nCANONICAL PASSAGE\nUse this unmarked text for every offset and source_text value.\n${request.text}`;
 }
 
 function balancedJsonCandidates(content: string): string[] {
@@ -513,7 +561,7 @@ function parseProviderSuggestionsDetailed(content: string): {
     const category = value.category;
     if (!Number.isInteger(from) || !Number.isInteger(to)) return [];
     if (type !== 'annotation' && type !== 'replacement' && type !== 'insertion') return [];
-    if (category !== 'pov' && category !== 'tense' && category !== 'canon' && category !== 'cadence' && category !== 'diction' && category !== 'distance') return [];
+    if (category !== 'pov' && category !== 'tense' && category !== 'canon' && category !== 'cadence' && category !== 'diction' && category !== 'distance' && category !== 'ai_tell' && category !== 'prose_pattern') return [];
     const variants = Array.isArray(value.variants)
       ? [...new Set(value.variants.filter((variant): variant is string => typeof variant === 'string'))]
       : undefined;
@@ -521,6 +569,12 @@ function parseProviderSuggestionsDetailed(content: string): {
     const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
       ? Math.max(0, Math.min(1, value.confidence))
       : 0.7;
+    const evidenceAnchors = Array.isArray(value.related_anchors)
+      ? value.related_anchors.flatMap((anchor) => record(anchor)
+        && Number.isInteger(anchor.from) && Number.isInteger(anchor.to) && typeof anchor.source_text === 'string'
+        ? [{ from: Number(anchor.from), to: Number(anchor.to), sourceText: anchor.source_text }]
+        : [])
+      : undefined;
     return [{
       from: from as number,
       to: to as number,
@@ -530,6 +584,7 @@ function parseProviderSuggestionsDetailed(content: string): {
       replacement,
       variants,
       sourceText: typeof value.source_text === 'string' ? value.source_text : undefined,
+      evidenceAnchors,
       confidence
     }];
   });
@@ -602,11 +657,17 @@ function parseActionOutputDetailed(content: string, request: GenerationRequest):
     const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
       ? Math.max(0, Math.min(1, value.confidence))
       : 0.7;
+    const evidenceAnchors = Array.isArray(value.related_anchors)
+      ? value.related_anchors.flatMap((anchor) => record(anchor)
+        && Number.isInteger(anchor.from) && Number.isInteger(anchor.to) && typeof anchor.source_text === 'string'
+        ? [{ from: Number(anchor.from), to: Number(anchor.to), sourceText: anchor.source_text }]
+        : [])
+      : undefined;
     return [{
       from: Number(value.from), to: Number(value.to), sourceText: value.source_text,
       type: correction !== undefined ? 'replacement' as const : 'annotation' as const,
       category, comment: value.comment.trim(), replacement: correction,
-      variants: correction !== undefined ? [correction] : undefined, confidence
+      variants: correction !== undefined ? [correction] : undefined, evidenceAnchors, confidence
     }];
   });
   if (rawFindings.length && !findings.length) throw new ProviderOutputError('Provider JSON contained findings, but none matched the required finding schema.');
@@ -662,8 +723,16 @@ function attachProviderTargets(
       };
     }
     const range = resolveProviderRange(item, request.text);
+    const evidenceAnchors = item.evidenceAnchors?.flatMap((anchor) => {
+      const resolved = resolveProviderRange({ ...anchor, type: 'annotation' }, request.text);
+      return resolved ? [{
+        from: request.from + resolved.from,
+        to: request.from + resolved.to,
+        sourceText: request.text.slice(resolved.from, resolved.to)
+      }] : [];
+    });
     return range
-      ? { ...item, from: request.from + range.from, to: request.from + range.to, anchorStatus: 'exact' }
+      ? { ...item, from: request.from + range.from, to: request.from + range.to, evidenceAnchors, anchorStatus: 'exact' }
       : {
           ...item,
           from: request.from,
@@ -816,10 +885,18 @@ function structuredOutputSchema(request: GenerationRequest): Record<string, unkn
       findings: {
         type: 'array', items: {
           type: 'object', additionalProperties: false,
-          required: ['from', 'to', 'source_text', 'comment', 'correction', 'confidence'],
+          required: ['from', 'to', 'source_text', 'related_anchors', 'comment', 'correction', 'confidence'],
           properties: {
             from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 },
             source_text: { type: 'string' }, comment: { type: 'string' },
+            related_anchors: {
+              type: 'array', items: {
+                type: 'object', additionalProperties: false, required: ['from', 'to', 'source_text'],
+                properties: {
+                  from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 }, source_text: { type: 'string' }
+                }
+              }
+            },
             correction: { type: ['string', 'null'] }, confidence: { type: 'number', minimum: 0, maximum: 1 }
           }
         }
@@ -832,12 +909,20 @@ function structuredOutputSchema(request: GenerationRequest): Record<string, unkn
       suggestions: {
         type: 'array', items: {
           type: 'object', additionalProperties: false,
-          required: ['from', 'to', 'source_text', 'type', 'category', 'comment', 'replacement', 'variants', 'confidence'],
+          required: ['from', 'to', 'source_text', 'related_anchors', 'type', 'category', 'comment', 'replacement', 'variants', 'confidence'],
           properties: {
             from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 },
             source_text: { type: 'string' },
+            related_anchors: {
+              type: 'array', items: {
+                type: 'object', additionalProperties: false, required: ['from', 'to', 'source_text'],
+                properties: {
+                  from: { type: 'integer', minimum: 0 }, to: { type: 'integer', minimum: 0 }, source_text: { type: 'string' }
+                }
+              }
+            },
             type: { type: 'string', enum: ['annotation', 'replacement', 'insertion'] },
-            category: { type: 'string', enum: ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance'] },
+            category: { type: 'string', enum: ['pov', 'tense', 'canon', 'cadence', 'diction', 'distance', 'ai_tell', 'prose_pattern'] },
             comment: { type: 'string' }, replacement: { type: ['string', 'null'] },
             variants: { type: 'array', items: { type: 'string' } },
             confidence: { type: 'number', minimum: 0, maximum: 1 }

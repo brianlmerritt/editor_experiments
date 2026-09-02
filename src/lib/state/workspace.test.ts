@@ -5,7 +5,9 @@ import type { CommitReceipt, WorkspaceFacade } from '$lib/workspace/facade';
 import type { WorkspaceDocument, WorkspaceProject } from '$lib/workspace/model';
 import type { EditorDocumentSnapshot } from '$lib/workspace/transactions';
 import { richDocumentFromProseMirror, richDocumentText } from '$lib/workspace/rich-document';
+import { completeDocumentMappedRange, documentTextBetween } from '$lib/workspace/document';
 import type { AIInteractionRequest, AIInteractionService } from '$lib/ai/contracts';
+import { cloneDefaultAIActions, prosePatternAuditActionId } from '$lib/ai/actions';
 import type { SettingsState } from '$lib/state/settings.svelte';
 import { WorkspaceState } from './workspace.svelte';
 
@@ -230,6 +232,28 @@ describe('semantic workspace history', () => {
       anchor: { from: 1, to: 9, text: selectedText },
       order: 1
     });
+  });
+
+  it('retires live AI tell Inputs produced before whole-document action mapping was fixed', () => {
+    const run: CraftRun = {
+      id: 'run-old-audit', scope: 'document', documentId: 'main', sourceRevision: 1,
+      target: textTarget('main', 0, 40, 'First paragraph.\nSecond paragraph.'), originalText: 'First paragraph.\nSecond paragraph.',
+      promptId: 'ai-tell-audit', promptVersion: 1, sourceStates: { 'local-craft': 'visible' },
+      state: 'completed', proposalIds: ['input-old-audit'], errors: [], createdAt: '2026-08-18T00:00:00Z'
+    };
+    const oldAudit: Suggestion = {
+      ...input(), id: 'input-old-audit', category: 'ai_tell', source: 'local-craft', sourceKind: 'local',
+      provenance: { ...input().provenance, runId: run.id, actionId: 'ai-tell-audit', actionVersion: 1 }
+    };
+    const storedDocument: WorkspaceDocument = {
+      ...document('First paragraph.\n\nSecond paragraph.'),
+      extensions: { margin_note: { authorityVersion: 2, inputs: [oldAudit], runs: [run] } } as unknown as WorkspaceDocument['extensions']
+    };
+    const workspace = new WorkspaceState(fakeFacade());
+    workspace.branchId = 'main';
+
+    expect(workspace['loadDocumentDomain'](storedDocument)).toMatchObject({ retiredMisalignedActionInputs: 1 });
+    expect(workspace.inputs[0].state).toBe('stale');
   });
 
   it('reattaches an unanchored Input to an explicit current selection through undoable state', async () => {
@@ -812,6 +836,203 @@ describe('semantic workspace history', () => {
       ['codex-chatgpt']
     ]);
     expect(execute.mock.calls.every(([request]) => request.target.exactText === 'One\nTwo')).toBe(true);
+  });
+
+  it('can run the explicit AI tell audit using only the local detector', async () => {
+    const phrase = 'It is worth noting that';
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => {
+      const from = request.target.exactText.indexOf(phrase);
+      const relatedFrom = request.target.exactText.indexOf('quiet.');
+      return {
+        proposals: [{
+          kind: 'annotated_input',
+          payload: {
+            ...proposal(), proposalId: 'ai-tell-local', source: 'local-craft', sourceNumber: 1, sourceKind: 'local',
+            from, to: from + phrase.length, sourceText: phrase, type: 'annotation', category: 'ai_tell', variants: [],
+            evidenceAnchors: [
+              { from, to: from + phrase.length, text: phrase },
+              { from: relatedFrom, to: relatedFrom + 'quiet.'.length, text: 'quiet.' }
+            ],
+            comment: 'This prefatory phrase delays the point.'
+          }
+        }],
+        diagnostics: [],
+        context: request.context
+      };
+    });
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document(`A plain opening.\n\n${phrase} the room was quiet.`)];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off', 'codex-chatgpt': 'off' };
+    const snapshot: EditorDocumentSnapshot = {
+      doc: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'A plain opening.' }] },
+        { type: 'paragraph', content: [
+          { type: 'text', text: `${phrase} the room was ` },
+          { type: 'text', text: 'quiet.', marks: [{ type: 'em' }] }
+        ] }
+      ] },
+      text: `A plain opening.\n\n${phrase} the room was quiet.`,
+      selection: { from: 1, to: 1 }
+    };
+    workspace.setEditorReady(snapshot);
+    const action = cloneDefaultAIActions().find((candidate) => candidate.id === 'ai-tell-audit')!;
+
+    const adopted = await workspace.runAIAction(action, 'document', null);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0]).toMatchObject({
+      action: { id: 'ai-tell-audit', inputCategory: 'ai_tell' },
+      sources: [
+        { sourceId: 'local-craft', participation: 'visible' },
+        { sourceId: 'fake-sentinel', participation: 'off' },
+        { sourceId: 'codex-chatgpt', participation: 'off' }
+      ]
+    });
+    expect(execute.mock.calls[0][0].target.exactText).toBe(`A plain opening.\n${phrase} the room was quiet.`);
+    expect(execute.mock.calls[0][0].target.formattedText).toBe(`A plain opening.\n${phrase} the room was *quiet.*`);
+    const mapped = completeDocumentMappedRange(snapshot);
+    const providerOffset = mapped.text.indexOf(phrase);
+    expect(adopted[0].anchor).toEqual({
+      from: mapped.textMap.starts[providerOffset],
+      to: mapped.textMap.ends[providerOffset + phrase.length - 1],
+      text: phrase
+    });
+    expect(documentTextBetween(snapshot, adopted[0].anchor.from, adopted[0].anchor.to)).toBe(phrase);
+    expect(adopted[0].target.targets).toHaveLength(2);
+    expect(adopted[0].evidenceAnchors?.map((anchor) => documentTextBetween(snapshot, anchor.from, anchor.to)))
+      .toEqual([phrase, 'quiet.']);
+  });
+
+  it('can run the prose pattern audit using only the local detector', async () => {
+    const text = Array.from({ length: 24 }, (_, index) => index % 2 === 0 ? 'A short beat.' : 'This longer paragraph deliberately changes the rhythm of the test document.').join('\n\n');
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({
+      proposals: [],
+      diagnostics: [],
+      context: request.context
+    }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document(text)];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off', 'codex-chatgpt': 'off' };
+    workspace.setEditorReady({
+      doc: { type: 'doc', content: text.split('\n\n').map((paragraph) => ({ type: 'paragraph', content: [{ type: 'text', text: paragraph }] })) },
+      text,
+      selection: { from: 1, to: 1 }
+    });
+    const action = cloneDefaultAIActions().find((candidate) => candidate.id === prosePatternAuditActionId)!;
+
+    await workspace.runAIAction(action, 'document', null);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0]).toMatchObject({
+      action: { id: prosePatternAuditActionId, inputCategory: 'prose_pattern' },
+      sources: [
+        { sourceId: 'local-craft', participation: 'visible' },
+        { sourceId: 'fake-sentinel', participation: 'off' },
+        { sourceId: 'codex-chatgpt', participation: 'off' }
+      ]
+    });
+  });
+
+  it('keeps the local prose detector when the audit has a preferred AI provider', async () => {
+    const text = 'A sufficiently long document target '.repeat(50).trim();
+    const execute = vi.fn<AIInteractionService['execute']>(async (request) => ({ proposals: [], diagnostics: [], context: request.context }));
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document(text)];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off', 'codex-chatgpt': 'visible' };
+    workspace.setEditorReady({
+      doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] },
+      text,
+      selection: { from: 1, to: 1 }
+    });
+    const defaultAction = cloneDefaultAIActions().find((candidate) => candidate.id === prosePatternAuditActionId)!;
+
+    await workspace.runAIAction({ ...defaultAction, preferredSourceId: 'codex-chatgpt' }, 'document', null);
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls.map(([request]) => request.sources
+      .filter((source) => source.participation !== 'off')
+      .map((source) => source.sourceId))).toEqual([
+        ['local-craft'],
+        ['codex-chatgpt']
+      ]);
+  });
+
+  it('publishes AI tell sources progressively but keeps the action running until every source finishes', async () => {
+    const text = 'It is worth noting that a tapestry of details filled the room.';
+    const pending: Array<{
+      request: AIInteractionRequest;
+      resolve: (result: Awaited<ReturnType<AIInteractionService['execute']>>) => void;
+    }> = [];
+    const execute = vi.fn<AIInteractionService['execute']>((request) => new Promise((resolve) => pending.push({ request, resolve })));
+    const workspace = new WorkspaceState(fakeFacade(), { execute }, settingsWithProvider());
+    workspace.branchId = 'main';
+    workspace.documents = [document(text)];
+    workspace.sourceStates = { 'local-craft': 'visible', 'fake-sentinel': 'off', 'codex-chatgpt': 'visible' };
+    workspace.setEditorReady({
+      doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] },
+      text,
+      selection: { from: 1, to: 1 }
+    });
+    const action = cloneDefaultAIActions().find((candidate) => candidate.id === 'ai-tell-audit')!;
+    const arrivalStates: Array<{ sources: string[]; activityState: string | undefined }> = [];
+
+    const actionRun = workspace.runAIAction(action, 'document', null, undefined, (inputs) => {
+      arrivalStates.push({
+        sources: inputs.map((input) => input.source),
+        activityState: workspace.activities.at(-1)?.state
+      });
+    });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    const local = pending.find(({ request }) => request.sources.some((source) => source.sourceId === 'local-craft' && source.participation !== 'off'))!;
+    const remote = pending.find(({ request }) => request.sources.some((source) => source.sourceId === 'codex-chatgpt' && source.participation !== 'off'))!;
+    const stockPhrase = 'It is worth noting that';
+    const localFrom = text.indexOf(stockPhrase);
+    local.resolve({
+      proposals: [{
+        kind: 'annotated_input',
+        payload: {
+          ...proposal(), proposalId: 'local-tell', source: 'local-craft', sourceNumber: 1, sourceKind: 'local',
+          from: localFrom, to: localFrom + stockPhrase.length, sourceText: stockPhrase,
+          type: 'annotation', category: 'ai_tell', variants: [], comment: 'Remove the generic preface.'
+        }
+      }],
+      diagnostics: [],
+      context: local.request.context
+    });
+
+    await vi.waitFor(() => expect(arrivalStates).toHaveLength(1));
+    await vi.waitFor(() => expect(workspace.runs.find((run) => run.sourceStates['local-craft'] !== 'off')?.state).toBe('completed'));
+    expect(workspace.inputs.map((input) => input.source)).toEqual(['local-craft']);
+    expect(workspace.activities.at(-1)?.state).toBe('running');
+    expect(workspace.actionsGenerating).toBe(true);
+    expect(arrivalStates[0]).toEqual({ sources: ['local-craft'], activityState: 'running' });
+
+    const tapestry = 'a tapestry of';
+    const remoteFrom = text.indexOf(tapestry);
+    remote.resolve({
+      proposals: [{
+        kind: 'annotated_input',
+        payload: {
+          ...proposal(), proposalId: 'remote-tell', source: 'codex-chatgpt', sourceNumber: 3, sourceKind: 'ai',
+          from: remoteFrom, to: remoteFrom + tapestry.length, sourceText: tapestry,
+          type: 'annotation', category: 'ai_tell', variants: [], comment: 'Replace the abstract metaphor.'
+        }
+      }],
+      diagnostics: [],
+      context: remote.request.context
+    });
+
+    const adopted = await actionRun;
+    expect(adopted).toHaveLength(2);
+    expect(arrivalStates).toEqual([
+      { sources: ['local-craft'], activityState: 'running' },
+      { sources: ['codex-chatgpt'], activityState: 'running' }
+    ]);
+    expect(workspace.activities.at(-1)?.state).toBe('completed');
+    expect(workspace.actionsGenerating).toBe(false);
   });
 
   it('maps remote whole-document findings back to exact editor positions', async () => {

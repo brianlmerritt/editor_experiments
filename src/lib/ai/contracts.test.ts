@@ -7,7 +7,8 @@ function manifest(): AIContextManifest {
     documentId: 'main',
     sourceRevision: 4,
     target: textTarget('main', 1, 8, 'noticed'),
-    exactText: 'noticed'
+    exactText: 'noticed',
+    formattedText: '*noticed*'
   };
   return {
     workspaceRevision: 4,
@@ -55,8 +56,11 @@ describe('AI context contract', () => {
     });
     const rewritten = structuredClone(requested);
     rewritten.items[1].content = 'Mara loves clocks.';
+    const reformatted = structuredClone(requested);
+    reformatted.target.formattedText = 'noticed';
 
     expect(validReturnedContext(requested, hidden)).toBe(false);
     expect(validReturnedContext(requested, rewritten)).toBe(false);
+    expect(validReturnedContext(requested, reformatted)).toBe(false);
   });
 });
